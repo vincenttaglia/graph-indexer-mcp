@@ -491,6 +491,47 @@ describe('HealthMonitor missing-status distinction (Option B: statusMissing flag
     assert.equal(res.allocations[0]!.statusMissing, false);
   });
 
+  it('excludes statusMissing allocations from recoveryPlan (no false-positive manual_review)', async () => {
+    // Audit follow-up: buildRecoveryPlan previously emitted a
+    // manual_review recovery action for every allocation whose
+    // graph-node status was missing — because statusMissing rows carry
+    // `health: 'failed'` (type-forced default) and the recovery loop only
+    // gated on `health !== 'failed'`. Under the live failure mode where
+    // all 32 allocations were missing from graph-node, the operator
+    // would have received 32 false-positive recovery prompts. The fix
+    // skips statusMissing rows up-front because the correct action is
+    // operator-side (assign the deployment or remove the allocation),
+    // not a graphman recovery command.
+    const alloc = mkAlloc('missing-recovery');
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [alloc],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      // empty statusById → getDeploymentHealth always returns null →
+      // AllocationHealth ends up with statusMissing: true and health: 'failed'.
+      graphNodeClient: fakeGraphNodeClient({ statusById: {} }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({ indexerAddress: INDEXER, urgencyThresholdHours: 6 });
+
+    // Sanity-check: the row IS marked failed+missing in `allocations`...
+    assert.equal(res.allocations[0]!.statusMissing, true);
+    assert.equal(res.allocations[0]!.health, 'failed');
+    // ...but it must NOT appear in recoveryPlan — the fix is the whole
+    // point of this test.
+    assert.equal(res.recoveryPlan.length, 0);
+    assert.equal(
+      res.recoveryPlan.find((r) => r.deploymentId === alloc.subgraphDeployment.id),
+      undefined,
+    );
+  });
+
   it('passes bytes32-form deployment IDs through to graph-node (client normalizes)', async () => {
     // Simulates the live-indexer scenario that motivated the fix: the
     // network subgraph reports allocations with bytes32 deployment IDs

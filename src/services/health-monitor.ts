@@ -678,6 +678,17 @@ export class HealthMonitor {
 
     for (const ah of healths) {
       if (ah.health !== 'failed') continue;
+      // Skip allocations where graph-node has no indexing-status row.
+      // `statusMissing` means the deployment isn't assigned to this
+      // graph-node (or hasn't started indexing), NOT that it failed —
+      // `health: 'failed'` is the type-forced default for the missing
+      // case. Emitting a recovery recommendation here would be a false
+      // positive that bypasses the operator's actual diagnosis path
+      // (assign the deployment, or remove the allocation from the
+      // indexer). Under the live failure mode where every allocation is
+      // missing from graph-node, this guard prevents the operator from
+      // receiving one false-positive recovery prompt per allocation.
+      if (ah.statusMissing) continue;
       if (seen.has(ah.deploymentId)) continue;
       seen.add(ah.deploymentId);
 

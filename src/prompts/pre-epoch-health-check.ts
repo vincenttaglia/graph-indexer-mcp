@@ -37,7 +37,8 @@ Why this is time-sensitive: Path A closability depends on the subgraph being hea
 Call \`run_health_check\` (optional args: \`indexer_address\`, \`urgency_threshold_hours\` defaulting to 6). It returns a \`HealthCheckResult\` with:
 
 - \`timing\` — currentEpoch, hoursUntilNextEpoch, epochLengthBlocks, currentBlock. Use \`hoursUntilNextEpoch\` to decide urgency BEFORE doing anything else.
-- \`allocations\` — per-allocation closability classification (allocationId, deploymentId, allocatedTokens, health, synced, latestBlock, epochStartBlock, closability ('A' | 'B' | 'none'), closabilityReason, fatalErrorDeterministic, lastHealthyBlock, fatalErrorBlock).
+- \`allocations\` — per-allocation closability classification (allocationId, deploymentId, allocatedTokens, health, synced, latestBlock, epochStartBlock, closability ('A' | 'B' | 'none'), closabilityReason, fatalErrorDeterministic, lastHealthyBlock, fatalErrorBlock, statusMissing).
+  - \`statusMissing: boolean\` — true when graph-node has no indexing-status row for this deployment (deployment isn't assigned to the indexer's graph-node, or hasn't started indexing). When true, \`health: 'failed'\` is the type-forced default and should NOT be interpreted as a real failure. Surface these allocations to the operator as a separate "needs investigation" bucket — typically the fix is operator-side: assign the deployment to the node, or remove the allocation if intentionally retired. These rows do NOT appear in \`recoveryPlan\` (a graphman recovery would be the wrong action).
 - \`risk\` — per-allocation RiskAssessment with level ('low' | 'medium' | 'high' | 'critical') and reasons.
 - \`closePlan\` — closable AND worth-closing-now entries (allocationId, deploymentId, path, poiBlock?, reason). This is the operator-facing table.
 - \`blockedFromClose\` — unhealthy/failed allocations that can't be safely closed this epoch (surface as operator-review table).
@@ -110,12 +111,13 @@ For post-close failed deployments, recommend (but do NOT auto-invoke) the \`reco
 
 ## Step 6 — Output the plan and STOP
 
-Produce two markdown tables:
+Produce two (or three) markdown tables:
 
 1. **Close plan (pending operator approval)** — deployment_id, allocated_grt, path (A/B), reason. Leave a \`queued_action_id\` column blank; it will be filled in only after queueing.
-2. **Operator review** — deployment_id, allocated_grt, health, sync_gap, why-not-closable.
+2. **Operator review** — deployment_id, allocated_grt, health, sync_gap, status_missing, why-not-closable. Include a \`status_missing\` column so the operator can tell at a glance which rows have no graph-node indexing-status (where the right action is "assign or remove allocation", not "recover").
+3. **Needs investigation (status missing)** — OPTIONAL separate table when any allocation has \`statusMissing: true\`: deployment_id, allocated_grt, suggested_action ("assign deployment to graph-node" or "remove allocation if intentionally retired"). Do NOT recommend graphman recovery for these rows — they will not appear in \`recoveryPlan\` for that reason.
 
-Below the tables, summarize: time-to-flip, total GRT proposed to close this epoch, count by path, count requiring operator review.
+Below the tables, summarize: time-to-flip, total GRT proposed to close this epoch, count by path, count requiring operator review, count with \`statusMissing\`.
 
 **STOP HERE.** Present the close plan as a table and wait for the operator to explicitly say "proceed", "queue these", or otherwise approve the plan. Do NOT call \`queue_unallocate\` until the operator approves. Do NOT call \`approve_actions\` — that is always operator-gated.
 

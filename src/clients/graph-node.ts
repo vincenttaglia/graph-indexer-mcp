@@ -255,10 +255,18 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     // only recognizes CIDv0 (`Qm...`) deployment IDs, but callers may pass
     // bytes32 (`0x...`) form from the network subgraph. Convert before
     // building the cache key so both encodings share a cache slot.
+    //
+    // Dedupe AFTER normalization so that, e.g., `[bytes32_a, Qm_a]` (same
+    // logical deployment in two encodings) collapses into a single id and
+    // shares the cache slot with `[Qm_a]`. Without the dedupe, the two
+    // input shapes produced different cache keys (`'Qma,Qma'` vs `'Qma'`)
+    // for the same underlying query — cache fragmentation, not a
+    // correctness bug.
     let normalizedIds: string[] | undefined;
     if (deploymentIds && deploymentIds.length > 0) {
       try {
-        normalizedIds = deploymentIds.map(toQmDeploymentId);
+        const normalized = deploymentIds.map(toQmDeploymentId);
+        normalizedIds = Array.from(new Set(normalized));
       } catch (err) {
         throw new Error(
           `Invalid deployment ID format: ${err instanceof Error ? err.message : String(err)}`,
