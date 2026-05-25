@@ -18,11 +18,14 @@
  *   indexer_reward_per_year = reward_share * indexer_share
  *   apr               = indexer_reward_per_year / new_allocation
  *
- * `networkGRTIssuancePerBlock` is the canonical field on the live mainnet
- * network subgraph. It is the per-block GRT issuance dedicated to indexing
- * rewards (wei). To annualize we multiply by `blocks_per_year`, a chain-
- * specific constant (default ~2,628,000 for a 12s block time — Arbitrum and
- * other host chains have different block cadences; callers can override).
+ * `networkGRTIssuancePerBlock` is the canonical field on the network
+ * subgraph. It is the per-block GRT issuance dedicated to indexing rewards
+ * (wei). To annualize we multiply by `blocks_per_year`, a chain-specific
+ * constant that the caller MUST supply: the Network Subgraph can be hosted
+ * on multiple chains (Ethereum mainnet ~12s blocks ≈ 2,629,800/year;
+ * Arbitrum One ~3s nominal blocks ≈ 10,512,000/year), and a wrong default
+ * would silently skew APR by ~4x. Stage 3 service-layer code will source
+ * this value from chain configuration; for now it is a required input.
  *
  * Reward-denied deployments (`deniedAt != 0`) MUST be excluded from APR per
  * design §4.1. We surface `apr: 0` with `denied: true` so the caller can see
@@ -49,17 +52,6 @@ export interface NetworkToolDeps {
 }
 
 const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
-
-/**
- * Default blocks-per-year for annualizing `networkGRTIssuancePerBlock`.
- *
- * Mainnet Ethereum: 12s block time -> 365.25 * 24 * 3600 / 12 ≈ 2,629,800.
- * The mainnet network subgraph is the canonical source for issuance, so we
- * default to that cadence. Callers can override via the `blocks_per_year`
- * input on `calculate_deployment_apr` when querying a non-mainnet deployment
- * of the subgraph (e.g. Arbitrum-anchored variants).
- */
-const DEFAULT_BLOCKS_PER_YEAR = 2_629_800;
 
 /** Map the lowercase user-facing filter to the subgraph enum. */
 function mapStatusFilter(
@@ -235,13 +227,15 @@ export function registerNetworkTools(
         .string()
         .regex(/^\d+$/, 'allocation_amount must be a non-negative integer string in wei'),
       blocks_per_year: z
-        .number()
+        .coerce.number()
         .int()
         .positive()
-        .optional()
         .describe(
-          'Blocks per year used to annualize per-block issuance. ' +
-            `Defaults to ${DEFAULT_BLOCKS_PER_YEAR} (12s mainnet block time).`,
+          'Blocks per year for the chain hosting the Network Subgraph. ' +
+            'Required because APR depends on per-block issuance × blocks/year. ' +
+            'Reference values: Ethereum mainnet ~2629800 (12s blocks), ' +
+            'Arbitrum One ~10512000 (3s nominal). Stage 3 service-layer code ' +
+            'will source this from chain configuration.',
         ),
     },
     handler: async ({ deployment_id, allocation_amount, blocks_per_year }, extra) => {
@@ -279,7 +273,7 @@ export function registerNetworkTools(
         });
       }
 
-      const blocksPerYear = BigInt(blocks_per_year ?? DEFAULT_BLOCKS_PER_YEAR);
+      const blocksPerYear = BigInt(blocks_per_year);
 
       const signalled = parseWei('deployment.signalledTokens', deployment.signalledTokens);
       const totalSignalled = parseWei(
