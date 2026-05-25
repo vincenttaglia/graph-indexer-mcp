@@ -114,7 +114,7 @@ Note: `pg` does not natively observe `AbortSignal` for in-flight queries (see TO
 
 ### "`graphman_clear_call_cache` rejected my call"
 
-`clear_call_cache` requires `confirm: true` AND exactly one of:
+`graphman_clear_call_cache` requires `confirm: true` AND exactly one of:
 
 - `remove_all: true` (alone, no `from`/`to`).
 - A complete `from`/`to` range with `to >= from`.
