@@ -85,6 +85,18 @@ export interface AllocationHealth {
    *   - `null`  → no fatalError, or status unknown
    */
   fatalErrorDeterministic: boolean | null;
+  /**
+   * `chains[0].lastHealthyBlock.number` from graph-node when reported. This
+   * is the last block at which the deployment was healthy before the failure
+   * — the canonical POI block for Path B closes.
+   */
+  lastHealthyBlock: number | null;
+  /**
+   * `fatalError.block.number` from graph-node when reported — the block at
+   * which the deterministic failure occurred. The last known good block is
+   * `fatalErrorBlock - 1`.
+   */
+  fatalErrorBlock: number | null;
 }
 
 export interface EpochTiming {
@@ -190,13 +202,24 @@ const LARGE_ALLOCATION_WEI = 100_000n * 10n ** 18n;
 /**
  * One row in the conservative pattern table. We only confidently classify
  * common, well-known transient/RPC patterns — anything else falls through to
- * `manual_review`. Patterns are case-insensitive substring matches against
- * `fatalError.message`. See design §3.2 ("Auto-Heal") for the broader catalog.
+ * `manual_review`. Patterns are matched against `fatalError.message`.
+ *
+ * Two matchers are supported (a row supplies exactly one):
+ *   - `needles`: ALL substrings must be present (case-insensitive). Use when
+ *     a single conjunction of phrases is sufficient.
+ *   - `pattern`: full regex against the original message. Use when ordering,
+ *     word boundaries, or OR semantics matter. Patterns SHOULD be specific
+ *     enough to avoid matching negated/explanatory messages
+ *     (e.g. "no reorg detected" should NOT trigger `clear_call_cache`).
+ *
+ * See design §3.2 ("Auto-Heal") for the broader catalog.
  */
 interface RecoveryHeuristic {
   type: RecoveryActionType;
   /** Substrings, ALL of which must be present in the lowercased message. */
-  needles: string[];
+  needles?: string[];
+  /** Regex (case-insensitive recommended) matched against the raw message. */
+  pattern?: RegExp;
   rationale: string;
   /** Builds the args object given the failed deployment + status. */
   buildArgs: (ctx: RecoveryContext) => Record<string, unknown>;
@@ -217,10 +240,14 @@ const RECOVERY_HEURISTICS: RecoveryHeuristic[] = [
       'Writer-poisoned errors are transient and clear on restart (design §3.2 high-confidence pattern).',
     buildArgs: (ctx) => ({ deploymentId: ctx.deploymentId }),
   },
-  // "store error: deployment head ... not found" → rewind 5 blocks (high confidence).
+  // "store error: deployment head ... not found" → rewind 5 blocks. Requires
+  // all three signals (store error + deployment head + not found) in any
+  // order so we don't fire on e.g. "store error: timeout" or generic
+  // "deployment head advanced".
   {
     type: 'rewind',
-    needles: ['store error', 'deployment head'],
+    pattern:
+      /(store error.*deployment head.*not found|deployment head.*not found.*store error|store error.*not found.*deployment head|not found.*store error.*deployment head|deployment head.*store error.*not found|not found.*deployment head.*store error)/i,
     rationale:
       'Store-error "deployment head not found" responds to a small rewind from the failure block.',
     buildArgs: (ctx) => ({
@@ -233,10 +260,11 @@ const RECOVERY_HEURISTICS: RecoveryHeuristic[] = [
     }),
   },
   // RPC corruption: missing block / header → check_blocks first, then
-  // operator decides whether to truncate + rewind.
+  // operator decides whether to truncate + rewind. Word-boundary matches
+  // avoid e.g. "BlockNotFound" inside an unrelated identifier.
   {
     type: 'check_blocks',
-    needles: ['block not found'],
+    pattern: /\bblock not found\b/i,
     rationale:
       'Missing-block errors point at RPC/cache corruption; verify with `graphman chain check-blocks` before any rewind.',
     buildArgs: (ctx) => ({
@@ -246,7 +274,7 @@ const RECOVERY_HEURISTICS: RecoveryHeuristic[] = [
   },
   {
     type: 'check_blocks',
-    needles: ['header not found'],
+    pattern: /\bheader not found\b/i,
     rationale:
       'Header-not-found is RPC/cache corruption; verify with `graphman chain check-blocks` first.',
     buildArgs: (ctx) => ({
@@ -254,10 +282,13 @@ const RECOVERY_HEURISTICS: RecoveryHeuristic[] = [
       blockNumber: ctx.failureBlock,
     }),
   },
-  // Reorg-related cache poisoning → clear_call_cache (medium-high confidence).
+  // Reorg-related cache poisoning → clear_call_cache. Require a SPECIFIC
+  // signal: "reorg detected" OR "reverted block". A user-facing log like
+  // "no reorg detected" or "reorg-safe path taken" must NOT trigger this —
+  // the negative lookbehind rejects negated "no(t)? (yet )?reorg detected".
   {
     type: 'clear_call_cache',
-    needles: ['reorg'],
+    pattern: /(?<!\bno\s)(?<!\bnot\s)(?<!\bnot yet\s)\breorg detected\b|\breverted block\b/i,
     rationale:
       'Reorg-related failures often leave poisoned call-cache entries; clear the affected range, then rewind.',
     buildArgs: (ctx) => ({
@@ -400,6 +431,8 @@ export class HealthMonitor {
           closabilityReason:
             'Classification failed — see errors list. Operator review required.',
           fatalErrorDeterministic: null,
+          lastHealthyBlock: null,
+          fatalErrorBlock: null,
         });
       }
     });
@@ -408,8 +441,17 @@ export class HealthMonitor {
     // Step 4: assess risk
     // -----------------------------------------------------------------------
 
+    // Compute the median allocation size as a fallback "large" threshold when
+    // the absolute LARGE_ALLOCATION_WEI floor doesn't fire (e.g. on a small
+    // indexer where every allocation is < 100k GRT but some are still
+    // disproportionately large for THIS indexer). See assessRisk() for the
+    // tiering matrix.
+    const medianAllocatedTokens = median(
+      allocationHealths.map((ah) => ah.allocatedTokens),
+    );
+
     const risk = allocationHealths.map((ah) =>
-      assessRisk(ah, timing, urgencyThresholdHours),
+      assessRisk(ah, timing, urgencyThresholdHours, medianAllocatedTokens),
     );
 
     // -----------------------------------------------------------------------
@@ -449,22 +491,24 @@ export class HealthMonitor {
         continue;
       }
 
-      // Path B
+      // Path B — POI is the last KNOWN GOOD block (immediately before the
+      // deterministic failure), not the most recently processed block. Prefer
+      // graph-node's `chains[].lastHealthyBlock`; fall back to
+      // `fatalError.block - 1`; omit entirely when neither is reported (the
+      // closabilityReason already carries the manual-verify warning from
+      // classify()).
       const planEntry: CloseActionPlan = {
         allocationId: ah.allocationId,
         deploymentId: ah.deploymentId,
         path: 'B',
         reason: ah.closabilityReason,
       };
-      if (ah.latestBlock !== null) {
-        // Best estimate of last-known-good block: graph-node returns
-        // `lastHealthyBlock` when health is degraded; we don't have it here
-        // because we collapsed the chain data into latestBlock+health. Use
-        // latestBlock as the conservative POI block (it is the head that
-        // was actually indexed). The composite tool MAY refine using
-        // `lastHealthyBlock` from a fresh getDeploymentHealth call.
-        planEntry.poiBlock = ah.latestBlock;
+      if (ah.lastHealthyBlock !== null) {
+        planEntry.poiBlock = ah.lastHealthyBlock;
+      } else if (ah.fatalErrorBlock !== null) {
+        planEntry.poiBlock = Math.max(0, ah.fatalErrorBlock - 1);
       }
+      // else: poiBlock intentionally omitted — operator must verify manually.
       closePlan.push(planEntry);
     }
 
@@ -529,19 +573,28 @@ export class HealthMonitor {
         closabilityReason:
           'graph-node has no indexing-status row for this deployment; operator review required (deployment may not be assigned to this node).',
         fatalErrorDeterministic: null,
+        lastHealthyBlock: null,
+        fatalErrorBlock: null,
       };
     }
 
     const latestBlock = pickLatestBlock(status, chain);
+    const lastHealthyBlock = pickLastHealthyBlock(status, chain);
     const fatalDeterministic = status.fatalError
       ? Boolean(status.fatalError.deterministic)
       : null;
+    const fatalErrorBlock =
+      status.fatalError?.block?.number !== undefined
+        ? safeToInt(status.fatalError.block.number)
+        : null;
 
     const { closability, reason } = classify({
       health: status.health,
       latestBlock,
       epochStartBlock,
       fatalError: status.fatalError,
+      lastHealthyBlock,
+      fatalErrorBlock,
     });
 
     return {
@@ -555,6 +608,8 @@ export class HealthMonitor {
       closability,
       closabilityReason: reason,
       fatalErrorDeterministic: fatalDeterministic,
+      lastHealthyBlock,
+      fatalErrorBlock,
     };
   }
 
@@ -650,6 +705,8 @@ interface ClassifyInput {
   latestBlock: number | null;
   epochStartBlock: number | null;
   fatalError?: SubgraphError;
+  lastHealthyBlock: number | null;
+  fatalErrorBlock: number | null;
 }
 
 interface ClassifyOutput {
@@ -662,7 +719,14 @@ interface ClassifyOutput {
  * it can be unit-tested without instantiating the service.
  */
 function classify(input: ClassifyInput): ClassifyOutput {
-  const { health, latestBlock, epochStartBlock, fatalError } = input;
+  const {
+    health,
+    latestBlock,
+    epochStartBlock,
+    fatalError,
+    lastHealthyBlock,
+    fatalErrorBlock,
+  } = input;
 
   // If we couldn't resolve the epoch-start block at all, we can't apply the
   // matrix — fall through to operator review.
@@ -729,13 +793,19 @@ function classify(input: ClassifyInput): ClassifyOutput {
     };
   }
 
+  const pathBNoBlockSuffix =
+    lastHealthyBlock === null && fatalErrorBlock === null
+      ? ' Path B requires operator-verified POI block — neither lastHealthyBlock nor fatalError.block was reported by graph-node, manual cross-verify with other indexers is required.'
+      : '';
+
   if (aboveEpochStart) {
     if (deterministic) {
       return {
         closability: 'B',
         reason:
           `Failed with deterministic error above epoch start (latestBlock=${latestBlock} >= epochStartBlock=${epochStartBlock}). ` +
-          'Path B close — operator MUST cross-verify the failure block with other indexers before submitting POI.',
+          'Path B close — operator MUST cross-verify the failure block with other indexers before submitting POI.' +
+          pathBNoBlockSuffix,
       };
     }
     return {
@@ -752,7 +822,8 @@ function classify(input: ClassifyInput): ClassifyOutput {
       closability: 'B',
       reason:
         `Failed with deterministic error below epoch start (latestBlock=${latestBlock} < epochStartBlock=${epochStartBlock}). ` +
-        'Path B close — POI is the last good block; operator MUST verify with other indexers.',
+        'Path B close — POI is the last good block; operator MUST verify with other indexers.' +
+        pathBNoBlockSuffix,
     };
   }
 
@@ -787,6 +858,23 @@ function pickLatestBlock(
   if (!row) row = status.chains.find((c) => c.latestBlock !== undefined);
   if (!row?.latestBlock) return null;
   return safeToInt(row.latestBlock.number);
+}
+
+function pickLastHealthyBlock(
+  status: SubgraphIndexingStatus,
+  chain: string | null,
+): number | null {
+  // Mirror pickLatestBlock: prefer the chosen chain, fall back to whichever
+  // row reports a lastHealthyBlock.
+  let row: ChainIndexingStatus | undefined;
+  if (chain) {
+    row = status.chains.find((c) => c.network === chain);
+  }
+  if (!row?.lastHealthyBlock) {
+    row = status.chains.find((c) => c.lastHealthyBlock !== undefined);
+  }
+  if (!row?.lastHealthyBlock) return null;
+  return safeToInt(row.lastHealthyBlock.number);
 }
 
 interface TimingInput {
@@ -836,63 +924,126 @@ function computeTiming(input: TimingInput): EpochTiming {
   };
 }
 
+/**
+ * Risk tier matrix (design §4.2 — corrected):
+ *
+ *   critical: failingHealth AND isLargeAlloc AND urgent
+ *   high:     (failingHealth AND isLargeAlloc)
+ *             OR (failingHealth AND urgent)
+ *             OR (notClosable AND failingHealth)
+ *   medium:   failingHealth (any one of: large, urgent, notClosable alone)
+ *   low:      healthy
+ *
+ *   failingHealth = health === 'unhealthy' || health === 'failed'
+ *   isLargeAlloc  = allocatedTokens >= LARGE_ALLOCATION_WEI (absolute floor)
+ *                   OR allocatedTokens > 2 * medianAllocatedTokens (relative)
+ *                   OR (fallback: allocatedTokens > 0n) if no medians available
+ *   urgent        = hoursUntilNextEpoch < urgencyThresholdHours
+ *   notClosable   = closability === 'none' && failingHealth
+ *
+ * NOTE: notClosable is INTENTIONALLY no longer an automatic bump to critical.
+ * Those allocations also appear in `blockedFromClose` for explicit operator
+ * routing; their risk tier reflects size/urgency honestly.
+ */
 function assessRisk(
   ah: AllocationHealth,
   timing: EpochTiming,
   urgencyThresholdHours: number,
+  medianAllocatedTokens: bigint,
 ): RiskAssessment {
   const reasons: string[] = [];
-  let level: RiskLevel = 'low';
 
-  const isLargeAlloc = ah.allocatedTokens >= LARGE_ALLOCATION_WEI;
+  const failingHealth = ah.health === 'unhealthy' || ah.health === 'failed';
   const urgent =
     !Number.isNaN(timing.hoursUntilNextEpoch) &&
     timing.hoursUntilNextEpoch < urgencyThresholdHours;
+  const notClosable = ah.closability === 'none' && failingHealth;
 
-  if (ah.health === 'failed') {
-    level = bump(level, 'high');
-    reasons.push('Deployment health is FAILED.');
-  } else if (ah.health === 'unhealthy') {
-    level = bump(level, 'medium');
-    reasons.push('Deployment health is unhealthy (non-fatal errors).');
+  // Determine "large":
+  //   1. Absolute floor (100k GRT) — best signal across indexers.
+  //   2. Relative floor (>2x current-run median) — catches "large for THIS
+  //      indexer" on smaller stakes.
+  //   3. Fallback (> 0) — degrade gracefully when we have no comparator.
+  let isLargeAlloc: boolean;
+  let largeReason: string;
+  if (ah.allocatedTokens >= LARGE_ALLOCATION_WEI) {
+    isLargeAlloc = true;
+    largeReason = `Large allocation (>= ${LARGE_ALLOCATION_WEI.toString()} wei / 100k GRT).`;
+  } else if (medianAllocatedTokens > 0n && ah.allocatedTokens > medianAllocatedTokens * 2n) {
+    isLargeAlloc = true;
+    largeReason = `Allocation is >2x the median for this run (median=${medianAllocatedTokens.toString()} wei, this=${ah.allocatedTokens.toString()} wei).`;
+  } else if (medianAllocatedTokens === 0n && ah.allocatedTokens > 0n) {
+    isLargeAlloc = true;
+    largeReason = 'No comparator available; treating any non-zero allocation as large (degraded fallback).';
   } else {
+    isLargeAlloc = false;
+    largeReason = '';
+  }
+
+  // Healthy → low, no further tiering.
+  if (!failingHealth) {
     reasons.push('Deployment is healthy.');
+    return { allocationId: ah.allocationId, level: 'low', reasons };
   }
 
-  if (isLargeAlloc) {
-    level = bump(level, 'medium');
-    reasons.push(
-      `Large allocation (>= ${LARGE_ALLOCATION_WEI.toString()} wei / 100k GRT).`,
-    );
-  }
-
+  // From here down: failingHealth is true.
+  reasons.push(
+    ah.health === 'failed'
+      ? 'Deployment health is FAILED.'
+      : 'Deployment health is unhealthy (non-fatal errors).',
+  );
+  if (isLargeAlloc) reasons.push(largeReason);
   if (urgent) {
-    level = bump(level, 'high');
     reasons.push(
       `Less than ${urgencyThresholdHours}h until epoch flip (estimated ${timing.hoursUntilNextEpoch.toFixed(1)}h).`,
     );
   }
+  if (notClosable) {
+    reasons.push(
+      'Allocation cannot be safely closed this epoch (closability=none); surfaced via blockedFromClose for operator review.',
+    );
+  }
 
-  if (ah.closability === 'none' && ah.health !== 'healthy') {
-    level = bump(level, 'critical');
-    reasons.push('Allocation cannot be safely closed this epoch.');
+  // Apply the matrix in priority order.
+  let level: RiskLevel;
+  if (isLargeAlloc && urgent) {
+    level = 'critical';
+    reasons.push('Tier: critical — failingHealth AND large AND urgent.');
+  } else if (isLargeAlloc || urgent || notClosable) {
+    level = 'high';
+    const triggers: string[] = [];
+    if (isLargeAlloc) triggers.push('large');
+    if (urgent) triggers.push('urgent');
+    if (notClosable) triggers.push('notClosable');
+    reasons.push(`Tier: high — failingHealth AND (${triggers.join(' or ')}).`);
+  } else {
+    level = 'medium';
+    reasons.push('Tier: medium — failingHealth without any of (large, urgent, notClosable).');
   }
 
   return { allocationId: ah.allocationId, level, reasons };
 }
 
-const RISK_ORDER: RiskLevel[] = ['low', 'medium', 'high', 'critical'];
-function bump(current: RiskLevel, candidate: RiskLevel): RiskLevel {
-  return RISK_ORDER.indexOf(candidate) > RISK_ORDER.indexOf(current)
-    ? candidate
-    : current;
+/**
+ * BigInt median. Returns 0n on empty input. For even-length inputs returns
+ * the lower of the two middle values (avoids fractional BigInt math).
+ */
+function median(values: bigint[]): bigint {
+  if (values.length === 0) return 0n;
+  const sorted = [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const mid = Math.floor((sorted.length - 1) / 2);
+  return sorted[mid] ?? 0n;
 }
 
 function matchHeuristic(message: string): RecoveryHeuristic | null {
   if (!message) return null;
   const haystack = message.toLowerCase();
   for (const h of RECOVERY_HEURISTICS) {
-    if (h.needles.every((n) => haystack.includes(n))) return h;
+    if (h.pattern) {
+      if (h.pattern.test(message)) return h;
+      continue;
+    }
+    if (h.needles && h.needles.every((n) => haystack.includes(n))) return h;
   }
   return null;
 }
