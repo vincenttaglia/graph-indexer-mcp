@@ -42,7 +42,7 @@ Mode: ${dryRun ? '**dry_run = true** — produce a plan only; do NOT invoke any 
 
 Call \`run_discovery\` with **required** args:
 
-- \`blocks_per_year\` — Ethereum mainnet ~2,628,000; Arbitrum One ~10,512,000 at 3s block time. (Discovery shares this entry point with new-subgraph discovery — needed for APR projection on the opportunity half. Cleanup uses the response regardless.)
+- \`blocks_per_year\` — used to annualize \`networkGRTIssuancePerBlock\` for the opportunity half of discovery. Recommended value: **2,102,400** (matches indexer-tools-v4 canonical formula — 5760 blocks/day × 365). This value applies for both Ethereum mainnet and Arbitrum, because \`networkGRTIssuancePerBlock\` is denominated per Ethereum block regardless of which chain hosts the Network Subgraph. (Discovery shares this entry point with new-subgraph discovery — needed for APR projection on the opportunity half. Cleanup uses the response regardless.)
 - \`typical_allocation_grt\` — GRT decimal. Reasonable default: \`total_stake_grt / max_allocations\` from \`get_infrastructure_overview\` / \`indexer://config\`.
 
 Optional: \`indexer_address\`, \`max_candidates\`, \`min_signal_grt\`.
