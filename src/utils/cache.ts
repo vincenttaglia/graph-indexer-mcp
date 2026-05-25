@@ -36,9 +36,15 @@ interface CacheEntry<V> {
  * callers can still throw to *their* await via their own `opts.signal`, but
  * cancelling theirs does NOT cancel the upstream fetch (other coalesced
  * callers still depend on it).
+ *
+ * `generation` is captured at registration. If `invalidate`/`clear`/`set`
+ * bumps the per-key generation while the fetch is in flight, the resolved
+ * value is silently dropped instead of overwriting fresh state — this
+ * prevents a pre-mutation read from clobbering a post-mutation invalidate.
  */
 interface InflightEntry<V> {
   promise: Promise<V>;
+  generation: number;
 }
 
 export class TtlCache<K, V> {
@@ -47,11 +53,31 @@ export class TtlCache<K, V> {
   private readonly label: string;
   private readonly store: Map<K, CacheEntry<V>> = new Map();
   private readonly inflight: Map<K, InflightEntry<V>> = new Map();
+  /**
+   * Per-key monotonic counter. Bumped by `invalidate`/`clear`/`set` so any
+   * in-flight fetch registered against an older generation knows its result
+   * is now stale and must NOT be written back to `store`. Without this, a
+   * graphman mutation's `invalidate(deploymentId)` could be silently
+   * defeated by a pre-mutation read settling afterward.
+   */
+  private readonly generations: Map<K, number> = new Map();
 
   constructor(opts: TtlCacheOptions) {
     this.ttlMs = opts.ttlMs;
     this.maxEntries = opts.maxEntries;
     this.label = opts.label ?? 'cache';
+  }
+
+  /** Increment and return the per-key generation; creates the entry if absent. */
+  private bumpGeneration(key: K): number {
+    const next = (this.generations.get(key) ?? 0) + 1;
+    this.generations.set(key, next);
+    return next;
+  }
+
+  /** Current generation for `key`, defaulting to 0 if never seen. */
+  private currentGeneration(key: K): number {
+    return this.generations.get(key) ?? 0;
   }
 
   /** Returns the cached value if fresh, otherwise undefined (and evicts the stale entry). */
@@ -72,8 +98,25 @@ export class TtlCache<K, V> {
     return this.get(key) !== undefined;
   }
 
-  /** Stores `value` with a timestamp of now. Honors `maxEntries` eviction. */
+  /**
+   * Stores `value` with a timestamp of now. Honors `maxEntries` eviction.
+   *
+   * Bumps the per-key generation so any concurrently in-flight fetch will
+   * NOT clobber `value` when it eventually resolves. Coalesced callers
+   * already awaiting that in-flight still receive the older value for
+   * their own use; only the cache write is suppressed.
+   */
   set(key: K, value: V): void {
+    this.bumpGeneration(key);
+    this.writeStore(key, value);
+  }
+
+  /**
+   * Internal store write that does NOT bump the generation. Used by
+   * `getOrFetch` to persist a freshly-resolved value when its captured
+   * generation still matches the current generation.
+   */
+  private writeStore(key: K, value: V): void {
     // Re-insert to refresh insertion order (so eviction picks truly oldest).
     if (this.store.has(key)) this.store.delete(key);
     this.store.set(key, { value, expiresAt: Date.now() + this.ttlMs });
@@ -84,14 +127,33 @@ export class TtlCache<K, V> {
     }
   }
 
-  /** Evicts one entry. No-op if absent. */
+  /**
+   * Evicts one entry. No-op for the store if absent, but ALWAYS bumps the
+   * per-key generation and drops the in-flight slot so any pre-invalidation
+   * fetch settling afterward cannot resurrect stale data.
+   */
   invalidate(key: K): void {
     this.store.delete(key);
+    this.bumpGeneration(key);
+    // Future calls re-fetch immediately rather than coalescing onto a
+    // possibly-stale in-flight; the existing in-flight promise still
+    // resolves for any awaiters, but its result will be dropped.
+    this.inflight.delete(key);
   }
 
-  /** Evicts everything. Does NOT cancel in-flight fetches. */
+  /**
+   * Evicts everything. Does NOT cancel in-flight fetches, but bumps every
+   * known key's generation so their resolved values cannot repopulate.
+   */
   clear(): void {
     this.store.clear();
+    // Bump every key we've ever tracked — including keys currently in flight
+    // but absent from `store` (e.g. first-time miss still resolving).
+    const keys = new Set<K>();
+    for (const k of this.generations.keys()) keys.add(k);
+    for (const k of this.inflight.keys()) keys.add(k);
+    for (const k of keys) this.bumpGeneration(k);
+    this.inflight.clear();
   }
 
   /**
@@ -135,18 +197,39 @@ export class TtlCache<K, V> {
     process.stderr.write(`[cache ${this.label} ${tag}] miss -> fetch\n`);
     const fetchOpts: { signal?: AbortSignal } = {};
     if (opts?.signal) fetchOpts.signal = opts.signal;
-    const promise = (async () => {
+    // Capture the generation at registration. If invalidate/clear/set
+    // bumps this key's generation while we're fetching, our resolved value
+    // is stale and MUST NOT be written back to `store`.
+    const gen = this.currentGeneration(key);
+    let promise!: Promise<V>;
+    promise = (async () => {
       try {
         const value = await fetcher(fetchOpts);
-        this.set(key, value);
+        if (this.currentGeneration(key) === gen) {
+          // Our generation is still current — safe to persist. Use the
+          // internal write so we don't bump the generation ourselves
+          // (which would invalidate any other in-flight fetches that
+          // started at the same generation).
+          this.writeStore(key, value);
+        } else {
+          process.stderr.write(
+            `[cache ${this.label} ${tag}] superseded (gen ${gen} != ${this.currentGeneration(key)}); dropping fetched value\n`,
+          );
+        }
         return value;
       } finally {
-        // Always clear the inflight slot — a forgotten clear on rejection
-        // would pin a failed promise forever and break future retries.
-        this.inflight.delete(key);
+        // Only clear the inflight slot if it's still us — invalidate()
+        // may have already removed/replaced it with a newer fetch, and
+        // we must not delete a successor's slot.
+        if (this.inflight.get(key)?.promise === promise) {
+          this.inflight.delete(key);
+        }
       }
     })();
-    this.inflight.set(key, { promise });
+    this.inflight.set(key, { promise, generation: gen });
+    // First caller: their signal is already forwarded into `fetcher` via
+    // `fetchOpts.signal`, so a cancellation propagates all the way down to
+    // the underlying HTTP request. No `raceWithSignal` wrapping needed.
     return promise;
   }
 

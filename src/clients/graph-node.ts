@@ -223,6 +223,16 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     deploymentIds?: string[],
     callOpts?: GraphNodeCallOpts,
   ): Promise<SubgraphIndexingStatus[]> {
+    // Short-circuit: an explicit empty filter means "no deployments asked
+    // for", so return [] without an upstream call. graph-node's GraphQL
+    // would treat `subgraphs: []` ambiguously (some versions return "all",
+    // mirroring `null`); short-circuiting also keeps the cache key for
+    // `[]` distinct from `undefined` ('all'), since previously both
+    // collided on key 'all' with identical payloads.
+    if (deploymentIds !== undefined && deploymentIds.length === 0) {
+      return [];
+    }
+
     // Cache key:
     //   - 'all' when no filter (graph-node returns every tracked deployment)
     //   - sorted-and-joined deployment IDs otherwise, so equivalent filters
@@ -236,7 +246,8 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
       async (fetchOpts) => {
         // graph-node treats `subgraphs: null` (or omitted) as "return everything".
         // Pass `null` only when the caller didn't filter so we don't send `[]` and
-        // get back an empty list.
+        // get back an empty list. (The `[]` input path is short-circuited above,
+        // so by here `deploymentIds` is either undefined or non-empty.)
         const variables = {
           subgraphs: deploymentIds && deploymentIds.length > 0 ? deploymentIds : null,
         };
