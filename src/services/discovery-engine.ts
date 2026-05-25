@@ -613,8 +613,13 @@ export class DiscoveryEngine {
         if (v.deployment_id) {
           // `| 0` would truncate to a signed int32 (~2.1B max). Real-world
           // 30-day query counts on top deployments exceed that comfortably,
-          // so use BigInt directly. `query_count` is typed `number` in the
-          // QoS client; guard against NaN / Infinity / negatives.
+          // so use BigInt. `query_count` is typed `number` in the QoS
+          // client (which coerces stringified BigInts at its boundary via
+          // Number(...) — so precision past ~2^53 is already lost upstream;
+          // see src/clients/qos-subgraph.ts:numOrZero. TODO(stage4): when
+          // the QoS client preserves string precision end-to-end, parse
+          // `v.query_count` here as BigInt directly. Guard against NaN /
+          // Infinity / negatives.
           const n = Number(v.query_count);
           const safe = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
           queryVolumeById.set(v.deployment_id, BigInt(safe));
