@@ -97,6 +97,17 @@ export interface AllocationHealth {
    * `fatalErrorBlock - 1`.
    */
   fatalErrorBlock: number | null;
+  /**
+   * `true` when graph-node returned no indexing-status row for this
+   * deployment. The deployment isn't actually failed — it may simply not be
+   * assigned to this node, or hasn't started syncing yet. Consumers MUST
+   * check this BEFORE acting on `health: 'failed'`. We keep `health` as
+   * `'failed'` in this case so existing risk-tier / close-plan logic still
+   * surfaces the row to the operator (rather than silently demoting to
+   * `'low'`), but the human-readable `closabilityReason` makes the
+   * missing-status situation explicit.
+   */
+  statusMissing: boolean;
 }
 
 export interface EpochTiming {
@@ -461,6 +472,7 @@ export class HealthMonitor {
           fatalErrorDeterministic: null,
           lastHealthyBlock: null,
           fatalErrorBlock: null,
+          statusMissing: false,
         });
       }
     });
@@ -607,6 +619,10 @@ export class HealthMonitor {
         fatalErrorDeterministic: null,
         lastHealthyBlock: null,
         fatalErrorBlock: null,
+        // Distinct from real failures: graph-node simply doesn't know this
+        // deployment. Consumers must check this before treating health=failed
+        // as a deterministic problem.
+        statusMissing: true,
       };
     }
 
@@ -642,6 +658,7 @@ export class HealthMonitor {
       fatalErrorDeterministic: fatalDeterministic,
       lastHealthyBlock,
       fatalErrorBlock,
+      statusMissing: false,
     };
   }
 
