@@ -428,10 +428,18 @@ export class AllocationOptimizer {
     const qosVolumeById = new Map<string, bigint>();
     if (qosRes.status === 'fulfilled') {
       for (const row of qosRes.value) {
-        // queryCount is `number` on the QoS client surface — coerce
-        // defensively (truncating any fractional component).
-        const v = Math.max(0, Math.trunc(row.query_count));
-        qosVolumeById.set(row.deployment_id, BigInt(v));
+        // query_count is a BigInt-as-string on the QoS client surface. Parse
+        // directly via BigInt; truncate any fractional component and clamp
+        // negatives/malformed strings to zero defensively.
+        const raw = (row.query_count ?? '0').trim();
+        const intPart = (raw.startsWith('-') ? '0' : raw.split('.')[0]) ?? '0';
+        let v: bigint;
+        try {
+          v = BigInt(intPart);
+        } catch {
+          v = 0n;
+        }
+        qosVolumeById.set(row.deployment_id, v < 0n ? 0n : v);
       }
     } else {
       errors.push(`qos.getTopQueriedDeployments failed: ${errString(qosRes.reason)}`);

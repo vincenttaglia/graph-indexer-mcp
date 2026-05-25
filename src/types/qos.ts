@@ -1,28 +1,36 @@
 /**
- * Types for the QoS (Quality of Service) subgraph.
+ * Types for the QoS (Quality of Service) Oracle subgraph.
  *
- * The QoS subgraph aggregates per-query performance data emitted by gateways
- * (latency, success rate, blocks-behind) into 5-minute buckets and posts them
- * on-chain. We re-expose three coarse-grained views:
+ * The QoS Oracle aggregates per-query performance data emitted by gateways
+ * into DAILY buckets and posts them on-chain. The live schema (verified
+ * against Dtr9rETvwokot4BSXaD5tECanXfqfJKcvHuaaEgPDD2D on Gnosis) exposes
+ * three core data-point entity types — all keyed by `dayNumber` (integer
+ * day index) and storing metrics in snake_case BigDecimal fields:
+ *
+ *   - IndexerDailyDataPoint   — per indexer, per day
+ *   - AllocationDailyDataPoint — per (indexer × deployment), per day
+ *   - QueryDailyDataPoint     — per deployment, per day
+ *
+ * We re-expose three coarse-grained views:
  *
  *   - query volume rows (counts per deployment over a window)
  *   - indexer QoS rows (latency / success / blocks-behind for one indexer)
  *   - top-by-volume deployment rows (ranked by query count)
  *
- * The on-chain schema isn't fully pinned down in design docs, so the field
- * names below are reasonable interpretations of "what a gateway-style QoS
- * subgraph typically exposes." Once we have a live deployment to probe,
- * adjust field names / nesting accordingly.
- *
- * // TODO: verify against live schema
+ * Numeric fields the subgraph returns as BigDecimal/BigInt strings are
+ * surfaced as plain `string` here so callers can do BigInt math without
+ * losing precision past Number.MAX_SAFE_INTEGER (~9.0e15) — important
+ * because 30-day query counts on top deployments already exceed that.
  */
 
 /**
  * Flexible time window accepted by every QoS tool.
  *
- *   - `{ hours: N }`  — last N hours (operator-friendly)
- *   - `{ days: N }`   — last N days  (operator-friendly)
- *   - `{ epochs: N }` — last N epochs (aligns with on-chain bucketing)
+ *   - `{ hours: N }`  — last N hours (operator-friendly). Rounded UP to a
+ *                       whole day internally, since the on-chain bucketing
+ *                       is daily and anything smaller would return zero.
+ *   - `{ days: N }`   — last N days  (operator-friendly).
+ *   - `{ epochs: N }` — last N epochs (aligns with on-chain bucketing).
  *
  * For `epochs`, the caller may pass `seconds_per_epoch` if it already knows
  * the chain's epoch length. If omitted, the QoS client falls back to a
@@ -35,21 +43,22 @@ export type TimeRange =
   | { epochs: number; seconds_per_epoch?: number };
 
 /**
- * One bucket of query-volume data — either per-deployment or summed across
- * deployments, depending on which tool produced it.
+ * One row of query-volume data per deployment.
  *
- * `window_seconds` is the resolved length of the requested time range so
- * callers can compute rates (queries/sec) without re-deriving it.
+ * `query_count` is the sum of `QueryDailyDataPoint.query_count` over the
+ * window — returned as a BigInt-safe string so 30-day totals don't lose
+ * precision (top deployments emit billions of queries per month).
  */
 export interface QueryVolumeRow {
-  /** Deployment IPFS hash (Qm...). Optional when caller summed across all. */
-  deployment_id?: string;
-  /** Total queries served in the window (sum across all 5-minute buckets). */
-  query_count: number;
-  /** Successful queries (status 200, no error) — summed across buckets. */
-  success_count?: number;
-  /** Failed queries (timeouts, 5xx, indexer rejections) — summed across buckets. */
-  failure_count?: number;
+  /** Deployment IPFS hash (Qm...). */
+  deployment_id: string;
+  /**
+   * Total queries served in the window — sum across all daily buckets,
+   * BigInt-as-string. Use `BigInt(row.query_count)` to consume losslessly.
+   */
+  query_count: string;
+  /** Chain id of the deployment if the subgraph reported it; `null` otherwise. */
+  chain_id: string | null;
   /** ISO-8601 timestamp at the start of the resolved window. */
   window_start?: string;
   /** ISO-8601 timestamp at the end of the resolved window. */
@@ -61,49 +70,50 @@ export interface QueryVolumeRow {
 }
 
 /**
- * QoS metrics for a specific indexer on a specific deployment.
+ * QoS metrics for a specific indexer.
  *
- * The gateway grades indexers on three axes that drive routing decisions:
- *   - latency (ms) — average / p95 response time
- *   - success rate (0..1) — fraction of queries that returned a 200 OK
- *   - blocks-behind — how far behind chain head this indexer was on average
+ * When `deployment_id` is omitted in the request, returns one aggregated
+ * row over `IndexerDailyDataPoint` (all the indexer's traffic, network-
+ * wide). When provided, returns one row per matching
+ * `AllocationDailyDataPoint` aggregate (i.e. one row total for that
+ * (indexer, deployment) pair).
  *
- * When `deployment_id` is omitted in the request, the QoS subgraph returns
- * one row per allocated deployment.
+ * Aggregation is a weighted average over `dataPointCount` so high-traffic
+ * days dominate — gives a more representative view than a flat day-mean
+ * when traffic spikes.
+ *
+ * Latency / success-rate / blocks-behind are returned as BigDecimal-as-
+ * string. `query_count` and `data_point_count` are BigInt-as-string.
  */
 export interface IndexerQoSRow {
   /** Lowercased 0x-prefixed indexer address. */
   indexer_address: string;
-  /** Deployment IPFS hash (Qm...). */
-  deployment_id: string;
+  /** Deployment IPFS hash (Qm...). `null` for the network-wide row. */
+  deployment_id: string | null;
   /**
-   * Average end-to-end query latency in milliseconds, weighted by per-bucket
-   * `queryCount` when available, otherwise a simple mean across buckets.
+   * Weighted-by-`dataPointCount` average end-to-end indexer-side latency
+   * in milliseconds, BigDecimal-as-string. `null` when no day in the
+   * window had observations.
    */
-  avg_latency_ms?: number;
+  avg_latency_ms: string | null;
   /**
-   * 95th-percentile query latency in milliseconds. Approximated as the
-   * weighted mean of per-bucket p95 values — a true p95 across buckets would
-   * require raw samples, which the QoS subgraph doesn't expose.
+   * Fraction of successful queries in [0, 1] — weighted average of
+   * `proportion_indexer_200_responses` over `dataPointCount`. BigDecimal-
+   * as-string. `null` when no observations in window.
    */
-  p95_latency_ms?: number;
+  success_rate: string | null;
   /**
-   * Fraction of successful queries in [0, 1]. Computed as
-   * `success_count / query_count` when those counts are present; otherwise
-   * the weighted mean of per-bucket `successRate`.
+   * Weighted-by-`dataPointCount` average blocks behind chain head,
+   * BigDecimal-as-string. `null` when no observations in window.
    */
-  success_rate?: number;
+  avg_blocks_behind: string | null;
+  /** Total queries the gateway routed to this indexer in the window. BigInt-as-string. */
+  query_count: string;
   /**
-   * Average blocks behind chain head, weighted by per-bucket `queryCount`
-   * when available, otherwise a simple mean across buckets.
+   * Number of underlying 5-minute data points aggregated into the daily
+   * buckets — useful as a confidence proxy. BigInt-as-string.
    */
-  avg_blocks_behind?: number;
-  /** Total queries (sum across buckets) the gateway routed to this indexer for this deployment. */
-  query_count?: number;
-  /** Sum of successful queries across buckets, when the subgraph exposes successCount. */
-  success_count?: number;
-  /** Sum of failed queries across buckets, when the subgraph exposes failureCount. */
-  failure_count?: number;
+  data_point_count: string;
   /** Length of the resolved window, in seconds. */
   window_seconds: number;
   /** True if pagination hit the cap and the result is incomplete. */
@@ -112,13 +122,26 @@ export interface IndexerQoSRow {
 
 /**
  * One entry in the ranked "top deployments by query volume" list.
- * Volume is summed across all indexers serving the deployment.
+ * Volume is summed across all `QueryDailyDataPoint` rows in the window.
+ *
+ * If `truncated` is set on a row, the raw QoS scan hit its pagination cap
+ * and the aggregated top-N may be missing a high-volume deployment whose
+ * daily rows fell past the cap. Callers should propagate the flag to the
+ * operator rather than treating the ranking as authoritative. The flag is
+ * the same on every row in a given response (it describes the underlying
+ * scan, not an individual deployment) — surfacing it per-row keeps the
+ * shape array-flat for downstream consumers that map over rows.
  */
 export interface DeploymentVolumeRow {
   deployment_id: string;
-  query_count: number;
+  /** Sum of `query_count` over the window. BigInt-as-string. */
+  query_count: string;
+  /** Chain id of the deployment if reported; `null` otherwise. */
+  chain_id: string | null;
   /** Rank in the returned list, 1-indexed. */
   rank: number;
   /** Length of the resolved window, in seconds. */
   window_seconds: number;
+  /** True if pagination hit the cap and the underlying scan is incomplete. */
+  truncated?: boolean;
 }

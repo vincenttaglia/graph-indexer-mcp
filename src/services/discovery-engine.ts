@@ -632,28 +632,39 @@ export class DiscoveryEngine {
 
     // ------------------------------------------------------------------------
     // Fetch 30-day query volume in a single QoS call (degrade gracefully).
+    //
+    // The QoS client paginates its underlying scan and surfaces a `truncated`
+    // flag on every row if the pagination cap was hit (the flag describes
+    // the scan, not the row). When set, the per-deployment volume map may
+    // be missing some deployments entirely OR have undercounted volumes for
+    // ones whose daily rows fell past the cap — `volumeScore` for affected
+    // candidates would be biased toward 0. Surface as a discovery warning
+    // so operators see the limitation in the result rather than silently
+    // accepting a biased scoring run.
     // ------------------------------------------------------------------------
     const queryVolumeById = new Map<string, bigint>();
+    let qosVolumeTruncated = false;
     try {
       const volumes = await this.deps.qosClient.getQueryVolume(
         { timeRange: { days: 30 } },
         signal ? { signal } : undefined,
       );
       for (const v of volumes) {
+        if (v.truncated) qosVolumeTruncated = true;
         if (v.deployment_id) {
-          // `| 0` would truncate to a signed int32 (~2.1B max). Real-world
-          // 30-day query counts on top deployments exceed that comfortably,
-          // so use BigInt. `query_count` is typed `number` in the QoS
-          // client (which coerces stringified BigInts at its boundary via
-          // Number(...) — so precision past ~2^53 is already lost upstream;
-          // see src/clients/qos-subgraph.ts:numOrZero. TODO(stage4): when
-          // the QoS client preserves string precision end-to-end, parse
-          // `v.query_count` here as BigInt directly. Guard against NaN /
-          // Infinity / negatives.
-          const n = Number(v.query_count);
-          const safe = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
-          queryVolumeById.set(v.deployment_id, BigInt(safe));
+          // `query_count` is a BigInt-as-string on the QoS client surface,
+          // so parse it directly via BigInt. Truncate any decimal part
+          // defensively and guard against negative or malformed strings —
+          // a bad row should not poison the whole map.
+          queryVolumeById.set(v.deployment_id, parseQueryCount(v.query_count));
         }
+      }
+      if (qosVolumeTruncated) {
+        warnings.push(
+          `qos: 30-day query-volume scan was truncated (pagination cap hit); ` +
+            `some deployments may be missing or undercounted, biasing ` +
+            `volumeScore toward 0 for affected candidates.`,
+        );
       }
     } catch (err) {
       // A caller-initiated abort during the QoS fetch should propagate, not
@@ -896,6 +907,25 @@ function describeError(err: unknown): string {
     return JSON.stringify(err);
   } catch {
     return String(err);
+  }
+}
+
+/**
+ * Parse a QoS `query_count` BigInt-as-string into a non-negative BigInt.
+ * Truncates any decimal component (the QoS subgraph occasionally returns
+ * BigDecimal values for what should be integer counts) and clamps negative
+ * or malformed strings to zero so one bad row doesn't poison the map.
+ */
+function parseQueryCount(s: string): bigint {
+  if (!s) return 0n;
+  const trimmed = s.trim();
+  if (trimmed === '' || trimmed.startsWith('-')) return 0n;
+  try {
+    const intPart = trimmed.split('.')[0] ?? '0';
+    const v = BigInt(intPart);
+    return v < 0n ? 0n : v;
+  } catch {
+    return 0n;
   }
 }
 

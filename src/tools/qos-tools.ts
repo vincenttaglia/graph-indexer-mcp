@@ -64,9 +64,12 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
     name: 'get_query_volume',
     permissionClass: 'read',
     description:
-      'Query counts per deployment over a time window from the QoS subgraph. ' +
-      'Omit deployment_id to get all deployments. time_range accepts ' +
-      '{ hours: N }, { days: N }, or { epochs: N, seconds_per_epoch?: N }.',
+      'Query counts per deployment from the QoS Oracle subgraph, aggregated ' +
+      'over daily buckets (the oracle\'s native granularity — windows shorter ' +
+      'than 1 day round up). Omit deployment_id to get all deployments. ' +
+      'query_count is a BigInt-as-string; parse via BigInt(row.query_count). ' +
+      'time_range accepts { hours: N }, { days: N }, or ' +
+      '{ epochs: N, seconds_per_epoch?: N }.',
     inputSchema: {
       deployment_id: z.string().min(1).optional(),
       time_range: timeRangeSchema,
@@ -80,7 +83,12 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
         },
         { signal: extra.signal },
       );
-      return jsonResult({ rows });
+      // The QoS client sets `truncated:true` on every row when its
+      // underlying scan hit the pagination cap (the flag describes the
+      // scan, not the row). Hoist to a top-level field so consumers don't
+      // have to inspect every row to know the result is incomplete.
+      const truncated = rows.some((r) => r.truncated === true);
+      return jsonResult(truncated ? { rows, truncated: true } : { rows });
     },
   });
 
@@ -95,9 +103,12 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
     name: 'get_indexer_qos',
     permissionClass: 'read',
     description:
-      "QoS metrics (latency, success rate, blocks-behind) for the configured " +
-      'indexer. Omit deployment_id to get all allocated deployments. ' +
-      'time_range accepts { hours: N }, { days: N }, or ' +
+      "Indexer-side QoS metrics (latency, success rate, blocks-behind) for " +
+      'the configured indexer, weighted-averaged across days by ' +
+      'dataPointCount. With deployment_id: returns one row aggregated over ' +
+      'AllocationDailyDataPoint. Without it: returns one network-wide row ' +
+      'aggregated over IndexerDailyDataPoint. Numeric fields are BigDecimal-/' +
+      'BigInt-as-string. time_range accepts { hours: N }, { days: N }, or ' +
       '{ epochs: N, seconds_per_epoch?: N }.',
     inputSchema: {
       deployment_id: z.string().min(1).optional(),
@@ -113,9 +124,11 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
         },
         { signal: extra.signal },
       );
+      const truncated = rows.some((r) => r.truncated === true);
       return jsonResult({
         indexer_address: config.indexerAddress,
         rows,
+        ...(truncated ? { truncated: true } : {}),
       });
     },
   });
@@ -127,10 +140,10 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
     name: 'get_top_queried_deployments',
     permissionClass: 'read',
     description:
-      'Rank deployments by total query volume over a time window. Useful for ' +
-      'discovery — high-volume deployments are revenue opportunities. ' +
-      'time_range accepts { hours: N }, { days: N }, or ' +
-      '{ epochs: N, seconds_per_epoch?: N }.',
+      'Rank deployments by total query volume over a daily time window. ' +
+      'Useful for discovery — high-volume deployments are revenue ' +
+      'opportunities. query_count is a BigInt-as-string. time_range accepts ' +
+      '{ hours: N }, { days: N }, or { epochs: N, seconds_per_epoch?: N }.',
     inputSchema: {
       limit: z.number().int().positive().max(1000).default(20),
       time_range: timeRangeSchema,
@@ -144,7 +157,12 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
         },
         { signal: extra.signal },
       );
-      return jsonResult({ rows });
+      // Hoist `truncated` to the top of the payload — when the underlying
+      // scan was capped, the ranking may be missing high-volume deployments
+      // whose rows landed past the pagination ceiling. Operators should
+      // treat the result as advisory rather than authoritative.
+      const truncated = rows.some((r) => r.truncated === true);
+      return jsonResult(truncated ? { rows, truncated: true } : { rows });
     },
   });
 }
