@@ -16,6 +16,7 @@
  */
 
 import { createGraphqlClient, type TypedGraphqlClient } from '../utils/graphql-client.js';
+import { TtlCache } from '../utils/cache.js';
 import type {
   Allocation,
   AllocationStatus,
@@ -298,6 +299,26 @@ export function createNetworkSubgraphClient(
     label: 'network-subgraph',
   });
 
+  // Caches per design §4.1.2:
+  //   - network parameters: 1 hour (slow-moving protocol config)
+  //   - deployment-scoped reads: 15 minutes (curation signal drifts slowly)
+  const networkParamsCache = new TtlCache<'network_params', GraphNetwork>({
+    ttlMs: 3_600_000,
+    label: 'network',
+  });
+  const deploymentCache = new TtlCache<string, SubgraphDeployment | null>({
+    ttlMs: 900_000,
+    label: 'network-deployment',
+  });
+  const deploymentAllocationsCache = new TtlCache<string, PaginatedResult<Allocation>>({
+    ttlMs: 900_000,
+    label: 'network-deployment-allocations',
+  });
+  const signalledDeploymentsCache = new TtlCache<string, PaginatedResult<SubgraphDeployment>>({
+    ttlMs: 900_000,
+    label: 'network-signalled',
+  });
+
   async function getIndexer(
     address: string,
     callOpts?: NetworkSubgraphCallOpts,
@@ -337,65 +358,93 @@ export function createNetworkSubgraphClient(
     deploymentId: string,
     callOpts?: NetworkSubgraphCallOpts,
   ): Promise<SubgraphDeployment | null> {
-    const data = await gql.request<DeploymentResponse>(
-      GET_DEPLOYMENT_QUERY,
-      { id: deploymentId },
-      callOpts?.signal ? { signal: callOpts.signal } : undefined,
+    const key = deploymentId.toLowerCase();
+    return deploymentCache.getOrFetch(
+      key,
+      async (fetchOpts) => {
+        const data = await gql.request<DeploymentResponse>(
+          GET_DEPLOYMENT_QUERY,
+          { id: deploymentId },
+          fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+        );
+        return data.subgraphDeployment ?? null;
+      },
+      callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
     );
-    return data.subgraphDeployment ?? null;
   }
 
   async function getSignalledDeployments(
     minSignal: string,
     callOpts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<SubgraphDeployment>> {
-    return paginate<SubgraphDeployment>(async (skip) => {
-      const data = await gql.request<SignalledDeploymentsResponse>(
-        GET_SIGNALLED_DEPLOYMENTS_QUERY,
-        { minSignal, first: PAGE_SIZE, skip },
-        callOpts?.signal ? { signal: callOpts.signal } : undefined,
-      );
-      return data.subgraphDeployments;
-    }, callOpts?.signal);
+    const key = String(minSignal);
+    return signalledDeploymentsCache.getOrFetch(
+      key,
+      async (fetchOpts) =>
+        paginate<SubgraphDeployment>(async (skip) => {
+          const data = await gql.request<SignalledDeploymentsResponse>(
+            GET_SIGNALLED_DEPLOYMENTS_QUERY,
+            { minSignal, first: PAGE_SIZE, skip },
+            fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+          );
+          return data.subgraphDeployments;
+        }, fetchOpts.signal),
+      callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
+    );
   }
 
   async function getNetworkParameters(
     callOpts?: NetworkSubgraphCallOpts,
   ): Promise<GraphNetwork> {
-    const data = await gql.request<GraphNetworkResponseRaw>(
-      GET_NETWORK_QUERY,
-      undefined,
-      callOpts?.signal ? { signal: callOpts.signal } : undefined,
+    return networkParamsCache.getOrFetch(
+      'network_params',
+      async (fetchOpts) => {
+        const data = await gql.request<GraphNetworkResponseRaw>(
+          GET_NETWORK_QUERY,
+          undefined,
+          fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+        );
+        if (!data.graphNetwork) {
+          throw new Error('GraphNetwork singleton (id="1") not found in network subgraph.');
+        }
+        const raw = data.graphNetwork;
+        return {
+          id: raw.id,
+          totalSupply: raw.totalSupply,
+          totalTokensAllocated: raw.totalTokensAllocated,
+          totalTokensSignalled: raw.totalTokensSignalled,
+          currentEpoch: raw.currentEpoch,
+          epochLength: raw.epochLength,
+          networkGRTIssuancePerBlock: raw.networkGRTIssuancePerBlock ?? '0',
+          delegationRatio: raw.delegationRatio ?? 0,
+        };
+      },
+      callOpts?.signal
+        ? { signal: callOpts.signal, keyLabel: 'network_params' }
+        : { keyLabel: 'network_params' },
     );
-    if (!data.graphNetwork) {
-      throw new Error('GraphNetwork singleton (id="1") not found in network subgraph.');
-    }
-    const raw = data.graphNetwork;
-    return {
-      id: raw.id,
-      totalSupply: raw.totalSupply,
-      totalTokensAllocated: raw.totalTokensAllocated,
-      totalTokensSignalled: raw.totalTokensSignalled,
-      currentEpoch: raw.currentEpoch,
-      epochLength: raw.epochLength,
-      networkGRTIssuancePerBlock: raw.networkGRTIssuancePerBlock ?? '0',
-      delegationRatio: raw.delegationRatio ?? 0,
-    };
   }
 
   async function getDeploymentAllocations(
     deploymentId: string,
     callOpts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<Allocation>> {
-    const where = buildAllocationFilter({ deployment: deploymentId, status: 'Active' });
-    return paginate<Allocation>(async (skip) => {
-      const data = await gql.request<AllocationsResponse>(
-        GET_ALLOCATIONS_QUERY,
-        { where, first: PAGE_SIZE, skip },
-        callOpts?.signal ? { signal: callOpts.signal } : undefined,
-      );
-      return data.allocations;
-    }, callOpts?.signal);
+    const key = deploymentId.toLowerCase();
+    return deploymentAllocationsCache.getOrFetch(
+      key,
+      async (fetchOpts) => {
+        const where = buildAllocationFilter({ deployment: deploymentId, status: 'Active' });
+        return paginate<Allocation>(async (skip) => {
+          const data = await gql.request<AllocationsResponse>(
+            GET_ALLOCATIONS_QUERY,
+            { where, first: PAGE_SIZE, skip },
+            fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+          );
+          return data.allocations;
+        }, fetchOpts.signal);
+      },
+      callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
+    );
   }
 
   return {

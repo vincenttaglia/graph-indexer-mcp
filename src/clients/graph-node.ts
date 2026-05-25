@@ -1,4 +1,5 @@
 import { createGraphqlClient, type TypedGraphqlClient } from '../utils/graphql-client.js';
+import { TtlCache } from '../utils/cache.js';
 import type {
   Block,
   ChainIndexingStatus,
@@ -208,30 +209,70 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     label: 'graph-node-status',
   });
 
+  // Caches per design §4.1.2: indexing status refreshes every 5 minutes.
+  const statusesCache = new TtlCache<string, SubgraphIndexingStatus[]>({
+    ttlMs: 300_000,
+    label: 'graph-node-statuses',
+  });
+  const healthCache = new TtlCache<string, SubgraphIndexingStatus | null>({
+    ttlMs: 300_000,
+    label: 'graph-node-health',
+  });
+
   async function getIndexingStatuses(
     deploymentIds?: string[],
     callOpts?: GraphNodeCallOpts,
   ): Promise<SubgraphIndexingStatus[]> {
-    // graph-node treats `subgraphs: null` (or omitted) as "return everything".
-    // Pass `null` only when the caller didn't filter so we don't send `[]` and
-    // get back an empty list.
-    const variables = {
-      subgraphs: deploymentIds && deploymentIds.length > 0 ? deploymentIds : null,
-    };
-    const data = await gql.request<IndexingStatusesResponse>(
-      INDEXING_STATUSES_QUERY,
-      variables,
-      callOpts?.signal ? { signal: callOpts.signal } : undefined,
+    // Cache key:
+    //   - 'all' when no filter (graph-node returns every tracked deployment)
+    //   - sorted-and-joined deployment IDs otherwise, so equivalent filters
+    //     (regardless of input ordering) share a cache slot.
+    const key =
+      deploymentIds && deploymentIds.length > 0
+        ? [...deploymentIds].sort().join(',')
+        : 'all';
+    return statusesCache.getOrFetch(
+      key,
+      async (fetchOpts) => {
+        // graph-node treats `subgraphs: null` (or omitted) as "return everything".
+        // Pass `null` only when the caller didn't filter so we don't send `[]` and
+        // get back an empty list.
+        const variables = {
+          subgraphs: deploymentIds && deploymentIds.length > 0 ? deploymentIds : null,
+        };
+        const data = await gql.request<IndexingStatusesResponse>(
+          INDEXING_STATUSES_QUERY,
+          variables,
+          fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+        );
+        return (data.indexingStatuses ?? []).map(normalizeStatus);
+      },
+      callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
     );
-    return (data.indexingStatuses ?? []).map(normalizeStatus);
   }
 
   async function getDeploymentHealth(
     deploymentId: string,
     callOpts?: GraphNodeCallOpts,
   ): Promise<SubgraphIndexingStatus | null> {
-    const statuses = await getIndexingStatuses([deploymentId], callOpts);
-    return statuses[0] ?? null;
+    return healthCache.getOrFetch(
+      deploymentId,
+      async (fetchOpts) => {
+        // Call the underlying GraphQL directly — invoking getIndexingStatuses
+        // here would route through statusesCache under a single-element key,
+        // creating two cache layers for the same data.
+        const data = await gql.request<IndexingStatusesResponse>(
+          INDEXING_STATUSES_QUERY,
+          { subgraphs: [deploymentId] },
+          fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+        );
+        const statuses = (data.indexingStatuses ?? []).map(normalizeStatus);
+        return statuses[0] ?? null;
+      },
+      callOpts?.signal
+        ? { signal: callOpts.signal, keyLabel: deploymentId }
+        : { keyLabel: deploymentId },
+    );
   }
 
   async function getEntityCount(

@@ -1,5 +1,17 @@
 import { createGraphqlClient, type TypedGraphqlClient } from '../utils/graphql-client.js';
+import { TtlCache } from '../utils/cache.js';
 import type { NetworkEpochBlockNumber } from '../types/ebo.js';
+
+interface CurrentEpochResult {
+  epochNumber: number;
+  networkBlocks: Array<{ network: string; blockNumber: string }>;
+}
+
+interface EpochBlocksResult {
+  network: string;
+  epochNumber: number;
+  blockNumber: string;
+}
 
 /**
  * Client for the Epoch Block Oracle (EBO) subgraph.
@@ -204,49 +216,77 @@ export function createEboSubgraphClient(opts: EboSubgraphClientOptions): EboSubg
     label: 'ebo-subgraph',
   });
 
+  // Caches per design §4.1.2: epoch info refreshes every 5 minutes.
+  const currentEpochCache = new TtlCache<'current_epoch', CurrentEpochResult>({
+    ttlMs: 300_000,
+    label: 'ebo-current-epoch',
+  });
+  // Stored Promise resolves to the row OR null when not present, so the
+  // negative result is also cached briefly (avoids re-querying for known
+  // missing rows within the TTL window).
+  const epochBlocksCache = new TtlCache<string, EpochBlocksResult | null>({
+    ttlMs: 300_000,
+    label: 'ebo-epoch-blocks',
+  });
+
   return {
     async getCurrentEpoch(callOpts) {
-      const reqOpts = callOpts?.signal ? { signal: callOpts.signal } : undefined;
-      const latest = await gql.request<LatestEpochResponse>(
-        LATEST_EPOCH_QUERY,
-        undefined,
-        reqOpts,
-      );
-      const epoch = latest.epoches[0];
-      if (!epoch) {
-        throw new Error('EBO subgraph returned no epochs');
-      }
-      const epochNumber = toInt(epoch.id);
+      return currentEpochCache.getOrFetch(
+        'current_epoch',
+        async (fetchOpts) => {
+          const reqOpts = fetchOpts.signal ? { signal: fetchOpts.signal } : undefined;
+          const latest = await gql.request<LatestEpochResponse>(
+            LATEST_EPOCH_QUERY,
+            undefined,
+            reqOpts,
+          );
+          const epoch = latest.epoches[0];
+          if (!epoch) {
+            throw new Error('EBO subgraph returned no epochs');
+          }
+          const epochNumber = toInt(epoch.id);
 
-      // BigInt-typed GraphQL args are passed as strings by graphql-request.
-      const blocks = await gql.request<EpochNetworkBlocksResponse>(
-        EPOCH_NETWORK_BLOCKS_QUERY,
-        { epochNumber: String(epochNumber), limit: 1000 },
-        reqOpts,
-      );
+          // BigInt-typed GraphQL args are passed as strings by graphql-request.
+          const blocks = await gql.request<EpochNetworkBlocksResponse>(
+            EPOCH_NETWORK_BLOCKS_QUERY,
+            { epochNumber: String(epochNumber), limit: 1000 },
+            reqOpts,
+          );
 
-      return {
-        epochNumber,
-        networkBlocks: blocks.networkEpochBlockNumbers.map((row) => ({
-          network: row.network,
-          blockNumber: row.blockNumber,
-        })),
-      };
+          return {
+            epochNumber,
+            networkBlocks: blocks.networkEpochBlockNumbers.map((row) => ({
+              network: row.network,
+              blockNumber: row.blockNumber,
+            })),
+          };
+        },
+        callOpts?.signal
+          ? { signal: callOpts.signal, keyLabel: 'current_epoch' }
+          : { keyLabel: 'current_epoch' },
+      );
     },
 
     async getEpochBlocks(epochNumber, chain, callOpts) {
-      const data = await gql.request<EpochBlocksResponse>(
-        EPOCH_BLOCKS_QUERY,
-        { network: chain, epochNumber: String(epochNumber) },
-        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      const key = `${epochNumber}|${chain ?? '*'}`;
+      return epochBlocksCache.getOrFetch(
+        key,
+        async (fetchOpts) => {
+          const data = await gql.request<EpochBlocksResponse>(
+            EPOCH_BLOCKS_QUERY,
+            { network: chain, epochNumber: String(epochNumber) },
+            fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+          );
+          const row = data.networkEpochBlockNumbers[0];
+          if (!row) return null;
+          return {
+            network: row.network,
+            epochNumber: toInt(row.epochNumber),
+            blockNumber: row.blockNumber,
+          };
+        },
+        callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
       );
-      const row = data.networkEpochBlockNumbers[0];
-      if (!row) return null;
-      return {
-        network: row.network,
-        epochNumber: toInt(row.epochNumber),
-        blockNumber: row.blockNumber,
-      };
     },
 
     async getNetworkEpochs(chain, limit = 10, callOpts) {
