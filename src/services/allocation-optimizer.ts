@@ -61,8 +61,11 @@ export interface OptimizerConfig {
   /** Estimated total gas in GRT wei spent over an allocation's lifetime. */
   gasEstimateGrt: bigint | string;
   /**
-   * Blocks per year on the host chain. REQUIRED — chain-dependent and used to
-   * annualize `networkGRTIssuancePerBlock`. Ethereum mainnet is ~2,628,000.
+   * Blocks per year used to annualize `networkGRTIssuancePerBlock`. REQUIRED.
+   * The canonical value is 2,102,400 — matches indexer-tools-v4 canonical
+   * formula (5760 blocks/day × 365). Applies for both Ethereum mainnet and
+   * Arbitrum: `networkGRTIssuancePerBlock` is denominated per Ethereum block
+   * regardless of which chain hosts the network subgraph.
    */
   blocksPerYear: number;
   /** Deployments that bypass the candidate filter. */

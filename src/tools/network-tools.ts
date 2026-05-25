@@ -21,12 +21,11 @@
  *
  * `networkGRTIssuancePerBlock` is the canonical field on the network
  * subgraph. It is the per-block GRT issuance dedicated to indexing rewards
- * (wei). To annualize we multiply by `blocks_per_year`, a chain-specific
- * constant that the caller MUST supply: the Network Subgraph can be hosted
- * on multiple chains (Ethereum mainnet ~12s blocks ≈ 2,629,800/year;
- * Arbitrum One ~3s nominal blocks ≈ 10,512,000/year), and a wrong default
- * would silently skew APR by ~4x. Stage 3 service-layer code will source
- * this value from chain configuration; for now it is a required input.
+ * (wei), denominated per Ethereum block regardless of which chain hosts the
+ * Network Subgraph. To annualize we multiply by `blocks_per_year`, which
+ * the caller MUST supply. The canonical value is 2,102,400 (5760 blocks/day
+ * × 365), matching indexer-tools-v4. This single value applies for both
+ * Ethereum mainnet and Arbitrum One. A wrong value would silently skew APR.
  *
  * Reward-denied deployments (`deniedAt != 0`) MUST be excluded from APR per
  * design §4.1. We surface `apr: 0` with `denied: true` so the caller can see
@@ -239,11 +238,12 @@ export function registerNetworkTools(
         .int()
         .positive()
         .describe(
-          'Blocks per year for the chain hosting the Network Subgraph. ' +
-            'Required because APR depends on per-block issuance × blocks/year. ' +
-            'Reference values: Ethereum mainnet ~2629800 (12s blocks), ' +
-            'Arbitrum One ~10512000 (3s nominal). Stage 3 service-layer code ' +
-            'will source this from chain configuration.',
+          'Blocks per year used to annualize networkGRTIssuancePerBlock. ' +
+            'Required, no default. Recommended value: 2102400 (matches ' +
+            'indexer-tools-v4 canonical formula — 5760 blocks/day × 365). ' +
+            'Applies for both Ethereum mainnet and Arbitrum: ' +
+            'networkGRTIssuancePerBlock is denominated per Ethereum block ' +
+            'regardless of which chain hosts the network subgraph.',
         ),
     },
     handler: async ({ deployment_id, allocation_amount, blocks_per_year }, extra) => {

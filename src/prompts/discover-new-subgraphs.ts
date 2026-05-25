@@ -36,8 +36,10 @@ Goal: identify the top ${maxCandidates} deployments the indexer is NOT currently
 
 Call \`run_discovery\` with **required** args:
 
-- \`blocks_per_year\` — Ethereum mainnet ~2,628,000; Arbitrum One ~10,512,000 at 3s block time. Confirm with operator if uncertain — wrong values silently skew APR by ~4x.
+- \`blocks_per_year\` — used to annualize \`networkGRTIssuancePerBlock\`. Recommended value: **2,102,400** (matches indexer-tools-v4 canonical formula — 5760 blocks/day × 365). This value applies for both Ethereum mainnet and Arbitrum, because \`networkGRTIssuancePerBlock\` is denominated per Ethereum block regardless of which chain hosts the Network Subgraph.
 - \`typical_allocation_grt\` — GRT decimal (e.g. "30000"). A reasonable default is \`total_stake_grt / max_allocations\` — pull totalStake from \`indexer://overview\` or \`get_infrastructure_overview\`, and max_allocations from \`indexer://config\`.
+
+**Note on marginal vs realized APR:** \`projectedAprFraction\` in the discovery output is *marginal* APR at the proposed allocation size — what the next GRT would earn — not the *realized* APR an indexer dashboard would show for an existing allocation. These differ, especially on thin-staked deployments where adding stake materially shifts the denominator. Operators comparing this output to their dashboard should note these are different metrics.
 
 Optional args: \`indexer_address\`, \`max_candidates\` (default 10, max 500 — pass ${maxCandidates} for this run), \`min_signal_grt\`.
 
@@ -85,7 +87,7 @@ For every candidate, call (in parallel where possible):
 - \`calculate_deployment_apr\` — projected APR if the indexer were to allocate. Pass **all three required arguments**:
   - \`deployment_id\` — the candidate deployment.
   - \`allocation_amount\` — the indexer's typical allocation size from \`indexer://config\` (wei BigInt-as-string).
-  - \`blocks_per_year\` — REQUIRED (no default). Obtain from operator input, from \`indexer://config\` if present, or from the chain's known value: Ethereum mainnet ~2,629,800 (12s blocks); Arbitrum One ~10,512,000 (3s nominal). Confirm with the operator if uncertain — a wrong value would silently skew APR by ~4x.
+  - \`blocks_per_year\` — REQUIRED (no default). Recommended value: **2,102,400** (matches indexer-tools-v4 canonical formula — 5760 blocks/day × 365). This value applies for both Ethereum mainnet and Arbitrum, because \`networkGRTIssuancePerBlock\` is denominated per Ethereum block regardless of which chain hosts the Network Subgraph. Operator input via \`indexer://config\` (if present) overrides.
 
 APR formula (design §4.1 step 3) — spelled out so you can verify the tool's output if needed. With \`S\` = deployment signal, \`T\` = total signal, \`A_i\` = new allocation, \`A_total\` = deployment_stake + new_allocation:
 
