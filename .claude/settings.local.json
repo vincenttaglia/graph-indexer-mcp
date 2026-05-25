@@ -25,7 +25,9 @@
       "Bash(echo:*)",
       "Bash(true)",
       "Bash(false)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "mcp__thegraph-mcp__searchSubgraphs",
+      "mcp__thegraph-mcp__getSubgraphSchema"
     ]
   }
 }
