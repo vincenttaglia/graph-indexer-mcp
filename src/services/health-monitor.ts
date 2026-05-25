@@ -332,13 +332,19 @@ export class HealthMonitor {
       throwIfAborted(signal);
 
       // The protocol chain alias isn't stored on GraphNetwork; we infer it
-      // from the EBO's per-chain rows. The Graph Network now lives on
-      // Arbitrum One, so prefer that alias first; fall back to the first
-      // per-network row with a warning when no Arbitrum row is present.
-      const protocolRow =
-        currentEpoch.blockNumbersByNetwork.find((r) =>
-          r.network.toLowerCase().includes('arbitrum'),
-        ) ?? currentEpoch.blockNumbersByNetwork[0];
+      // from the EBO's per-chain rows. The Graph Network lives on Arbitrum
+      // One, so match the canonical alias exactly (`arbitrum-one`, or the
+      // shorter `arbitrum` alias seen in some deployments). A loose
+      // substring match would silently pick up `arbitrum-sepolia` (testnet)
+      // and treat its block height as the protocol-chain head, which is
+      // wrong — fall back to the first row only when no exact match is
+      // present, and warn so the operator knows the inference was
+      // approximate.
+      const PROTOCOL_CHAIN_ALIASES = new Set(['arbitrum-one', 'arbitrum']);
+      const exactRow = currentEpoch.blockNumbersByNetwork.find((r) =>
+        PROTOCOL_CHAIN_ALIASES.has(r.network.toLowerCase()),
+      );
+      const protocolRow = exactRow ?? currentEpoch.blockNumbersByNetwork[0];
       if (!protocolRow) {
         warnings.push(
           'EBO returned no per-chain start blocks for the current epoch; cannot compute epoch timing precisely.',
@@ -346,6 +352,13 @@ export class HealthMonitor {
       } else {
         protocolChainAlias = protocolRow.network;
         protocolEpochStartBlock = safeToInt(protocolRow.blockNumber);
+        if (!exactRow) {
+          warnings.push(
+            `EBO returned no row for the canonical protocol-chain alias (expected one of: ${[
+              ...PROTOCOL_CHAIN_ALIASES,
+            ].join(', ')}); falling back to first row "${protocolRow.network}" — epoch timing is approximate, operator should verify.`,
+          );
+        }
       }
 
       timing = computeTiming({

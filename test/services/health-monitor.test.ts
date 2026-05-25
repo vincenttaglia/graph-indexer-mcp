@@ -41,8 +41,8 @@ async function runWithSingle(
       networkParams: networkParams({ epochLength: 6646 }),
     }),
     eboClient: fakeEboClient({
-      epochNumber: EPOCH,
-      networkBlocks: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      epoch: EPOCH,
+      blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
     }),
     graphNodeClient: fakeGraphNodeClient({ statusById: { [status.subgraph]: status } }),
     graphmanClient: fakeGraphmanClient(),
@@ -236,8 +236,8 @@ describe('HealthMonitor risk-tier matrix', () => {
         networkParams: networkParams({ epochLength }),
       }),
       eboClient: fakeEboClient({
-        epochNumber: EPOCH,
-        networkBlocks: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
       }),
       graphNodeClient: fakeGraphNodeClient({
         statusById: Object.fromEntries(input.statuses.map((s) => [s.subgraph, s])),
