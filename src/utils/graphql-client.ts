@@ -69,8 +69,27 @@ function isTransientError(err: unknown): boolean {
   return false;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Sleep for `ms` milliseconds, but abort early if `signal` fires. Used by the
+ * retry backoff so an external cancellation during the sleep doesn't waste
+ * one more attempt before propagating.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('aborted', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal!.reason ?? new DOMException('aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -175,6 +194,11 @@ export function createGraphqlClient(opts: GraphqlClientOptions): TypedGraphqlCli
 
       let lastErr: unknown;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // Per-iteration abort gate: if the caller cancelled while we were
+        // backoff-sleeping (or between attempts in any other way), bail
+        // before starting another fetch. The pre-loop check at line 174
+        // only covers entry; this catches mid-loop aborts.
+        reqOpts?.signal?.throwIfAborted();
         // Stash the external signal so `timedFetch` can fan it in for this
         // attempt. Cleared after the attempt to avoid leaking the signal into
         // unrelated requests on the shared client.
@@ -220,7 +244,10 @@ export function createGraphqlClient(opts: GraphqlClientOptions): TypedGraphqlCli
             reqOpts!.signal!.throwIfAborted();
           }
           if (!retriable) break;
-          await sleep(baseDelay * 2 ** attempt);
+          // sleep is abort-aware: if the caller's signal fires during
+          // backoff, the sleep rejects and we propagate without waiting
+          // out the remaining delay.
+          await sleep(baseDelay * 2 ** attempt, reqOpts?.signal);
         } finally {
           // Restore the slot to whatever was set before this attempt began
           // (typically `undefined`). Doing it this way rather than always
