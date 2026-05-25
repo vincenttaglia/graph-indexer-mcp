@@ -439,11 +439,45 @@ export class AllocationOptimizer {
     // 2. Filter candidates.
     // ---------------------------------------------------------------------
     // Index signalled deployments for fast lookup; for non-signalled ids
-    // (whitelist or current alloc) we fall back to a one-shot `getDeployment`.
+    // (whitelist or current alloc) we hydrate via a bounded parallel batch
+    // of `getDeployment` calls below — otherwise signal/stake would be 0
+    // and APR / A_total inputs would be garbage.
     const signalledById = new Map<string, SubgraphDeployment>();
     for (const dep of signalledDeployments) {
       signalledById.set(dep.id, dep);
     }
+
+    // Hydrate whitelist/current-only candidates missing from the signalled
+    // query (Finding 1). Run in parallel via allSettled so a single failed
+    // lookup doesn't poison the batch — errors are logged best-effort.
+    const missingIds = candidateIdList.filter(
+      (id) => !signalledById.has(id) && !blacklist.has(id),
+    );
+    if (missingIds.length > 0) {
+      const hydrateResults = await Promise.allSettled(
+        missingIds.map((id) => this.deps.networkClient.getDeployment(id)),
+      );
+      for (let i = 0; i < missingIds.length; i++) {
+        const id = missingIds[i]!;
+        const res = hydrateResults[i]!;
+        if (res.status === 'fulfilled') {
+          if (res.value) {
+            signalledById.set(id, res.value);
+          } else {
+            warnings.push(
+              `network.getDeployment("${id}") returned null — candidate has ` +
+                'no signal/stake data; skipping APR contribution',
+            );
+          }
+        } else {
+          errors.push(
+            `network.getDeployment("${id}") failed: ${errString(res.reason)}`,
+          );
+        }
+      }
+    }
+
+    opts?.signal?.throwIfAborted?.();
 
     const minSignal = toBigInt(config.minSignal);
 
@@ -451,6 +485,7 @@ export class AllocationOptimizer {
     for (const id of candidateIdList) {
       const isWhitelisted = whitelist.has(id);
       const isBlacklisted = blacklist.has(id);
+      const isCurrentlyAllocated = currentByDeployment.has(id);
 
       // Blacklist always wins over whitelist — defensive choice. An operator
       // who put a deployment on both lists almost certainly meant "no".
@@ -464,8 +499,12 @@ export class AllocationOptimizer {
       // Rewards-denied deployments earn no indexing rewards even if signalled.
       if (deniedAt && deniedAt !== 0 && !isWhitelisted) continue;
 
-      // Signal floor (whitelist overrides).
-      if (signalledTokens < minSignal && !isWhitelisted) continue;
+      // Signal floor — whitelist OR a current allocation overrides it
+      // (Finding 2). Without the current-allocation exemption a deployment
+      // whose signal dips between runs gets force-unallocated mid-rebalance.
+      if (signalledTokens < minSignal && !isWhitelisted && !isCurrentlyAllocated) {
+        continue;
+      }
 
       const status = statusById.get(id);
       const synced = isSyncedAt(status);
@@ -758,12 +797,17 @@ export class AllocationOptimizer {
         otherIndexersAllocation: r.otherIndexers,
       });
 
-      // Gas-floor check: skip if projected annual reward < 2× gas.
-      // reward = apr * amount (in wei). We do the math in bigint via PPM
-      // scaling to keep precision.
+      // Gas-floor check: skip if projected annual reward < 2× gas (Finding 3).
+      // Compute reward directly in BigInt to avoid Number/PPM precision loss
+      // at the threshold boundary:
+      //   reward = (signal * issuance_per_year * A_i)
+      //          / (totalSignal * (otherIndexers + A_i))
+      // All inputs are BigInt wei; `gas` is normalized to BigInt above.
+      const gasDenom = totalSignal * (r.otherIndexers + amount);
       const projectedRewardWei =
-        amount * BigInt(Math.max(0, Math.round(projectedAprFraction * 1_000_000))) /
-        1_000_000n;
+        gasDenom === 0n
+          ? 0n
+          : (cand.signalledTokens * issuancePerYear * amount) / gasDenom;
       if (gas > 0n && projectedRewardWei < gas * 2n) {
         warnings.push(
           `skipped ${cand.deploymentId}: projected annual reward < 2× gas budget`,
