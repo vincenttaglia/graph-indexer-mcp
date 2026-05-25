@@ -134,13 +134,28 @@ export interface CreateQosSubgraphClientOptions {
 // =============================================================================
 
 /**
- * Page size and cap for daily data-point pagination. A 30-day window across
- * all deployments returns thousands of QueryDailyDataPoint rows, so we page.
- * `PAGE_SIZE * MAX_PAGES` caps raw rows we'll fetch before marking
- * `truncated: true`.
+ * Page size and per-mode caps for daily data-point pagination.
+ *
+ * We use TWO different pagination strategies, chosen by row-count expectations:
+ *
+ *   - SCOPED queries (per indexer × deployment, or per deployment) return at
+ *     most ~365 rows for a 1-year window — one row per day. Skip-based
+ *     pagination is fine; we cap at 5,000 rows (5 pages) and that's plenty.
+ *
+ *   - BROAD queries (all deployments × N days) can return tens of thousands
+ *     of rows. The Graph's hosted gateway hard-caps `skip` at 5,000, so
+ *     skip-based pagination can't fetch beyond that — `truncated:true` would
+ *     be silently mis-aggregated as "top-N from a sample". Use CURSOR
+ *     pagination (`id_gt: $lastId`, `orderBy: id`) which has no depth limit,
+ *     and cap at {@link MAX_BROAD_ROWS} as a safety net (still surfacing
+ *     `truncated:true` if that cap is hit).
  */
 const PAGE_SIZE = 1000;
-const MAX_PAGES = 5;
+/** Skip-paginated cap for scoped queries (per-deployment / per-indexer). */
+const MAX_SCOPED_PAGES = 5;
+/** Cursor-paginated cap for broad queries (network-wide query volume). */
+const MAX_BROAD_ROWS = 50_000;
+const MAX_BROAD_PAGES = Math.ceil(MAX_BROAD_ROWS / PAGE_SIZE);
 
 const QUERY_VOLUME_BY_DEPLOYMENT = /* GraphQL */ `
   query QueryVolumeByDeployment(
@@ -156,6 +171,7 @@ const QUERY_VOLUME_BY_DEPLOYMENT = /* GraphQL */ `
       orderDirection: desc
       where: { subgraphDeployment: $deploymentId, dayNumber_gte: $earliestDay }
     ) {
+      id
       query_count
       subgraphDeployment {
         id
@@ -165,15 +181,21 @@ const QUERY_VOLUME_BY_DEPLOYMENT = /* GraphQL */ `
   }
 `;
 
+/**
+ * Network-wide query-volume scan. Uses CURSOR pagination via `id_gt: $lastId`
+ * with `orderBy: id` so we can page past the Graph gateway's 5,000-row `skip`
+ * cap. The shape of the result is identical to the scoped variant — callers
+ * aggregate by `subgraphDeployment.id` regardless.
+ */
 const QUERY_VOLUME_ALL = /* GraphQL */ `
-  query QueryVolumeAll($earliestDay: Int!, $first: Int!, $skip: Int!) {
+  query QueryVolumeAll($earliestDay: Int!, $first: Int!, $lastId: String!) {
     queryDailyDataPoints(
       first: $first
-      skip: $skip
-      orderBy: dayNumber
-      orderDirection: desc
-      where: { dayNumber_gte: $earliestDay }
+      orderBy: id
+      orderDirection: asc
+      where: { dayNumber_gte: $earliestDay, id_gt: $lastId }
     ) {
+      id
       query_count
       subgraphDeployment {
         id
@@ -202,6 +224,7 @@ const ALLOCATION_QOS_QUERY = /* GraphQL */ `
         dayNumber_gte: $earliestDay
       }
     ) {
+      id
       dataPointCount
       avg_indexer_latency_ms
       proportion_indexer_200_responses
@@ -225,6 +248,7 @@ const INDEXER_QOS_QUERY = /* GraphQL */ `
       orderDirection: desc
       where: { indexer: $indexer, dayNumber_gte: $earliestDay }
     ) {
+      id
       dataPointCount
       avg_indexer_latency_ms
       proportion_indexer_200_responses
@@ -239,12 +263,14 @@ const INDEXER_QOS_QUERY = /* GraphQL */ `
 // =============================================================================
 
 interface RawQueryVolumePoint {
+  id: string;
   query_count: string;
   subgraphDeployment: { id: string } | null;
   chain_id: string | null;
 }
 
 interface RawIndexerOrAllocationPoint {
+  id: string;
   dataPointCount: string;
   avg_indexer_latency_ms: string | null;
   proportion_indexer_200_responses: string | null;
@@ -351,13 +377,15 @@ export function createQosSubgraphClient(
   }
 
   /**
-   * Page through a list-returning subgraph query until either the page is
-   * short (no more rows) or we hit {@link MAX_PAGES}. Returns the flattened
-   * rows plus a `truncated` flag so callers can surface incomplete data.
+   * Skip-paginated fetch for SCOPED queries (per indexer × deployment, per
+   * deployment). Daily granularity bounds the row count to ~365/year, so the
+   * Graph gateway's 5,000-row `skip` cap is comfortably above the natural
+   * ceiling. Caps at {@link MAX_SCOPED_PAGES} pages.
    *
-   * The optional `signal` is forwarded to every page request AND checked
-   * between pages so an abort observed after one page doesn't trigger the
-   * next request.
+   * Returns the flattened rows plus a `truncated` flag so callers can surface
+   * incomplete data. The optional `signal` is forwarded to every page request
+   * AND checked between pages so an abort observed after one page doesn't
+   * trigger the next request.
    */
   async function paginate<TRow>(
     query: string,
@@ -367,7 +395,7 @@ export function createQosSubgraphClient(
   ): Promise<{ rows: TRow[]; truncated: boolean }> {
     const rows: TRow[] = [];
     const reqOpts = signal ? { signal } : undefined;
-    for (let page = 0; page < MAX_PAGES; page++) {
+    for (let page = 0; page < MAX_SCOPED_PAGES; page++) {
       signal?.throwIfAborted();
       const data = await gql.request<Record<string, TRow[]>>(
         query,
@@ -384,7 +412,71 @@ export function createQosSubgraphClient(
         return { rows, truncated: false };
       }
     }
-    // Reached MAX_PAGES with a full final page — assume more data exists.
+    // Reached MAX_SCOPED_PAGES with a full final page — assume more data exists.
+    return { rows, truncated: true };
+  }
+
+  /**
+   * Cursor-paginated fetch for BROAD queries (network-wide query volume).
+   *
+   * The Graph gateway caps `skip` at 5,000 rows, so skip-pagination on a
+   * busy 30-day window across thousands of deployments silently drops rows
+   * and downstream aggregates become "top-N from a sample" instead of a
+   * true top-N. Cursor-pagination (`id_gt: $lastId`, `orderBy: id asc`) has
+   * no depth limit, but we still cap total rows at {@link MAX_BROAD_ROWS}
+   * as a safety net; if the cap is hit we surface `truncated: true` AND
+   * emit a stderr warning at the client boundary so operators see the
+   * pagination ceiling rather than discovering it via wrong rankings.
+   *
+   * `TRow` must have a string `id` field (the per-entity primary key,
+   * unique within the entity type) — every QoS Oracle entity exposes one.
+   */
+  async function paginateByCursor<TRow extends { id: string }>(
+    query: string,
+    baseVars: Record<string, unknown>,
+    rowsKey: string,
+    signal?: AbortSignal,
+  ): Promise<{ rows: TRow[]; truncated: boolean }> {
+    const rows: TRow[] = [];
+    const reqOpts = signal ? { signal } : undefined;
+    let lastId = '';
+    for (let page = 0; page < MAX_BROAD_PAGES; page++) {
+      signal?.throwIfAborted();
+      const data = await gql.request<Record<string, TRow[]>>(
+        query,
+        {
+          ...baseVars,
+          first: PAGE_SIZE,
+          lastId,
+        },
+        reqOpts,
+      );
+      const batch = data[rowsKey] ?? [];
+      rows.push(...batch);
+      if (batch.length < PAGE_SIZE) {
+        return { rows, truncated: false };
+      }
+      // Advance the cursor. The last row's id is the largest in the batch
+      // (orderBy: id asc), so `id_gt: lastId` on the next page picks up
+      // exactly where this one stopped — no gaps, no duplicates.
+      const tail = batch[batch.length - 1];
+      if (!tail || tail.id === lastId) {
+        // Defensive: if the gateway returns a non-advancing cursor we'd
+        // infinite-loop. Stop here and surface as truncated.
+        process.stderr.write(
+          `[qos-subgraph] warn: cursor pagination stalled at id=${lastId} ` +
+            `after ${rows.length} rows — surfacing as truncated.\n`,
+        );
+        return { rows, truncated: true };
+      }
+      lastId = tail.id;
+    }
+    // Reached MAX_BROAD_ROWS with a full final page — more data exists.
+    process.stderr.write(
+      `[qos-subgraph] warn: broad query hit MAX_BROAD_ROWS=${MAX_BROAD_ROWS} ` +
+        `(query="${rowsKey}"); result is incomplete — surfacing truncated:true. ` +
+        `Aggregations (e.g. top-N rankings) may be missing high-volume rows.\n`,
+    );
     return { rows, truncated: true };
   }
 
@@ -482,6 +574,10 @@ export function createQosSubgraphClient(
     async getQueryVolume({ deploymentId, timeRange }, callOpts) {
       const { windowSeconds, windowStart, windowEnd, earliestDay } =
         windowBounds(timeRange);
+      // Scoped (single-deployment) path is bounded to days-per-window rows,
+      // so skip-pagination is fine. Broad (no deploymentId) path can blow
+      // past the gateway's skip cap — use cursor pagination so we don't
+      // silently drop deployments from the network-wide volume scan.
       const { rows: raw, truncated } =
         deploymentId !== undefined
           ? await paginate<RawQueryVolumePoint>(
@@ -490,7 +586,7 @@ export function createQosSubgraphClient(
               'queryDailyDataPoints',
               callOpts?.signal,
             )
-          : await paginate<RawQueryVolumePoint>(
+          : await paginateByCursor<RawQueryVolumePoint>(
               QUERY_VOLUME_ALL,
               { earliestDay },
               'queryDailyDataPoints',
@@ -555,7 +651,13 @@ export function createQosSubgraphClient(
 
     async getTopQueriedDeployments({ limit, timeRange }, callOpts) {
       const { windowSeconds, earliestDay } = windowBounds(timeRange);
-      const { rows: raw, truncated } = await paginate<RawQueryVolumePoint>(
+      // Network-wide scan: use cursor pagination so we don't fall foul of
+      // the gateway's 5,000-row `skip` cap. A busy 30-day window across
+      // thousands of deployments × 30 days easily exceeds that, and a
+      // skip-truncated input would silently produce a wrong top-N (the
+      // highest-volume deployment can sit anywhere in id-space, not just
+      // the most-recent dayNumber slice).
+      const { rows: raw, truncated } = await paginateByCursor<RawQueryVolumePoint>(
         QUERY_VOLUME_ALL,
         { earliestDay },
         'queryDailyDataPoints',
@@ -578,19 +680,17 @@ export function createQosSubgraphClient(
         })
         .slice(0, limit);
 
-      // Note: `truncated` is intentionally not surfaced on the per-row
-      // DeploymentVolumeRow shape — a ranked top-N list with a truncated
-      // input may still be the correct top-N (the cap on pages dropped
-      // low-volume tail data, not the leaders). Callers that need it can
-      // use getQueryVolume which does expose `truncated`.
-      void truncated;
-
+      // If the raw fetch was truncated, the aggregated top-N may be missing
+      // a high-volume deployment whose rows happened to land past the cap.
+      // Surface that explicitly so callers (DiscoveryEngine, qos-tools) can
+      // warn the operator rather than treating the ranking as authoritative.
       return ranked.map((r, idx) => ({
         deployment_id: r.deployment_id,
         query_count: r.queryCount.toString(),
         chain_id: r.chain_id,
         rank: idx + 1,
         window_seconds: windowSeconds,
+        ...(truncated ? { truncated: true } : {}),
       }));
     },
   };

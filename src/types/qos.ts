@@ -123,6 +123,14 @@ export interface IndexerQoSRow {
 /**
  * One entry in the ranked "top deployments by query volume" list.
  * Volume is summed across all `QueryDailyDataPoint` rows in the window.
+ *
+ * If `truncated` is set on a row, the raw QoS scan hit its pagination cap
+ * and the aggregated top-N may be missing a high-volume deployment whose
+ * daily rows fell past the cap. Callers should propagate the flag to the
+ * operator rather than treating the ranking as authoritative. The flag is
+ * the same on every row in a given response (it describes the underlying
+ * scan, not an individual deployment) — surfacing it per-row keeps the
+ * shape array-flat for downstream consumers that map over rows.
  */
 export interface DeploymentVolumeRow {
   deployment_id: string;
@@ -134,4 +142,6 @@ export interface DeploymentVolumeRow {
   rank: number;
   /** Length of the resolved window, in seconds. */
   window_seconds: number;
+  /** True if pagination hit the cap and the underlying scan is incomplete. */
+  truncated?: boolean;
 }

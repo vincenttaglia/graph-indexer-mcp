@@ -83,7 +83,12 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
         },
         { signal: extra.signal },
       );
-      return jsonResult({ rows });
+      // The QoS client sets `truncated:true` on every row when its
+      // underlying scan hit the pagination cap (the flag describes the
+      // scan, not the row). Hoist to a top-level field so consumers don't
+      // have to inspect every row to know the result is incomplete.
+      const truncated = rows.some((r) => r.truncated === true);
+      return jsonResult(truncated ? { rows, truncated: true } : { rows });
     },
   });
 
@@ -119,9 +124,11 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
         },
         { signal: extra.signal },
       );
+      const truncated = rows.some((r) => r.truncated === true);
       return jsonResult({
         indexer_address: config.indexerAddress,
         rows,
+        ...(truncated ? { truncated: true } : {}),
       });
     },
   });
@@ -150,7 +157,12 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
         },
         { signal: extra.signal },
       );
-      return jsonResult({ rows });
+      // Hoist `truncated` to the top of the payload — when the underlying
+      // scan was capped, the ranking may be missing high-volume deployments
+      // whose rows landed past the pagination ceiling. Operators should
+      // treat the result as advisory rather than authoritative.
+      const truncated = rows.some((r) => r.truncated === true);
+      return jsonResult(truncated ? { rows, truncated: true } : { rows });
     },
   });
 }

@@ -632,14 +632,25 @@ export class DiscoveryEngine {
 
     // ------------------------------------------------------------------------
     // Fetch 30-day query volume in a single QoS call (degrade gracefully).
+    //
+    // The QoS client paginates its underlying scan and surfaces a `truncated`
+    // flag on every row if the pagination cap was hit (the flag describes
+    // the scan, not the row). When set, the per-deployment volume map may
+    // be missing some deployments entirely OR have undercounted volumes for
+    // ones whose daily rows fell past the cap — `volumeScore` for affected
+    // candidates would be biased toward 0. Surface as a discovery warning
+    // so operators see the limitation in the result rather than silently
+    // accepting a biased scoring run.
     // ------------------------------------------------------------------------
     const queryVolumeById = new Map<string, bigint>();
+    let qosVolumeTruncated = false;
     try {
       const volumes = await this.deps.qosClient.getQueryVolume(
         { timeRange: { days: 30 } },
         signal ? { signal } : undefined,
       );
       for (const v of volumes) {
+        if (v.truncated) qosVolumeTruncated = true;
         if (v.deployment_id) {
           // `query_count` is a BigInt-as-string on the QoS client surface,
           // so parse it directly via BigInt. Truncate any decimal part
@@ -647,6 +658,13 @@ export class DiscoveryEngine {
           // a bad row should not poison the whole map.
           queryVolumeById.set(v.deployment_id, parseQueryCount(v.query_count));
         }
+      }
+      if (qosVolumeTruncated) {
+        warnings.push(
+          `qos: 30-day query-volume scan was truncated (pagination cap hit); ` +
+            `some deployments may be missing or undercounted, biasing ` +
+            `volumeScore toward 0 for affected candidates.`,
+        );
       }
     } catch (err) {
       // A caller-initiated abort during the QoS fetch should propagate, not
