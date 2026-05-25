@@ -29,7 +29,6 @@ function baseConfig(over: Partial<OptimizerConfig> = {}): OptimizerConfig {
     riskyDeploymentCapPct: 0.05,
     minSignal: GRT(1_000n),
     gasEstimateGrt: GRT(10n),
-    blocksPerYear: 2_628_000,
     whitelist: [],
     blacklist: [],
     frozenlist: [],

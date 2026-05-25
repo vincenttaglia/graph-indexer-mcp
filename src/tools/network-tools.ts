@@ -12,7 +12,7 @@
  * The APR math in `calculate_deployment_apr` follows the formula sketched in
  * `graph-indexer-mcp-design.md` §3.1 and §4.1 step 3:
  *
- *   issuance_per_year = network.networkGRTIssuancePerBlock * blocks_per_year
+ *   issuance_per_year = network.networkGRTIssuancePerBlock * BLOCKS_PER_YEAR
  *   reward_share      = (deployment.signalledTokens / network.totalTokensSignalled)
  *                       * issuance_per_year
  *   indexer_share     = new_allocation / (deployment.stakedTokens + new_allocation)
@@ -22,10 +22,11 @@
  * `networkGRTIssuancePerBlock` is the canonical field on the network
  * subgraph. It is the per-block GRT issuance dedicated to indexing rewards
  * (wei), denominated per Ethereum block regardless of which chain hosts the
- * Network Subgraph. To annualize we multiply by `blocks_per_year`, which
- * the caller MUST supply. The canonical value is 2,102,400 (5760 blocks/day
- * × 365), matching indexer-tools-v4. This single value applies for both
- * Ethereum mainnet and Arbitrum One. A wrong value would silently skew APR.
+ * Network Subgraph. To annualize we multiply by `BLOCKS_PER_YEAR` from
+ * `../utils/constants.js` — a single hardcoded constant (2,102,400 =
+ * 5760 blocks/day × 365, matching indexer-tools-v4). The same value applies
+ * for both Ethereum mainnet and Arbitrum One — see the constant's doc
+ * comment for the full rationale.
  *
  * Reward-denied deployments (`deniedAt != 0`) MUST be excluded from APR per
  * design §4.1. We surface `apr: 0` with `denied: true` so the caller can see
@@ -45,6 +46,7 @@ import type { Config } from '../config.js';
 import type {
   NetworkSubgraphClient,
 } from '../clients/network-subgraph.js';
+import { BLOCKS_PER_YEAR } from '../utils/constants.js';
 
 export interface NetworkToolDeps {
   client: NetworkSubgraphClient;
@@ -233,20 +235,8 @@ export function registerNetworkTools(
       allocation_amount: z
         .string()
         .regex(/^\d+$/, 'allocation_amount must be a non-negative integer string in wei'),
-      blocks_per_year: z
-        .coerce.number()
-        .int()
-        .positive()
-        .describe(
-          'Blocks per year used to annualize networkGRTIssuancePerBlock. ' +
-            'Required, no default. Recommended value: 2102400 (matches ' +
-            'indexer-tools-v4 canonical formula — 5760 blocks/day × 365). ' +
-            'Applies for both Ethereum mainnet and Arbitrum: ' +
-            'networkGRTIssuancePerBlock is denominated per Ethereum block ' +
-            'regardless of which chain hosts the network subgraph.',
-        ),
     },
-    handler: async ({ deployment_id, allocation_amount, blocks_per_year }, extra) => {
+    handler: async ({ deployment_id, allocation_amount }, extra) => {
       extra.signal.throwIfAborted();
 
       const newAllocation = parseWei('allocation_amount', allocation_amount);
@@ -281,7 +271,7 @@ export function registerNetworkTools(
         });
       }
 
-      const blocksPerYear = BigInt(blocks_per_year);
+      const blocksPerYear = BigInt(BLOCKS_PER_YEAR);
 
       const signalled = parseWei('deployment.signalledTokens', deployment.signalledTokens);
       const totalSignalled = parseWei(
@@ -295,7 +285,7 @@ export function registerNetworkTools(
       const existingStake = parseWei('deployment.stakedTokens', deployment.stakedTokens);
       const denomStake = existingStake + newAllocation;
 
-      // issuance_per_year [wei] = per-block issuance * blocks_per_year
+      // issuance_per_year [wei] = per-block issuance * BLOCKS_PER_YEAR
       const issuancePerYear = issuancePerBlock * blocksPerYear;
 
       // reward_share = (signal_i / total_signal) * issuance_per_year   [wei/year]

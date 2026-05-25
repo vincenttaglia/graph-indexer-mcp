@@ -36,6 +36,7 @@ import type {
   SubgraphDeployment,
 } from '../types/network.js';
 import type { SubgraphIndexingStatus } from '../types/graphnode.js';
+import { BLOCKS_PER_YEAR } from '../utils/constants.js';
 
 // ===========================================================================
 // Public types
@@ -60,14 +61,6 @@ export interface OptimizerConfig {
   minSignal: bigint | string;
   /** Estimated total gas in GRT wei spent over an allocation's lifetime. */
   gasEstimateGrt: bigint | string;
-  /**
-   * Blocks per year used to annualize `networkGRTIssuancePerBlock`. REQUIRED.
-   * The canonical value is 2,102,400 — matches indexer-tools-v4 canonical
-   * formula (5760 blocks/day × 365). Applies for both Ethereum mainnet and
-   * Arbitrum: `networkGRTIssuancePerBlock` is denominated per Ethereum block
-   * regardless of which chain hosts the network subgraph.
-   */
-  blocksPerYear: number;
   /** Deployments that bypass the candidate filter. */
   whitelist: string[];
   /** Deployments that must never be allocated to. */
@@ -575,7 +568,7 @@ export class AllocationOptimizer {
     const issuancePerBlock = networkParams
       ? toBigInt(networkParams.networkGRTIssuancePerBlock)
       : 0n;
-    const blocksPerYear = BigInt(Math.max(0, Math.trunc(config.blocksPerYear)));
+    const blocksPerYear = BigInt(BLOCKS_PER_YEAR);
     const issuancePerYear = issuancePerBlock * blocksPerYear;
 
     if (totalSignal === 0n) {
@@ -585,7 +578,7 @@ export class AllocationOptimizer {
     }
     if (issuancePerYear === 0n) {
       warnings.push(
-        'networkGRTIssuancePerBlock × blocksPerYear is 0 — APR cannot be ' +
+        'networkGRTIssuancePerBlock × BLOCKS_PER_YEAR is 0 — APR cannot be ' +
           'computed; returning empty plan',
       );
     }

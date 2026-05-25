@@ -25,7 +25,6 @@ function baseConfig(over: Partial<DiscoveryConfig> = {}): DiscoveryConfig {
     indexerAddress: INDEXER,
     minSignal: GRT(1_000n),
     typicalAllocationGrt: GRT(50_000n),
-    blocksPerYear: 2_628_000,
     whitelist: [],
     blacklist: [],
     frozenlist: [],
