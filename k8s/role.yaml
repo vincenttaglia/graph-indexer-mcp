@@ -1,0 +1,36 @@
+# Namespace-scoped permissions for the graphman CLI fallback path.
+#
+# The MCP server needs to:
+#   1. List/get pods to find the graph-node pod that matches GRAPHMAN_POD_LABEL.
+#   2. Open an exec session into that pod to run `graphman` CLI commands.
+#
+# This Role is intentionally scoped to a single namespace. If graph-node runs
+# in a DIFFERENT namespace than the MCP server, apply this Role + RoleBinding
+# in the graph-node namespace (pointing the RoleBinding subject at the MCP's
+# ServiceAccount in graph-indexer-mcp).
+#
+# DO NOT promote this to a ClusterRole — exec into arbitrary pods cluster-wide
+# is effectively root-equivalent on every node those pods land on.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: graph-indexer-mcp-graphnode-exec
+  # Default to the MCP namespace; change to the graph-node namespace if they
+  # are separate. The RoleBinding below must match this namespace.
+  namespace: graph-indexer-mcp
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+rules:
+  # Discover the graph-node pod via label selector.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Open the exec stream into the discovered pod.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Optional: read graph-node pod logs if the MCP ever needs to surface them.
+  # Keep commented unless you wire log-fetching tools.
+  # - apiGroups: [""]
+  #   resources: ["pods/log"]
+  #   verbs: ["get"]
