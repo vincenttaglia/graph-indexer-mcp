@@ -288,7 +288,7 @@ const RECOVERY_HEURISTICS: RecoveryHeuristic[] = [
   // the negative lookbehind rejects negated "no(t)? (yet )?reorg detected".
   {
     type: 'clear_call_cache',
-    pattern: /(?<!\bno\s)(?<!\bnot\s)(?<!\bnot yet\s)\breorg detected\b|\breverted block\b/i,
+    pattern: /(?<!\bno\s)(?<!\bnot\s)(?<!\bnot yet\s)(?:\breorg detected\b|\breverted block\b)/i,
     rationale:
       'Reorg-related failures often leave poisoned call-cache entries; clear the affected range, then rewind.',
     buildArgs: (ctx) => ({
