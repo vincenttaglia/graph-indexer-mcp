@@ -11,6 +11,31 @@ export interface EboToolsDeps {
 }
 
 /**
+ * Safe-integer block number schema. `z.coerce.number().int().nonnegative()`
+ * alone will accept values beyond `Number.MAX_SAFE_INTEGER`, which would
+ * silently lose precision for very-high block heights. Refining to
+ * `Number.isSafeInteger` rejects those up front. If a chain ever produces
+ * blocks past 2^53-1, switch to a `bigint` path for arithmetic.
+ */
+const safeBlockNumber = z.coerce
+  .number()
+  .int()
+  .nonnegative()
+  .refine(
+    (n) => Number.isSafeInteger(n),
+    'block number exceeds Number.MAX_SAFE_INTEGER',
+  );
+
+const safeEpochLength = z.coerce
+  .number()
+  .int()
+  .positive()
+  .refine(
+    (n) => Number.isSafeInteger(n),
+    'epoch_length_blocks exceeds Number.MAX_SAFE_INTEGER',
+  );
+
+/**
  * Register EBO subgraph tools. Three read-only tools as defined in
  * design §5.2:
  *   - get_current_epoch
@@ -30,7 +55,8 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
       'Get the current protocol epoch number and the per-chain start blocks within it. ' +
       'Returned block numbers come from the Epoch Block Oracle (EBO) subgraph and are the ' +
       'correct heights at which to compute POIs for the current epoch.',
-    handler: async () => {
+    handler: async (_args, extra) => {
+      extra.signal.throwIfAborted();
       const result = await client.getCurrentEpoch();
       return {
         content: [
@@ -54,10 +80,17 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
       "EBO has not recorded a value for that (epoch, chain) pair. Use the deployment's " +
       'chain alias (e.g. `mainnet`, `arbitrum-one`).',
     inputSchema: {
-      epoch_number: z.coerce.number().int().nonnegative(),
-      chain_name: z.string(),
+      epoch_number: z.coerce
+        .number()
+        .int()
+        .nonnegative()
+        .describe('Protocol epoch number (non-negative integer).'),
+      chain_name: z
+        .string()
+        .describe("Chain alias as used by The Graph (e.g. 'mainnet', 'arbitrum-one')."),
     },
-    handler: async ({ epoch_number, chain_name }) => {
+    handler: async ({ epoch_number, chain_name }, extra) => {
+      extra.signal.throwIfAborted();
       const result = await client.getEpochBlocks(epoch_number, chain_name);
       return {
         content: [
@@ -87,7 +120,7 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
     description:
       'Estimate how long until the next epoch flips on `chain_name`. ' +
       'Computes: blocks_remaining = max(0, epoch_length_blocks - ' +
-      '(current_block_number - current_epoch_start_block)); hours = ' +
+      'max(0, current_block_number - current_epoch_start_block)); hours = ' +
       'blocks_remaining * avg_block_time_seconds / 3600. ' +
       'Note: this tool takes `current_block_number` and `epoch_length_blocks` as inputs ' +
       "because the EBO subgraph does not supply the chain's current head or the " +
@@ -95,17 +128,34 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
       'Network Subgraph (epoch length) and Graph Node Status API / RPC (chain head) ' +
       'and pass them in.',
     inputSchema: {
-      current_block_number: z.coerce.number().int().nonnegative(),
-      epoch_length_blocks: z.coerce.number().int().positive(),
-      avg_block_time_seconds: z.coerce.number().positive().default(12),
-      chain_name: z.string().default('mainnet'),
+      current_block_number: safeBlockNumber.describe(
+        'Current head block number on `chain_name`. In Stage 3 this is sourced from ' +
+          'Graph Node Status API or RPC.',
+      ),
+      epoch_length_blocks: safeEpochLength.describe(
+        'Epoch length in blocks on `chain_name`. In Stage 3 this is sourced from the ' +
+          'Network Subgraph.',
+      ),
+      avg_block_time_seconds: z.coerce
+        .number()
+        .positive()
+        .default(12)
+        .describe('Average block time in seconds for `chain_name`. Defaults to 12 (mainnet).'),
+      chain_name: z
+        .string()
+        .default('mainnet')
+        .describe("Chain alias as used by The Graph (e.g. 'mainnet', 'arbitrum-one')."),
     },
-    handler: async ({
-      current_block_number,
-      epoch_length_blocks,
-      avg_block_time_seconds,
-      chain_name,
-    }) => {
+    handler: async (
+      {
+        current_block_number,
+        epoch_length_blocks,
+        avg_block_time_seconds,
+        chain_name,
+      },
+      extra,
+    ) => {
+      extra.signal.throwIfAborted();
       const current = await client.getCurrentEpoch();
       const match = current.networkBlocks.find((b) => b.network === chain_name);
       if (!match) {
@@ -135,7 +185,11 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
         };
       }
 
-      const blocksIntoEpoch = current_block_number - epochStartBlock;
+      // Clamp to handle stale / wrong-chain `current_block_number` inputs:
+      // if the caller's head is *behind* the recorded epoch-start block we
+      // treat it as "0 blocks into the epoch" rather than reporting more
+      // than a full epoch remaining (which would be misleading).
+      const blocksIntoEpoch = Math.max(0, current_block_number - epochStartBlock);
       const blocksRemaining = Math.max(0, epoch_length_blocks - blocksIntoEpoch);
       const hoursRemaining = (blocksRemaining * avg_block_time_seconds) / 3600;
       const nextEpochBlock = epochStartBlock + epoch_length_blocks;
@@ -156,6 +210,10 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
                 blocks_remaining: blocksRemaining,
                 hours_remaining: hoursRemaining,
                 next_epoch_block: nextEpochBlock,
+                // Surface when the caller's head is behind the epoch start so
+                // consumers know the result was clamped.
+                current_block_behind_epoch_start:
+                  current_block_number < epochStartBlock,
               },
               null,
               2,
