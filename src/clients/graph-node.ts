@@ -159,9 +159,10 @@ function coerceHealth(value: string): SubgraphIndexingStatus['health'] {
   if (value === 'healthy' || value === 'unhealthy' || value === 'failed') {
     return value;
   }
-  // Defensive fallback: graph-node only emits the three documented values, but
-  // if a future version adds one we'd rather flag it as unhealthy than crash.
-  return 'unhealthy';
+  // graph-node exposes `health` as a strict GraphQL enum; an unknown value
+  // signals schema drift, not a degraded state. Surface it loudly so the
+  // registration helper's try/catch returns an `isError: true` CallToolResult.
+  throw new Error(`Unexpected graph-node health value: "${value}". Schema drift?`);
 }
 
 function normalizeStatus(raw: RawIndexingStatus): SubgraphIndexingStatus {

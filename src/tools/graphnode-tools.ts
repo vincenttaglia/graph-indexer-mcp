@@ -50,7 +50,8 @@ export function registerGraphNodeTools(
           'Optional list of deployment IPFS hashes to filter by. Omit or pass an empty array to return every deployment.',
         ),
     },
-    handler: async (args, _extra) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const statuses = await client.getIndexingStatuses(args.deployment_ids);
       return {
         content: [
@@ -76,7 +77,8 @@ export function registerGraphNodeTools(
     inputSchema: {
       deployment_id: deploymentIdSchema,
     },
-    handler: async (args, _extra) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const status = await client.getDeploymentHealth(args.deployment_id);
       if (!status) {
         return {
@@ -116,7 +118,8 @@ export function registerGraphNodeTools(
     inputSchema: {
       deployment_id: deploymentIdSchema,
     },
-    handler: async (args, _extra) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const entityCount = await client.getEntityCount(args.deployment_id);
       return {
         content: [
