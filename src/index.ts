@@ -22,6 +22,7 @@ import { registerGraphNodeTools } from './tools/graphnode-tools.js';
 import { registerPostgresTools } from './tools/postgres-tools.js';
 import { registerAgentTools } from './tools/agent-tools.js';
 import { registerGraphmanTools } from './tools/graphman-tools.js';
+import { registerCompositeTools } from './tools/composite-tools.js';
 
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
@@ -98,6 +99,18 @@ async function main(): Promise<void> {
   registerPostgresTools(server, { client: postgresClient });
   registerAgentTools(server, { client: agentClient, config });
   registerGraphmanTools(server, { client: graphmanClient });
+
+  // Stage 3: composite tools wrapping the three workflow services.
+  registerCompositeTools(server, {
+    config,
+    networkClient,
+    eboClient,
+    qosClient,
+    graphNodeClient,
+    postgresClient,
+    agentClient,
+    graphmanClient,
+  });
 
   // Stage 2: resources (read-only context) and prompts (workflow templates).
   registerResources(server, {
