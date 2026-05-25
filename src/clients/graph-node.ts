@@ -1,5 +1,6 @@
 import { createGraphqlClient, type TypedGraphqlClient } from '../utils/graphql-client.js';
 import { TtlCache } from '../utils/cache.js';
+import { toQmDeploymentId } from '../utils/ipfs.js';
 import type {
   Block,
   ChainIndexingStatus,
@@ -250,13 +251,36 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
       return [];
     }
 
+    // Normalize at the boundary: graph-node's GraphQL indexingStatuses query
+    // only recognizes CIDv0 (`Qm...`) deployment IDs, but callers may pass
+    // bytes32 (`0x...`) form from the network subgraph. Convert before
+    // building the cache key so both encodings share a cache slot.
+    //
+    // Dedupe AFTER normalization so that, e.g., `[bytes32_a, Qm_a]` (same
+    // logical deployment in two encodings) collapses into a single id and
+    // shares the cache slot with `[Qm_a]`. Without the dedupe, the two
+    // input shapes produced different cache keys (`'Qma,Qma'` vs `'Qma'`)
+    // for the same underlying query — cache fragmentation, not a
+    // correctness bug.
+    let normalizedIds: string[] | undefined;
+    if (deploymentIds && deploymentIds.length > 0) {
+      try {
+        const normalized = deploymentIds.map(toQmDeploymentId);
+        normalizedIds = Array.from(new Set(normalized));
+      } catch (err) {
+        throw new Error(
+          `Invalid deployment ID format: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     // Cache key:
     //   - 'all' when no filter (graph-node returns every tracked deployment)
     //   - sorted-and-joined deployment IDs otherwise, so equivalent filters
     //     (regardless of input ordering) share a cache slot.
     const key =
-      deploymentIds && deploymentIds.length > 0
-        ? [...deploymentIds].sort().join(',')
+      normalizedIds && normalizedIds.length > 0
+        ? [...normalizedIds].sort().join(',')
         : 'all';
     return statusesCache.getOrFetch(
       key,
@@ -265,13 +289,13 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
         // ("entered unreachable code") when `subgraphs: null` is passed
         // explicitly, so the "all deployments" path must omit the argument
         // entirely via a separate query with no variables. The `[]` input is
-        // short-circuited above, so by here `deploymentIds` is either
+        // short-circuited above, so by here `normalizedIds` is either
         // undefined (→ all) or non-empty (→ by-ids).
         const data =
-          deploymentIds && deploymentIds.length > 0
+          normalizedIds && normalizedIds.length > 0
             ? await gql.request<IndexingStatusesResponse>(
                 INDEXING_STATUSES_BY_IDS_QUERY,
-                { subgraphs: deploymentIds },
+                { subgraphs: normalizedIds },
                 fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
               )
             : await gql.request<IndexingStatusesResponse>(
@@ -289,23 +313,34 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     deploymentId: string,
     callOpts?: GraphNodeCallOpts,
   ): Promise<SubgraphIndexingStatus | null> {
+    // Normalize at the boundary. A conversion failure here is distinct from
+    // "deployment not in graph-node" (which legitimately returns null) — we
+    // throw so callers don't conflate a malformed ID with a missing-status.
+    let qm: string;
+    try {
+      qm = toQmDeploymentId(deploymentId);
+    } catch (err) {
+      throw new Error(
+        `Invalid deployment ID format: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return healthCache.getOrFetch(
-      deploymentId,
+      qm,
       async (fetchOpts) => {
         // Call the underlying GraphQL directly — invoking getIndexingStatuses
         // here would route through statusesCache under a single-element key,
         // creating two cache layers for the same data.
         const data = await gql.request<IndexingStatusesResponse>(
           INDEXING_STATUSES_BY_IDS_QUERY,
-          { subgraphs: [deploymentId] },
+          { subgraphs: [qm] },
           fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
         );
         const statuses = (data.indexingStatuses ?? []).map(normalizeStatus);
         return statuses[0] ?? null;
       },
       callOpts?.signal
-        ? { signal: callOpts.signal, keyLabel: deploymentId }
-        : { keyLabel: deploymentId },
+        ? { signal: callOpts.signal, keyLabel: qm }
+        : { keyLabel: qm },
     );
   }
 
@@ -313,6 +348,8 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     deploymentId: string,
     callOpts?: GraphNodeCallOpts,
   ): Promise<string | null> {
+    // getDeploymentHealth already normalizes — pass through unchanged so a
+    // single conversion happens (and a single error surfaces) per call.
     const status = await getDeploymentHealth(deploymentId, callOpts);
     return status ? status.entityCount : null;
   }

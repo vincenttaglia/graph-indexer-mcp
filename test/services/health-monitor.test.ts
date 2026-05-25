@@ -447,3 +447,131 @@ describe('HealthMonitor recovery heuristics', () => {
     assert.equal(res.recoveryPlan[0]!.type, 'manual_review');
   });
 });
+
+describe('HealthMonitor missing-status distinction (Option B: statusMissing flag)', () => {
+  it('sets statusMissing=true when graph-node returns no row for the deployment', async () => {
+    // Build a monitor where the fake graph-node client knows about NO
+    // deployments — getDeploymentHealth resolves to null for every input.
+    const alloc = mkAlloc('missing');
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [alloc],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      // empty statusById → every getDeploymentHealth call returns null
+      graphNodeClient: fakeGraphNodeClient({ statusById: {} }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({ indexerAddress: INDEXER, urgencyThresholdHours: 6 });
+
+    const ah = res.allocations[0]!;
+    // statusMissing flag distinguishes "graph-node has no row" from a real
+    // deterministic failure. Operators / composite tools MUST check this
+    // before treating health=failed as actionable.
+    assert.equal(ah.statusMissing, true);
+    assert.equal(ah.closability, 'none');
+    assert.match(
+      ah.closabilityReason,
+      /graph-node has no indexing-status row/,
+    );
+    // health stays 'failed' so risk tier still surfaces the row prominently.
+    assert.equal(ah.health, 'failed');
+  });
+
+  it('sets statusMissing=false on a normal (present) status row', async () => {
+    const res = await runWithSingle(
+      mkAlloc('present'),
+      mkStatus('present', { health: 'healthy', latestBlock: EPOCH_START_BLOCK + 100 }),
+    );
+    assert.equal(res.allocations[0]!.statusMissing, false);
+  });
+
+  it('excludes statusMissing allocations from recoveryPlan (no false-positive manual_review)', async () => {
+    // Audit follow-up: buildRecoveryPlan previously emitted a
+    // manual_review recovery action for every allocation whose
+    // graph-node status was missing — because statusMissing rows carry
+    // `health: 'failed'` (type-forced default) and the recovery loop only
+    // gated on `health !== 'failed'`. Under the live failure mode where
+    // all 32 allocations were missing from graph-node, the operator
+    // would have received 32 false-positive recovery prompts. The fix
+    // skips statusMissing rows up-front because the correct action is
+    // operator-side (assign the deployment or remove the allocation),
+    // not a graphman recovery command.
+    const alloc = mkAlloc('missing-recovery');
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [alloc],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      // empty statusById → getDeploymentHealth always returns null →
+      // AllocationHealth ends up with statusMissing: true and health: 'failed'.
+      graphNodeClient: fakeGraphNodeClient({ statusById: {} }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({ indexerAddress: INDEXER, urgencyThresholdHours: 6 });
+
+    // Sanity-check: the row IS marked failed+missing in `allocations`...
+    assert.equal(res.allocations[0]!.statusMissing, true);
+    assert.equal(res.allocations[0]!.health, 'failed');
+    // ...but it must NOT appear in recoveryPlan — the fix is the whole
+    // point of this test.
+    assert.equal(res.recoveryPlan.length, 0);
+    assert.equal(
+      res.recoveryPlan.find((r) => r.deploymentId === alloc.subgraphDeployment.id),
+      undefined,
+    );
+  });
+
+  it('passes bytes32-form deployment IDs through to graph-node (client normalizes)', async () => {
+    // Simulates the live-indexer scenario that motivated the fix: the
+    // network subgraph reports allocations with bytes32 deployment IDs
+    // (`0x...`), and HealthMonitor passes them straight to the graph-node
+    // client. The fake client doesn't normalize, so it would only "find"
+    // the status if the deployment id matches exactly. This test exercises
+    // the matching path with the bytes32 form recorded under the same key
+    // in the fake — proving the AllocationHealth shape is filled out and
+    // statusMissing is false when the status IS present.
+    const BYTES32_ID =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const alloc = allocation({
+      id: 'live-1',
+      deploymentId: BYTES32_ID,
+      allocatedTokens: GRT(50_000n),
+    });
+    const status = indexingStatus({
+      id: BYTES32_ID,
+      health: 'healthy',
+      chain: CHAIN,
+      latestBlock: EPOCH_START_BLOCK + 100,
+    });
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [alloc],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      graphNodeClient: fakeGraphNodeClient({ statusById: { [BYTES32_ID]: status } }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({ indexerAddress: INDEXER, urgencyThresholdHours: 6 });
+
+    const ah = res.allocations[0]!;
+    assert.equal(ah.statusMissing, false);
+    assert.equal(ah.health, 'healthy');
+    assert.equal(ah.latestBlock, EPOCH_START_BLOCK + 100);
+  });
+});

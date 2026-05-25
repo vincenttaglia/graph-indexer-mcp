@@ -138,7 +138,7 @@ Source: `src/tools/graphnode-tools.ts`. Backed by the graph-node Status GraphQL 
 - **Permission:** `read`
 - **Description:** Indexing health and sync progress for deployments tracked by graph-node. Omit `deployment_ids` to fetch every tracked deployment. Each entry includes health, sync state, per-chain progress, errors, entity count.
 - **Args:**
-  - `deployment_ids` (string[], optional) — deployment IPFS hashes.
+  - `deployment_ids` (string[], optional) — deployment IDs in either IPFS CIDv0 form (`Qm...`, 46 chars) or bytes32 hex form (`0x...`, 66 chars). Both encodings are accepted; the client normalizes to CIDv0 internally before querying graph-node.
 - **Returns:** JSON `{ count, statuses[] }`.
 
 ### `get_deployment_health`
@@ -146,7 +146,7 @@ Source: `src/tools/graphnode-tools.ts`. Backed by the graph-node Status GraphQL 
 - **Permission:** `read`
 - **Description:** Detailed indexing health for a single deployment, including fatal/non-fatal errors, per-chain sync, entity count. Returns null when not tracked.
 - **Args:**
-  - `deployment_id` (string, required) — Qm... IPFS hash.
+  - `deployment_id` (string, required) — either `Qm...` IPFS CIDv0 or `0x...` bytes32 hex. Normalized internally to CIDv0 before querying graph-node.
 - **Returns:** JSON status object, or `{ deployment_id, status: null, message }` if not tracked.
 
 ### `get_entity_count`
@@ -154,7 +154,7 @@ Source: `src/tools/graphnode-tools.ts`. Backed by the graph-node Status GraphQL 
 - **Permission:** `read`
 - **Description:** Total entity count for a deployment as a decimal string (BigInt-safe). Returns null when not tracked.
 - **Args:**
-  - `deployment_id` (string, required).
+  - `deployment_id` (string, required) — either `Qm...` or `0x...` form; both accepted (normalized to CIDv0 internally).
 - **Returns:** JSON `{ deployment_id, entity_count }`.
 
 ---
