@@ -45,12 +45,11 @@ It returns a \`DiscoveryResult\` with:
 
 - \`stale\` — stale deployments (deploymentId, reason, sizeBytes, paused, hasAllocation, isFrozen). Cleanup is covered by \`cleanup_stale_deployments\`; ignore here.
 - \`cleanup\` — ordered cleanup step sequences per stale deployment. Same — ignore for discovery.
-- \`opportunities\` — raw candidates with signalledTokens, totalStakedTokens, indexerCount, queryVolume30d, entityCount, chain.
-- \`scoredOpportunities\` — ranked by §4.3 score, with \`score\`, \`components\` (aprScore, volumeScore, signalScore, costScore), and \`projectedAprFraction\`. This is the discovery-facing table.
-- \`ruleRecommendations\` — suggested \`{deploymentId, decisionBasis: 'offchain', allocationAmount (wei string), rationale}\` entries for the top scored opportunities.
+- \`opportunities\` — ranked \`ScoredOpportunity[]\` (already sorted by §4.3 score, capped at \`max_candidates\`). Each entry has the raw candidate fields (signalledTokens, totalStakedTokens, indexerCount, queryVolume30d, entityCount, chain) plus \`score\`, \`components\` (aprScore, volumeScore, signalScore, costScore), and \`projectedAprFraction\`. This is the discovery-facing table.
+- \`ruleRecommendations\` — suggested \`{deploymentId, decisionBasis: 'offchain', allocationAmount (wei string), rationale}\` entries for the top scored opportunities. The \`rationale\` lives here, not on each opportunity — join by \`deploymentId\` when presenting.
 - \`warnings\` and \`errors\` — surface prominently.
 
-Present \`scoredOpportunities\` as a markdown table (rank, deploymentId, score, projectedAprFraction, signalledTokens, queryVolume30d, entityCount, chain, rationale) and list \`ruleRecommendations\` underneath. **STOP. Wait for explicit operator approval before calling \`set_indexing_rule\` for any recommendation.** Do NOT call \`queue_allocate\` for newly-discovered deployments — they aren't synced yet; allocation belongs to a later \`optimize_allocations\` pass.
+Present \`opportunities\` as a markdown table (rank, deploymentId, score, projectedAprFraction, signalledTokens, queryVolume30d, entityCount, chain) and list \`ruleRecommendations\` underneath with their rationale strings. **STOP. Wait for explicit operator approval before calling \`set_indexing_rule\` for any recommendation.** Do NOT call \`queue_allocate\` for newly-discovered deployments — they aren't synced yet; allocation belongs to a later \`optimize_allocations\` pass.
 
 If the composite returns blocking errors, or you need to debug an individual score / override the candidate filter, fall back to the ALTERNATIVE PATH below.
 
