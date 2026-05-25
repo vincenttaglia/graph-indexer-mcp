@@ -47,3 +47,11 @@ export interface GraphmanCliResult {
   /** Full argv of the underlying graphman invocation, for logging/debugging. */
   command: string[];
 }
+
+/** One stream (stdout or stderr) after size-capping for MCP transport. */
+export interface CappedStream {
+  /** Possibly-truncated text (tail kept — errors typically appear at the end). */
+  text: string;
+  /** True if the original was longer than the cap and bytes were dropped. */
+  truncated: boolean;
+}

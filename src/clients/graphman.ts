@@ -203,10 +203,14 @@ function normalizeExecutionState(raw: string | undefined): ExecutionStatus['stat
   if (upper === 'RUNNING' || upper === 'SUCCEEDED' || upper === 'FAILED') {
     return upper;
   }
-  // Conservative default — surfacing FAILED on unknown state would be misleading;
-  // RUNNING keeps the polling loop alive until the operator notices.
-  // TODO: verify against live graphman schema for the full state set.
-  return 'RUNNING';
+  // Throw on unknown state rather than silently coercing — silent coercion to
+  // RUNNING (the prior behaviour) would mask schema drift and trap callers in
+  // an indefinite polling loop. Surface the raw value so operators can update
+  // the allow-list (or the graphman schema).
+  throw new Error(
+    `graphman returned unknown execution state ${JSON.stringify(raw)}; ` +
+      `expected one of RUNNING | SUCCEEDED | FAILED`,
+  );
 }
 
 export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClient {
