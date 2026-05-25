@@ -1,6 +1,6 @@
-# Non-secret configuration. Sensitive values (auth tokens, postgres URLs)
-# live in secret.yaml.example -> Secret. Anything that you would not mind
-# committing to version control belongs here.
+# Non-secret configuration. Sensitive values (auth tokens, postgres URLs,
+# gateway URLs containing API keys) live in secret.yaml.example -> Secret.
+# Anything that you would not mind committing to version control belongs here.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,10 +12,13 @@ data:
   # --- Indexer identity ---
   INDEXER_ADDRESS: "0x0000000000000000000000000000000000000000"
 
-  # --- Data source endpoints ---
-  NETWORK_SUBGRAPH_URL: "https://gateway.thegraph.com/api/REPLACE_KEY/subgraphs/id/REPLACE_NETWORK_SUBGRAPH_ID"
-  EBO_SUBGRAPH_URL: "https://gateway.thegraph.com/api/REPLACE_KEY/subgraphs/id/REPLACE_EBO_SUBGRAPH_ID"
-  QOS_SUBGRAPH_URL: "https://gateway.thegraph.com/api/REPLACE_KEY/subgraphs/id/REPLACE_QOS_SUBGRAPH_ID"
+  # --- Internal-cluster data source endpoints ---
+  # NOTE: Gateway URLs that embed API keys (NETWORK_SUBGRAPH_URL,
+  # EBO_SUBGRAPH_URL, QOS_SUBGRAPH_URL) live in the Secret, NOT here, because
+  # the path segment /api/<KEY>/ is secret material. If you self-host these
+  # subgraphs with no key in the URL, you can move them back into this
+  # ConfigMap — keys provided via envFrom are last-write-wins, so duplicating
+  # a key in both ConfigMap and Secret is undefined behavior; pick one.
   GRAPH_NODE_STATUS_URL: "http://graph-node-query.graph-node.svc.cluster.local:8030/graphql"
   INDEXER_AGENT_URL: "http://indexer-agent.indexer-agent.svc.cluster.local:18000/graphql"
   GRAPHMAN_API_URL: "http://graph-node-query.graph-node.svc.cluster.local:8050"

@@ -54,7 +54,11 @@ spec:
           type: RuntimeDefault
       containers:
         - name: mcp
-          image: ghcr.io/graphprotocol/graph-indexer-mcp:0.1.0  # pin per release
+          # Operators must set this to their registry-hosted image reference
+          # (e.g. ghcr.io/<your-org>/graph-indexer-mcp:0.1.0). The placeholder
+          # is intentional — there is no canonical upstream registry for this
+          # image. Pin per release; avoid :latest in production.
+          image: REPLACE_IMAGE:0.1.0
           imagePullPolicy: IfNotPresent
           # Keep stdin open so `kubectl exec -i` connections can talk JSON-RPC.
           stdin: true

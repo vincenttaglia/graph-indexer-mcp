@@ -40,7 +40,13 @@ RUN npm prune --omit=dev
 # -----------------------------------------------------------------------------
 # Bitnami publishes a minimal, signed image with the kubectl binary at a known
 # path. Pinning to a specific minor version keeps the image reproducible.
-FROM bitnami/kubectl:1.31.0 AS kubectl
+#
+# Kubernetes version-skew policy: kubectl is supported within ±1 minor of the
+# kube-apiserver it talks to. Pinning to 1.34 covers apiserver 1.33-1.35,
+# which spans the currently-supported k8s minor versions (1.32, 1.33, 1.34 as
+# of this writing). If your cluster runs older or newer, bump this tag to
+# match — kubectl tags follow upstream k8s releases.
+FROM bitnami/kubectl:1.34.0 AS kubectl
 
 
 # -----------------------------------------------------------------------------
@@ -49,9 +55,13 @@ FROM bitnami/kubectl:1.31.0 AS kubectl
 FROM node:22-alpine AS runtime
 
 # OCI metadata.
+# NOTE: org.opencontainers.image.source should point to the canonical source
+# repository for this image. Operators who fork or vendor this code should
+# replace REPLACE_IMAGE_SOURCE with their own repo URL (e.g. via
+# `docker build --label org.opencontainers.image.source=...`) before pushing.
 LABEL org.opencontainers.image.title="graph-indexer-mcp"
 LABEL org.opencontainers.image.description="MCP server for managing Graph Protocol indexer operations"
-LABEL org.opencontainers.image.source="https://github.com/graphprotocol/graph-indexer-mcp"
+LABEL org.opencontainers.image.source="REPLACE_IMAGE_SOURCE"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Tini gives us a real PID 1 (proper signal handling + zombie reaping). The

@@ -5,3 +5,8 @@ dist/
 *.log
 .DS_Store
 worktrees/
+
+# Populated Kubernetes secrets — never commit. The template lives at
+# k8s/secret.yaml.example; copy to k8s/secret.yaml and fill in real values.
+k8s/secret.yaml
+*.secret.yaml
