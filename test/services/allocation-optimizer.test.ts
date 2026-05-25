@@ -1,0 +1,313 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  AllocationOptimizer,
+  calculateApr,
+  type OptimizerConfig,
+} from '../../src/services/allocation-optimizer.js';
+import {
+  allocation,
+  deployment,
+  fakeAgentClient,
+  fakeGraphmanClient,
+  fakeGraphNodeClient,
+  fakeNetworkClient,
+  fakeQosClient,
+  indexer,
+  indexingStatus,
+  networkParams,
+} from '../fakes.js';
+
+const INDEXER = '0x0000000000000000000000000000000000000001';
+const GRT = (n: bigint): bigint => n * 10n ** 18n;
+
+function baseConfig(over: Partial<OptimizerConfig> = {}): OptimizerConfig {
+  return {
+    indexerAddress: INDEXER,
+    maxAllocations: 10,
+    maxAllocationPct: 0.2,
+    riskyDeploymentCapPct: 0.05,
+    minSignal: GRT(1_000n),
+    gasEstimateGrt: GRT(10n),
+    blocksPerYear: 2_628_000,
+    whitelist: [],
+    blacklist: [],
+    frozenlist: [],
+    riskyDeployments: [],
+    ...over,
+  };
+}
+
+describe('calculateApr', () => {
+  it('returns 0 when totalSignal is 0', () => {
+    const apr = calculateApr({
+      signal: 100n,
+      totalSignal: 0n,
+      issuancePerYear: 1n,
+      proposedAllocation: 1n,
+      otherIndexersAllocation: 0n,
+    });
+    assert.equal(apr, 0);
+  });
+
+  it('returns 0 when total allocation (other + proposed) is 0', () => {
+    const apr = calculateApr({
+      signal: 100n,
+      totalSignal: 1000n,
+      issuancePerYear: 1n,
+      proposedAllocation: 0n,
+      otherIndexersAllocation: 0n,
+    });
+    assert.equal(apr, 0);
+  });
+
+  it('computes the canonical APR formula', () => {
+    // signal=1e21 (1000 GRT signal), totalSignal=1e22 (10x),
+    // issuancePerYear=3e24, proposedAllocation=1e20 (100 GRT),
+    // otherIndexersAllocation=9e20 (900 GRT)
+    // apr = (signal * issuancePerYear) / (totalSignal * (other + proposed))
+    //     = (1e21 * 3e24) / (1e22 * 1e21) = 3e45 / 1e43 = 300
+    const apr = calculateApr({
+      signal: 10n ** 21n,
+      totalSignal: 10n ** 22n,
+      issuancePerYear: 3n * 10n ** 24n,
+      proposedAllocation: 10n ** 20n,
+      otherIndexersAllocation: 9n * 10n ** 20n,
+    });
+    assert.equal(Math.round(apr), 300);
+  });
+
+  it('scales linearly with signal share', () => {
+    const baseArgs = {
+      totalSignal: 10n ** 22n,
+      issuancePerYear: 3n * 10n ** 24n,
+      proposedAllocation: 10n ** 20n,
+      otherIndexersAllocation: 9n * 10n ** 20n,
+    };
+    const aprLow = calculateApr({ ...baseArgs, signal: 10n ** 21n });
+    const aprHigh = calculateApr({ ...baseArgs, signal: 2n * 10n ** 21n });
+    assert.ok(aprHigh > aprLow);
+    assert.equal(Math.round(aprHigh / aprLow), 2);
+  });
+});
+
+describe('AllocationOptimizer.run', () => {
+  it('throws nothing and returns empty plan when the indexer is missing', async () => {
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({ indexer: null }),
+      graphNodeClient: fakeGraphNodeClient(),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(baseConfig());
+    assert.equal(result.proposedAllocations.length, 0);
+    assert.ok(result.warnings.some((w) => w.includes('not found')));
+  });
+
+  it('does not throw and records errors when every gather source fails', async () => {
+    const boom = new Error('boom');
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        // indexer fetch succeeds so the workflow runs through to gather
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        networkParams: networkParams(),
+        // signalled and active throw — verifies allSettled
+        throwOnGetSignalledDeployments: boom,
+        throwOnGetActiveAllocations: boom,
+      }),
+      graphNodeClient: fakeGraphNodeClient({ throwOnGetIndexingStatuses: boom }),
+      graphmanClient: fakeGraphmanClient({ throwOnGetDeploymentInfo: boom }),
+      qosClient: fakeQosClient({ throwOnTopQueried: boom }),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(baseConfig({ whitelist: [] }));
+    assert.ok(result.errors.length >= 2);
+    assert.equal(result.proposedAllocations.length, 0);
+  });
+
+  it('drops candidates below minSignal unless whitelisted', async () => {
+    const lowSig = deployment({ id: 'Qm_low', signal: GRT(10n), staked: GRT(1n) });
+    const okSig = deployment({ id: 'Qm_ok', signal: GRT(10_000n), staked: GRT(1n) });
+    const wlLow = deployment({ id: 'Qm_wl_low', signal: GRT(10n), staked: GRT(1n) });
+    const cfg = baseConfig({
+      minSignal: GRT(5_000n),
+      whitelist: ['Qm_wl_low'],
+      gasEstimateGrt: GRT(0n), // disable gas floor so we test the candidate filter in isolation
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        signalledDeployments: [lowSig, okSig],
+        // signalledDeployments query is filtered server-side by minSignal, so
+        // the low-signal one wouldn't normally arrive. We include the
+        // whitelisted one via deploymentsById for hydration.
+        deploymentsById: { Qm_wl_low: wlLow },
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: 'Qm_ok' }),
+          indexingStatus({ id: 'Qm_wl_low' }),
+        ],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(cfg);
+    const ids = result.proposedAllocations.map((p) => p.deploymentId).sort();
+    // wl_low survives (whitelist exempt), ok_sig survives. low (no whitelist) dropped.
+    assert.deepEqual(ids, ['Qm_ok', 'Qm_wl_low']);
+  });
+
+  it('blacklist beats whitelist when both set', async () => {
+    const dep = deployment({ id: 'Qm_both', signal: GRT(100_000n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        signalledDeployments: [dep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: 'Qm_both' })],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({ whitelist: ['Qm_both'], blacklist: ['Qm_both'] }),
+    );
+    assert.equal(result.proposedAllocations.length, 0);
+  });
+
+  it('preserves a current allocation whose signal dipped below minSignal (survives the candidate filter)', async () => {
+    // Finding 2 from the source: a deployment whose signal dipped below
+    // minSignal between runs should NOT be force-dropped by the candidate
+    // filter when the indexer already has an allocation on it. We verify the
+    // candidate survives filtering (CandidatesAfterFilter >= 1). Whether the
+    // downstream gas floor / sizing keeps it in the plan is a separate
+    // concern owned by the optimizer's reward math.
+    const lowDep = deployment({ id: 'Qm_now_low', signal: GRT(10n), staked: GRT(50n) });
+    const alloc = allocation({
+      id: '0xalloc1',
+      deploymentId: 'Qm_now_low',
+      allocatedTokens: GRT(50n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        // Subgraph-side minSignal filter dropped it, so it won't be in
+        // signalledDeployments. Hydration via deploymentsById fills it in.
+        signalledDeployments: [],
+        activeAllocations: [alloc],
+        deploymentsById: { Qm_now_low: lowDep },
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: 'Qm_now_low' })],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(baseConfig({ minSignal: GRT(5_000n) }));
+    assert.equal(result.state.candidatesConsidered, 1);
+    assert.equal(result.state.candidatesAfterFilter, 1);
+  });
+
+  it('frozen deployment is preserved at current size and reserves a slot', async () => {
+    const dep = deployment({ id: 'Qm_frozen', signal: GRT(50_000n) });
+    const alloc = allocation({
+      id: '0xfrozen',
+      deploymentId: 'Qm_frozen',
+      allocatedTokens: GRT(123_456n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        signalledDeployments: [dep],
+        activeAllocations: [alloc],
+        deploymentsById: { Qm_frozen: dep },
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: 'Qm_frozen' })],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({ frozenlist: ['Qm_frozen'], maxAllocations: 1 }),
+    );
+    // Frozen entry appears in proposal at exact current size.
+    const frozenProp = result.proposedAllocations.find(
+      (p) => p.deploymentId === 'Qm_frozen',
+    );
+    assert.ok(frozenProp);
+    assert.equal(frozenProp!.allocatedTokens, GRT(123_456n));
+    // No diff actions for frozen.
+    assert.equal(
+      result.actions.filter((a) => a.deploymentId === 'Qm_frozen').length,
+      0,
+    );
+  });
+
+  it('risky deployment is sized by riskyDeploymentCapPct, not maxAllocationPct', async () => {
+    // Pick a single candidate so the signal-share branch lands on the same
+    // amount = availableStake, which then gets capped.
+    const dep = deployment({ id: 'Qm_risk', signal: GRT(100_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: 'Qm_risk' })],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const cfg = baseConfig({
+      maxAllocationPct: 0.5,
+      riskyDeploymentCapPct: 0.05,
+      riskyDeployments: ['Qm_risk'],
+      gasEstimateGrt: GRT(0n), // skip the gas floor for the assertion
+    });
+    const result = await opt.run(cfg);
+    const prop = result.proposedAllocations[0];
+    assert.ok(prop);
+    // 5% of 1,000,000 GRT = 50,000 GRT in wei.
+    assert.equal(prop!.allocatedTokens, GRT(50_000n));
+    assert.ok(/risky/i.test(prop!.rationale));
+  });
+
+  it('skips a candidate when projected annual reward < 2x gas budget', async () => {
+    // Build a deployment that passes minSignal but has tiny signal share so
+    // projected rewards are dwarfed by an artificially huge gas budget.
+    const dep = deployment({
+      id: 'Qm_dust',
+      signal: GRT(5_000n), // > minSignal of 1k GRT, but tiny vs totalSignal below
+      staked: GRT(1_000_000n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+        networkParams: networkParams({
+          // 1e12 GRT total signal — dwarfs the per-deployment 5k GRT.
+          totalTokensSignalled: (10n ** 30n).toString(),
+        }),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: 'Qm_dust' })],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({ minSignal: GRT(1_000n), gasEstimateGrt: GRT(1_000_000_000n) }),
+    );
+    assert.equal(result.proposedAllocations.length, 0);
+    assert.ok(
+      result.warnings.some((w) => /2× gas budget/.test(w)),
+      `expected gas-floor warning, got: ${JSON.stringify(result.warnings)}`,
+    );
+  });
+});
