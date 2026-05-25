@@ -1,10 +1,14 @@
 /**
  * Prompt: `cleanup_stale_deployments`
  *
- * Implements the design §4.3 cleanup half. Identifies deployments the
- * indexer is syncing that no longer warrant disk + RPC budget, then
- * walks Claude through the safe-removal sequence: close any remaining
- * allocations, pause, unassign, unused record/remove, or full drop.
+ * Implements the design §4.3 cleanup half. The PRIMARY PATH calls the
+ * Stage 3 composite tool `run_discovery` which produces pre-ordered
+ * cleanup step sequences for every stale deployment. The Stage 1
+ * step-by-step walkthrough is preserved as the ALTERNATIVE PATH for
+ * debugging / overriding the staleness filter. Either path culminates
+ * in the safe-removal sequence: close any remaining allocations, pause,
+ * unassign, unused record/remove. `graphman_drop_deployment` is
+ * always operator-initiated — never invoked from a composite plan.
  *
  * `dry_run` defaults to true. When true, only a plan is produced and no
  * destructive graphman tool is invoked. When false, the operator has
@@ -34,10 +38,44 @@ Goal: identify deployments the indexer is syncing that are no longer worth the d
 
 Mode: ${dryRun ? '**dry_run = true** — produce a plan only; do NOT invoke any graphman destructive tool.' : '**dry_run = false** — operator has opted into per-step confirmation; each destructive op requires explicit go-ahead.'}
 
+## PRIMARY PATH — composite tool
+
+Call \`run_discovery\` with **required** args:
+
+- \`blocks_per_year\` — Ethereum mainnet ~2,628,000; Arbitrum One ~10,512,000 at 3s block time. (Discovery shares this entry point with new-subgraph discovery — needed for APR projection on the opportunity half. Cleanup uses the response regardless.)
+- \`typical_allocation_grt\` — GRT decimal. Reasonable default: \`total_stake_grt / max_allocations\` from \`get_infrastructure_overview\` / \`indexer://config\`.
+
+Optional: \`indexer_address\`, \`max_candidates\`, \`min_signal_grt\`.
+
+The cleanup-relevant fields in \`DiscoveryResult\` are:
+
+- \`stale\` — \`{deploymentId, reason: 'no_signal' | 'unallocated' | 'superseded' | 'orphaned', sizeBytes, paused, hasAllocation, isFrozen}\`. Frozen entries are auto-skipped here but surface them so the operator can see what was excluded.
+- \`cleanup\` — pre-ordered \`{deploymentId, steps: ('close_allocation' | 'pause' | 'unassign' | 'unused_record' | 'unused_remove')[], rationale}\` per stale deployment. The step order encodes the safe-removal sequence — DO NOT reorder.
+
+Map cleanup steps to tools:
+
+| Composite step | Tool |
+|---|---|
+| \`close_allocation\` | \`queue_unallocate\` (wait for close before next step) |
+| \`pause\` | \`graphman_pause_deployment\` |
+| \`unassign\` | \`graphman_unassign_deployment\` |
+| \`unused_record\` | \`graphman_unused_record\` |
+| \`unused_remove\` | \`graphman_unused_remove\` |
+
+Note: \`run_discovery\` deliberately does NOT recommend \`graphman_drop_deployment\` in its cleanup steps. Drop is irreversible and operator-initiated only — never invoke from a composite-derived plan without an explicit, separate operator request that names the deployment.
+
+Present \`stale\` + \`cleanup\` as a markdown table (deployment_id, reason, paused, hasAllocation, isFrozen, sizeBytes, planned_steps, rationale) with the totals from Step 4 below. **STOP. Wait for explicit operator approval before executing any step via the mapped tools above.** Per-deployment confirmation is required when \`dry_run = false\`.
+
+If the composite returns blocking errors, or you need to override the staleness filter / inspect signal+volume by hand, fall back to the ALTERNATIVE PATH below.
+
+## ALTERNATIVE PATH — constituent-tool walkthrough
+
+Use this path when you need to gather staleness signals manually, override the cleanup ordering, or debug a composite-suggested step.
+
 ## Reference resources
 
 - \`indexer://config\` — indexer address, frozenlist (never remove these), graphman endpoint.
-- \`indexer://overview\` — current disk usage / sync footprint.
+- \`indexer://overview\` — current disk usage / sync footprint. \`get_infrastructure_overview\` returns the same payload for tool-only clients.
 - \`indexer://glossary\` — definitions for "unused", "drop", "unassign", "frozen".
 
 ## Step 1 — Enumerate current sync footprint

@@ -37,6 +37,10 @@ Goal: walk through graphman-based recovery options for deployment \`${deployment
 
 This prompt mixes diagnostic reads with potentially destructive graphman writes. **Always produce a recovery plan first and obtain explicit operator confirmation before invoking any destructive tool.**
 
+## Optionally — try the composite first
+
+Call \`run_health_check\` first. If deployment \`${deploymentId}\` shows up in the \`recoveryPlan\` array, the composite has already classified the failure with a concrete \`type\` ('restart' | 'rewind' | 'check_blocks' | 'clear_call_cache' | 'manual_review'), a \`rationale\`, and the exact \`args\` to pass to the corresponding graphman_* tool. That saves classification work and gives you a vetted starting point for the plan below. **All operator-approval gates in this prompt still apply** — the composite is plan-only; you still produce the full plan, get explicit confirmation, and execute step-by-step with verification between steps.
+
 ## Reference resources
 
 - \`indexer://config\` — indexer address, graphman endpoint, kubectl context.
