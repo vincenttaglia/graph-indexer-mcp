@@ -1,4 +1,5 @@
 import type { TypedGraphqlClient } from '../utils/graphql-client.js';
+import { TtlCache } from '../utils/cache.js';
 import {
   execGraphman,
   type KubectlContext,
@@ -229,6 +230,21 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
   const baseCliOpts: KubectlExecOptions = {};
   if (opts.cliTimeoutMs !== undefined) baseCliOpts.timeoutMs = opts.cliTimeoutMs;
 
+  // Per design §4.1.2: deployment info cached for 5 minutes. Mutations
+  // (pause/resume/restart/rewind/drop/reassign/unassign) MUST invalidate
+  // the corresponding entry on success — otherwise stale "paused: false"
+  // reads can mislead the optimizer for up to 5 minutes after a pause.
+  const deploymentInfoCache = new TtlCache<string, DeploymentInfo>({
+    ttlMs: 300_000,
+    label: 'graphman',
+  });
+
+  function invalidateDeployment(deploymentId: string, reason: string): void {
+    const key = deploymentId.toLowerCase();
+    deploymentInfoCache.invalidate(key);
+    process.stderr.write(`[cache graphman ${key}] invalidate (after ${reason})\n`);
+  }
+
   /**
    * Compose the kubectl options for a CLI invocation, layering the caller-
    * supplied AbortSignal on top of the constructor-time defaults so the
@@ -264,27 +280,34 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
     // -------------------------------------------------------------------------
 
     async getDeploymentInfo(deploymentId, callOpts): Promise<DeploymentInfo> {
-      const data = await gql.request<DeploymentInfoResponse>(
-        DEPLOYMENT_INFO_QUERY,
-        { hash: deploymentId },
-        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      const key = deploymentId.toLowerCase();
+      return deploymentInfoCache.getOrFetch(
+        key,
+        async (fetchOpts) => {
+          const data = await gql.request<DeploymentInfoResponse>(
+            DEPLOYMENT_INFO_QUERY,
+            { hash: deploymentId },
+            fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+          );
+          const info = data.deployment?.info;
+          if (!info || typeof info.id !== 'string') {
+            throw new Error(
+              `graphman deployment.info returned no record for "${deploymentId}"`,
+            );
+          }
+          const result: DeploymentInfo = {
+            id: info.id,
+            paused: Boolean(info.paused),
+          };
+          if (info.shard !== undefined) result.shard = info.shard;
+          if (info.chain !== undefined) result.chain = info.chain;
+          if (info.node !== undefined) result.node = info.node;
+          if (info.latestBlock !== undefined) result.latestBlock = info.latestBlock;
+          if (info.health !== undefined) result.health = info.health;
+          return result;
+        },
+        callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
       );
-      const info = data.deployment?.info;
-      if (!info || typeof info.id !== 'string') {
-        throw new Error(
-          `graphman deployment.info returned no record for "${deploymentId}"`,
-        );
-      }
-      const result: DeploymentInfo = {
-        id: info.id,
-        paused: Boolean(info.paused),
-      };
-      if (info.shard !== undefined) result.shard = info.shard;
-      if (info.chain !== undefined) result.chain = info.chain;
-      if (info.node !== undefined) result.node = info.node;
-      if (info.latestBlock !== undefined) result.latestBlock = info.latestBlock;
-      if (info.health !== undefined) result.health = info.health;
-      return result;
     },
 
     async pauseDeployment(deploymentId, callOpts): Promise<GraphmanMutationAck> {
@@ -298,6 +321,7 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
       // of an error as success — graphql-request would have thrown otherwise.
       const result: GraphmanMutationAck = { success: ack?.success ?? true };
       if (ack?.message) result.message = ack.message;
+      if (result.success) invalidateDeployment(deploymentId, 'pauseDeployment');
       return result;
     },
 
@@ -310,6 +334,7 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
       const ack = data.deployment?.resume;
       const result: GraphmanMutationAck = { success: ack?.success ?? true };
       if (ack?.message) result.message = ack.message;
+      if (result.success) invalidateDeployment(deploymentId, 'resumeDeployment');
       return result;
     },
 
@@ -325,6 +350,9 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
           `graphman deployment.restart returned no executionId for "${deploymentId}"`,
         );
       }
+      // Restart changes node assignment / sync state; bust the cached info
+      // so the next read reflects the post-restart state.
+      invalidateDeployment(deploymentId, 'restartDeployment');
       return { executionId };
     },
 
@@ -359,23 +387,34 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
 
     async rewindDeployment(deploymentId, blockNumber, blockHash, callOpts) {
       // CLI: graphman rewind <block_hash> <block_number> <deployment>
-      return runCli(['rewind', blockHash, String(blockNumber), deploymentId], callOpts);
+      const result = await runCli(
+        ['rewind', blockHash, String(blockNumber), deploymentId],
+        callOpts,
+      );
+      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'rewindDeployment');
+      return result;
     },
 
     async reassignDeployment(deploymentId, targetNode, callOpts) {
       // CLI: graphman reassign <deployment> <node>
-      return runCli(['reassign', deploymentId, targetNode], callOpts);
+      const result = await runCli(['reassign', deploymentId, targetNode], callOpts);
+      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'reassignDeployment');
+      return result;
     },
 
     async unassignDeployment(deploymentId, callOpts) {
       // CLI: graphman unassign <deployment>
-      return runCli(['unassign', deploymentId], callOpts);
+      const result = await runCli(['unassign', deploymentId], callOpts);
+      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'unassignDeployment');
+      return result;
     },
 
     async dropDeployment(deploymentId, callOpts) {
       // CLI: graphman drop <deployment>
       // IRREVERSIBLE — confirmation gated at the tool layer, not the client.
-      return runCli(['drop', deploymentId], callOpts);
+      const result = await runCli(['drop', deploymentId], callOpts);
+      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'dropDeployment');
+      return result;
     },
 
     async unusedRecord(callOpts) {
