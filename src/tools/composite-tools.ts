@@ -117,18 +117,6 @@ export function registerCompositeTools(
       'reallocate). Does NOT queue actions — operator reviews the plan and ' +
       'executes via queue_* tools.',
     inputSchema: {
-      blocks_per_year: z.coerce
-        .number()
-        .int()
-        .positive()
-        .describe(
-          'Blocks per year used to annualize networkGRTIssuancePerBlock. ' +
-            'Required, no default. Recommended value: 2102400 (matches ' +
-            'indexer-tools-v4 canonical formula — 5760 blocks/day × 365). ' +
-            'Applies for both Ethereum mainnet and Arbitrum: ' +
-            'networkGRTIssuancePerBlock is denominated per Ethereum block ' +
-            'regardless of which chain hosts the network subgraph.',
-        ),
       indexer_address: z
         .string()
         .regex(EVM_ADDRESS)
@@ -160,7 +148,6 @@ export function registerCompositeTools(
         gasEstimateGrt: grtToWei(
           args.gas_estimate_grt ?? deps.config.gasEstimateGrt,
         ),
-        blocksPerYear: args.blocks_per_year,
         whitelist: deps.config.whitelist,
         blacklist: deps.config.blacklist,
         frozenlist: deps.config.frozenlist,
@@ -230,18 +217,6 @@ export function registerCompositeTools(
       'signal*0.2 - cost*0.1. Does NOT execute cleanup or set indexing ' +
       'rules — operator reviews and executes individually.',
     inputSchema: {
-      blocks_per_year: z.coerce
-        .number()
-        .int()
-        .positive()
-        .describe(
-          'Blocks per year used to annualize networkGRTIssuancePerBlock. ' +
-            'Required, no default. Recommended value: 2102400 (matches ' +
-            'indexer-tools-v4 canonical formula — 5760 blocks/day × 365). ' +
-            'Applies for both Ethereum mainnet and Arbitrum: ' +
-            'networkGRTIssuancePerBlock is denominated per Ethereum block ' +
-            'regardless of which chain hosts the network subgraph.',
-        ),
       typical_allocation_grt: z
         .string()
         .regex(GRT_DECIMAL)
@@ -270,7 +245,6 @@ export function registerCompositeTools(
           grtToWei(args.min_signal_grt ?? deps.config.minSignal),
         ),
         typicalAllocationGrt: BigInt(grtToWei(args.typical_allocation_grt)),
-        blocksPerYear: args.blocks_per_year,
         whitelist: deps.config.whitelist,
         blacklist: deps.config.blacklist,
         frozenlist: deps.config.frozenlist,

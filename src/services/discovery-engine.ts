@@ -45,6 +45,7 @@ import type {
 } from '../types/network.js';
 import type { DeploymentInfo } from '../types/graphman.js';
 import type { SubgraphIndexingStatus } from '../types/graphnode.js';
+import { BLOCKS_PER_YEAR } from '../utils/constants.js';
 
 // =============================================================================
 // Public types
@@ -105,7 +106,6 @@ export interface DiscoveryConfig {
   minSignal: bigint;
   /** Used for APR projection (e.g., totalStake / maxAllocations). */
   typicalAllocationGrt: bigint;
-  blocksPerYear: number;
   whitelist: string[];
   blacklist: string[];
   frozenlist: string[];
@@ -776,7 +776,6 @@ export class DiscoveryEngine {
             signal: opp.signalledTokens,
             totalSignal: safeBigInt(networkParams.totalTokensSignalled),
             issuancePerBlock: safeBigInt(networkParams.networkGRTIssuancePerBlock),
-            blocksPerYear: config.blocksPerYear,
             existingAllocation: opp.totalStakedTokens,
             typicalAllocation: config.typicalAllocationGrt,
           })
@@ -975,7 +974,7 @@ function bigIntToNumber(v: bigint): number {
  * deployment with the given signal share, per §3.1 (APR Calculation) of the
  * implementation plan.
  *
- *   reward_share = (S / T) * (issuance_per_block * blocksPerYear)
+ *   reward_share = (S / T) * (issuance_per_block * BLOCKS_PER_YEAR)
  *                          * (A_typical / (A_existing + A_typical))
  *   apr = reward_share / A_typical
  *
@@ -987,7 +986,6 @@ function projectApr(opts: {
   signal: bigint;
   totalSignal: bigint;
   issuancePerBlock: bigint;
-  blocksPerYear: number;
   existingAllocation: bigint;
   typicalAllocation: bigint;
 }): number {
@@ -996,7 +994,7 @@ function projectApr(opts: {
 
   const signalShare = bigIntToNumber(opts.signal) / bigIntToNumber(opts.totalSignal);
   const issuancePerYear =
-    bigIntToNumber(opts.issuancePerBlock) * opts.blocksPerYear;
+    bigIntToNumber(opts.issuancePerBlock) * BLOCKS_PER_YEAR;
   const ourAlloc = bigIntToNumber(opts.typicalAllocation);
   const totalAllocAfter = bigIntToNumber(opts.existingAllocation) + ourAlloc;
   if (totalAllocAfter <= 0) return 0;

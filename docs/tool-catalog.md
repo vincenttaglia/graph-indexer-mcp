@@ -57,8 +57,7 @@ Source: `src/tools/network-tools.ts`. Backed by the indexer-allocation network s
 - **Args:**
   - `deployment_id` (string, required).
   - `allocation_amount` (string, required) — non-negative integer wei.
-  - `blocks_per_year` (number, required, positive integer) — chain-dependent. Mainnet ~2,629,800; Arbitrum One ~10,512,000.
-- **Returns:** JSON `{ deployment_id, allocation_amount, apr, denied, reward_share?, indexer_share?, formula_inputs }`.
+- **Returns:** JSON `{ deployment_id, allocation_amount, apr, denied, reward_share?, indexer_share?, formula_inputs }`. The `formula_inputs.blocks_per_year` field echoes the hardcoded `BLOCKS_PER_YEAR` constant (2,102,400) used to annualize `networkGRTIssuancePerBlock`.
 
 ---
 
@@ -402,7 +401,6 @@ Source: `src/tools/composite-tools.ts`. Wrap the Stage 3 workflow services (`All
 - **Permission:** `read`
 - **Description:** Run the full §4.1 allocation optimization workflow: gather state, filter candidates, score by APR with caps, return a structured plan with proposed allocations + diff actions. Does NOT queue actions.
 - **Args:**
-  - `blocks_per_year` (number, required, positive integer) — chain-dependent.
   - `indexer_address` (string, optional) — override `INDEXER_ADDRESS`.
   - `max_allocations` (number, optional, positive integer).
   - `max_allocation_pct` (number, optional, 0–1).
@@ -425,7 +423,6 @@ Source: `src/tools/composite-tools.ts`. Wrap the Stage 3 workflow services (`All
 - **Permission:** `read`
 - **Description:** Run the §4.3 cleanup + discovery workflow: stale deployments + ordered cleanup steps; new high-value deployments scored by `apr*0.4 + volume*0.3 + signal*0.2 - cost*0.1`. Does NOT execute cleanup or set rules.
 - **Args:**
-  - `blocks_per_year` (number, required, positive integer).
   - `typical_allocation_grt` (string, required) — GRT decimal. Reasonable default `total_stake_grt / max_allocations`.
   - `indexer_address` (string, optional).
   - `max_candidates` (number, optional, positive integer ≤500, default `10`).
