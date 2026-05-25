@@ -159,15 +159,17 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
     ) => {
       extra.signal.throwIfAborted();
       const current = await client.getCurrentEpoch({ signal: extra.signal });
-      const match = current.networkBlocks.find((b) => b.network === chain_name);
+      const match = current.blockNumbersByNetwork.find(
+        (b) => b.network === chain_name,
+      );
       if (!match) {
         return {
           content: [
             {
               type: 'text',
               text: `EBO has no current-epoch start block recorded for chain "${chain_name}". ` +
-                `Available chains in epoch ${current.epochNumber}: ` +
-                `${current.networkBlocks.map((b) => b.network).join(', ') || '(none)'}.`,
+                `Available chains in epoch ${current.epoch}: ` +
+                `${current.blockNumbersByNetwork.map((b) => b.network).join(', ') || '(none)'}.`,
             },
           ],
           isError: true,
@@ -203,7 +205,7 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
             text: JSON.stringify(
               {
                 chain_name,
-                current_epoch: current.epochNumber,
+                current_epoch: current.epoch,
                 current_epoch_start_block: epochStartBlock,
                 current_block_number,
                 epoch_length_blocks,

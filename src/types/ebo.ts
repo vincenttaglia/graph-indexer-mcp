@@ -10,42 +10,70 @@
  * in the subgraph schema; downstream services may parse to BigInt/number when
  * arithmetic is required.
  *
- * TODO: verify field names against the live EBO subgraph schema. The shape
- * below tracks the table in design §2.2 but the actual subgraph may expose
- * slightly different identifiers (camelCase vs snake_case, optional fields).
+ * Verified against the live EBO subgraph schema
+ * (4KFYqUWRTZQ9gn7GPHC6YQ2q15chJfVrX43ezYcwkgxB):
+ *
+ *   type Epoch {
+ *     id: ID!
+ *     epochNumber: BigInt!
+ *     blockNumbers: [NetworkEpochBlockNumber!]! @derivedFrom(field: "epoch")
+ *   }
+ *
+ *   type NetworkEpochBlockNumber {
+ *     id: ID!
+ *     acceleration: BigInt!
+ *     delta: BigInt!
+ *     blockNumber: BigInt!         # start block on `network` for this epoch
+ *     epochNumber: BigInt!
+ *     network: Network!
+ *     epoch: Epoch!
+ *     previousBlockNumber: NetworkEpochBlockNumber
+ *   }
+ *
+ *   type Network {
+ *     id: ID!                       # chainID
+ *     alias: String!                # e.g. "arbitrum-one", "mainnet"
+ *   }
+ *
+ * Crucially: the live `Epoch` type does NOT have `startBlock` / `endBlock`
+ * fields — those values live ONLY on `NetworkEpochBlockNumber`, per chain.
  */
 
 /**
- * An epoch on the protocol (network-wide concept, not chain-specific).
- * Per design §2.2 the entity exposes: `{ id, startBlock, endBlock }`. The
- * `id` IS the epoch number (as a string). `startBlock`/`endBlock` are
- * protocol-chain block numbers (i.e. on the chain that hosts the EBO
- * contract). To get the per-chain epoch-start block needed for POI
- * computation, use `NetworkEpochBlockNumber`.
+ * An epoch on the protocol (network-wide concept). The live schema only
+ * exposes `epochNumber` directly on this entity; per-chain start blocks live
+ * on `NetworkEpochBlockNumber` via the `Epoch.blockNumbers` @derivedFrom
+ * relation.
  */
 export interface Epoch {
-  /** Epoch number as string — this is the subgraph entity id. */
+  /** Subgraph entity id. Format is subgraph-defined; do not parse. */
   id: string;
-  /** Block number at which this epoch began on the protocol chain. */
-  startBlock: string;
-  /** Block number at which this epoch ended (null/empty for the current epoch). */
-  endBlock?: string | null;
+  /** Protocol epoch number. */
+  epochNumber: number;
 }
 
 /**
  * Per-chain block number at the start of a given epoch. This is the value an
  * indexer needs to generate the correct POI for a deployment on `network`.
- * Per design §2.2: `{ id, network, epochNumber, blockNumber }`. The exact
- * `id` format is left to the live subgraph (Stage 1 clients should filter
- * by `(network, epochNumber)` rather than reconstructing the id).
+ *
+ * `network` is the human-readable chain alias (e.g. `mainnet`,
+ * `arbitrum-one`) sourced from the linked `Network.alias` field. `chainId`
+ * is the EVM chain id (sourced from `Network.id`); kept separately so callers
+ * don't have to re-resolve.
  */
 export interface NetworkEpochBlockNumber {
   /** Subgraph entity id. Format is subgraph-defined; do not parse. */
   id: string;
-  /** Chain alias as known to The Graph (e.g. `mainnet`, `arbitrum-one`). */
+  /** Chain alias (e.g. `mainnet`, `arbitrum-one`). */
   network: string;
+  /** Chain id (EVM chain id as string). */
+  chainId: string;
   /** Epoch this row pertains to. */
   epochNumber: number;
-  /** Block number on `network` at the start of `epochNumber`. */
+  /** Block number on `network` at the start of `epochNumber` (BigInt as string). */
   blockNumber: string;
+  /** Per-epoch acceleration parameter (BigInt as string). */
+  acceleration: string;
+  /** Per-epoch delta parameter (BigInt as string). */
+  delta: string;
 }

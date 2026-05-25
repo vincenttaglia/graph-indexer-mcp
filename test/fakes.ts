@@ -335,22 +335,74 @@ export function fakeQosClient(opts: FakeQosClientOpts = {}): QosSubgraphClient {
   };
 }
 
+/**
+ * Per-network start-block row for the fake. Mirrors the real client's
+ * `EpochNetworkStartBlock` shape — `chainId` is the EVM chain id, `network`
+ * is the human-readable alias (`Network.alias` in EBO). All BigInt-scale
+ * values are stringified to match the real client's JSON-serializable
+ * surface.
+ */
+export interface FakeEboNetworkBlock {
+  network: string;
+  chainId: string;
+  blockNumber: string;
+  acceleration: string;
+  delta: string;
+}
+
+/**
+ * Default per-network start blocks for the fake. Includes `arbitrum-one`
+ * (the protocol chain) so HealthMonitor's chain inference resolves
+ * deterministically without per-test overrides.
+ */
+const DEFAULT_BLOCKS: FakeEboNetworkBlock[] = [
+  {
+    network: 'arbitrum-one',
+    chainId: '42161',
+    blockNumber: '1000',
+    acceleration: '0',
+    delta: '0',
+  },
+  {
+    network: 'mainnet',
+    chainId: '1',
+    blockNumber: '500',
+    acceleration: '0',
+    delta: '0',
+  },
+];
+
 export interface FakeEboClientOpts {
-  epochNumber?: number;
-  networkBlocks?: Array<{ network: string; blockNumber: string }>;
+  epoch?: number;
+  /**
+   * Per-network start-block rows. Partial rows are accepted — missing
+   * `chainId` / `acceleration` / `delta` default to safe stub values so
+   * existing call sites that only care about `network` + `blockNumber`
+   * don't have to spell out the full shape.
+   */
+  blockNumbersByNetwork?: Array<Partial<FakeEboNetworkBlock> & { network: string; blockNumber: string }>;
   /** keyed by `${epoch}|${chain}` for getEpochBlocks. */
-  epochBlocks?: Record<string, { network: string; epochNumber: number; blockNumber: string } | null>;
+  epochBlocks?: Record<
+    string,
+    { network: string; chainId: string; epochNumber: number; blockNumber: string } | null
+  >;
 }
 
 export function fakeEboClient(opts: FakeEboClientOpts = {}): EboSubgraphClient {
+  const blockNumbersByNetwork: FakeEboNetworkBlock[] = opts.blockNumbersByNetwork
+    ? opts.blockNumbersByNetwork.map((row) => ({
+        network: row.network,
+        chainId: row.chainId ?? '0',
+        blockNumber: row.blockNumber,
+        acceleration: row.acceleration ?? '0',
+        delta: row.delta ?? '0',
+      }))
+    : DEFAULT_BLOCKS;
   return {
     async getCurrentEpoch() {
       return {
-        epochNumber: opts.epochNumber ?? 100,
-        networkBlocks: opts.networkBlocks ?? [
-          { network: 'arbitrum-one', blockNumber: '1000' },
-          { network: 'mainnet', blockNumber: '500' },
-        ],
+        epoch: opts.epoch ?? 100,
+        blockNumbersByNetwork,
       };
     },
     async getEpochBlocks(epoch, chain) {
@@ -358,9 +410,14 @@ export function fakeEboClient(opts: FakeEboClientOpts = {}): EboSubgraphClient {
       if (opts.epochBlocks && k in opts.epochBlocks) return opts.epochBlocks[k] ?? null;
       // Default: synthesize one matching the chain's start block from current
       // epoch info so classify() can find an epochStartBlock.
-      const match = opts.networkBlocks?.find((r) => r.network === chain);
+      const match = blockNumbersByNetwork.find((r) => r.network === chain);
       if (match) {
-        return { network: chain, epochNumber: epoch, blockNumber: match.blockNumber };
+        return {
+          network: chain,
+          chainId: match.chainId,
+          epochNumber: epoch,
+          blockNumber: match.blockNumber,
+        };
       }
       return null;
     },
