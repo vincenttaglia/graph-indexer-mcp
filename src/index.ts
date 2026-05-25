@@ -23,6 +23,9 @@ import { registerPostgresTools } from './tools/postgres-tools.js';
 import { registerAgentTools } from './tools/agent-tools.js';
 import { registerGraphmanTools } from './tools/graphman-tools.js';
 
+import { registerResources } from './resources/index.js';
+import { registerPrompts } from './prompts/index.js';
+
 async function main(): Promise<void> {
   const config = loadConfig();
   initAccessControl({
@@ -95,6 +98,16 @@ async function main(): Promise<void> {
   registerPostgresTools(server, { client: postgresClient });
   registerAgentTools(server, { client: agentClient, config });
   registerGraphmanTools(server, { client: graphmanClient });
+
+  // Stage 2: resources (read-only context) and prompts (workflow templates).
+  registerResources(server, {
+    config,
+    networkClient,
+    graphNodeClient,
+    postgresClient,
+    graphmanClient,
+  });
+  registerPrompts(server);
 
   // After all registrations, surface override entries that don't match any
   // registered tool — likely typos in ACCESS_OVERRIDES_ALLOW / _DENY.
