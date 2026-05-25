@@ -43,6 +43,7 @@ import type { GraphNodeClient } from '../clients/graph-node.js';
 import type { PostgresClient } from '../clients/postgres.js';
 import type { GraphmanClient } from '../clients/graphman.js';
 import type { SubgraphIndexingStatus } from '../types/graphnode.js';
+import { sanitizeEndpoint } from '../utils/graphql-client.js';
 
 export interface OverviewResourceDeps {
   config: Config;
@@ -78,15 +79,14 @@ interface OverviewPayload {
 
 /**
  * Strip URL credentials and gateway API keys from error messages. Errors from
- * `graphql-request` often inline the full request URL; the network/EBO/QoS
- * endpoints encode the gateway key as `/api/<key>/...`, so we apply the same
- * rewrite the gql client uses for its log labels.
+ * `graphql-request` often inline the full request URL; we delegate to
+ * `sanitizeEndpoint` so username, password, query, hash, and the gateway
+ * `/api/<key>/...` segment are all handled by the same canonical redactor used
+ * for log labels. Any non-URL text is preserved verbatim.
  */
 function sanitizeError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  return raw
-    .replace(/\/api\/[^/\s"']+/g, '/api/REDACTED')
-    .replace(/\/\/([^:@/\s]+):[^@/\s]+@/g, '//$1:REDACTED@');
+  return raw.replace(/https?:\/\/[^\s"')]+/gi, (match) => sanitizeEndpoint(match));
 }
 
 function sumBigIntStrings(values: ReadonlyArray<string>): string {
