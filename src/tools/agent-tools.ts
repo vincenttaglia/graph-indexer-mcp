@@ -38,6 +38,37 @@ const ACTION_SOURCE = 'graph-indexer-mcp';
 /** Default priority for MCP-queued actions; lower = sooner. */
 const DEFAULT_PRIORITY = 0;
 
+// ---------------------------------------------------------------------------
+// Shared input validators
+// ---------------------------------------------------------------------------
+
+/** Non-empty decimal digit string — GRT wei amount. */
+const wei = z
+  .string()
+  .regex(/^[0-9]+$/, 'must be a non-negative decimal wei string');
+
+/** 0x-prefixed 64-hex-char Proof of Indexing (32 bytes). */
+const poiHex = z
+  .string()
+  .regex(/^0x[0-9a-fA-F]{64}$/, 'must be 32-byte hex POI (0x + 64 hex chars)');
+
+/** 0x-prefixed 40-hex-char allocation id (Ethereum address shape). */
+const allocationIdHex = z
+  .string()
+  .regex(
+    /^0x[0-9a-fA-F]{40}$/,
+    'must be 0x-prefixed 40-char hex allocation id',
+  );
+
+/**
+ * Keys that callers MUST NOT supply via `rule_params` — they are derived from
+ * `deployment_id` and overriding them would let a deployment-scoped tool
+ * mutate the global / group / subgraph rule instead. Keep in sync with the
+ * Zod refine on the rule_params schema below and with the spread order in
+ * the set_indexing_rule handler.
+ */
+const RESERVED_RULE_KEYS = new Set(['identifier', 'identifierType']);
+
 /**
  * Pretty-print a JSON-able value as a single MCP text content block. We
  * standardize on JSON-with-2-space-indent so tool outputs stay machine-
@@ -68,11 +99,12 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       'approved (via approve_actions or by an operator) before execution.',
     inputSchema: {
       deployment_id: z.string().describe('Subgraph deployment IPFS hash (Qm…).'),
-      amount: z
-        .string()
-        .describe('GRT amount in wei as a decimal string (BigInt-as-string).'),
+      amount: wei.describe(
+        'GRT amount in wei as a decimal string (BigInt-as-string).',
+      ),
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const action: ActionInput = {
         type: 'allocate',
         deploymentID: args.deployment_id,
@@ -96,23 +128,28 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       'Queue an unallocate (close-allocation) action: closes the given ' +
       'allocation on-chain, submitting the provided Proof of Indexing. The ' +
       'POI must be valid for the allocation\'s deployment at the closing ' +
-      'block or the transaction will revert.',
+      'block or the transaction will revert. Both `deployment_id` and ' +
+      '`allocation_id` are required; the caller must supply the deployment ' +
+      'the allocation belongs to (look it up via the network subgraph if ' +
+      'needed).',
     inputSchema: {
-      allocation_id: z
+      deployment_id: z
         .string()
-        .describe('On-chain allocation id (0x-prefixed hex).'),
-      poi: z
-        .string()
-        .describe('32-byte Proof of Indexing as a 0x-prefixed hex string.'),
+        .describe(
+          'Subgraph deployment IPFS hash (Qm…) the allocation belongs to.',
+        ),
+      allocation_id: allocationIdHex.describe(
+        'On-chain allocation id (0x-prefixed 40-char hex).',
+      ),
+      poi: poiHex.describe(
+        '32-byte Proof of Indexing as a 0x-prefixed hex string.',
+      ),
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const action: ActionInput = {
         type: 'unallocate',
-        // The agent's ActionInput still requires deploymentID for unallocate;
-        // we leave it empty here so the agent resolves it from allocationID.
-        // TODO: verify against live agent schema — if deploymentID is required,
-        // a prior lookup will need to populate it.
-        deploymentID: '',
+        deploymentID: args.deployment_id,
         allocationID: args.allocation_id,
         poi: args.poi,
         source: ACTION_SOURCE,
@@ -133,22 +170,30 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     description:
       'Queue a reallocate action: atomically closes the given allocation ' +
       '(submitting POI) and opens a fresh allocation on the same deployment ' +
-      'for `new_amount` GRT wei. Executed as a single multicall on-chain.',
+      'for `new_amount` GRT wei. Executed as a single multicall on-chain. ' +
+      'All of `deployment_id`, `allocation_id`, `poi`, and `new_amount` are ' +
+      'required; the caller must supply the deployment the allocation ' +
+      'belongs to.',
     inputSchema: {
-      allocation_id: z
+      deployment_id: z
         .string()
-        .describe('On-chain allocation id to close (0x-prefixed hex).'),
-      poi: z
-        .string()
-        .describe('Proof of Indexing for the closing allocation.'),
-      new_amount: z
-        .string()
-        .describe('GRT amount in wei (decimal string) for the new allocation.'),
+        .describe(
+          'Subgraph deployment IPFS hash (Qm…) the allocation belongs to ' +
+            '(also the deployment the fresh allocation opens on).',
+        ),
+      allocation_id: allocationIdHex.describe(
+        'On-chain allocation id to close (0x-prefixed 40-char hex).',
+      ),
+      poi: poiHex.describe('Proof of Indexing for the closing allocation.'),
+      new_amount: wei.describe(
+        'GRT amount in wei (decimal string) for the new allocation.',
+      ),
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const action: ActionInput = {
         type: 'reallocate',
-        deploymentID: '', // Resolved from allocationID by the agent.
+        deploymentID: args.deployment_id,
         allocationID: args.allocation_id,
         poi: args.poi,
         amount: args.new_amount,
@@ -185,7 +230,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         .default('all')
         .describe('Action status to filter by; `all` returns everything.'),
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const result = await client.getActionQueue(args.status_filter);
       return jsonResult(result);
     },
@@ -207,7 +253,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         .min(1)
         .describe('Action ids to approve (as returned by get_action_queue).'),
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const result = await client.approveActions(args.action_ids);
       return jsonResult(result);
     },
@@ -228,7 +275,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         .min(1)
         .describe('Action ids to cancel.'),
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const result = await client.cancelActions(args.action_ids);
       return jsonResult(result);
     },
@@ -245,26 +293,46 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       'passed through to the agent\'s `setIndexingRule` mutation; common ' +
       'fields include `allocationAmount` (wei string), `allocationLifetime` ' +
       '(epochs), `decisionBasis` (`rules|never|always|offchain`), and ' +
-      '`requireSupported`.',
+      '`requireSupported`. `identifier` and `identifierType` are derived ' +
+      'from `deployment_id` and cannot be overridden via `rule_params` — ' +
+      'this tool is strictly deployment-scoped.',
     inputSchema: {
       deployment_id: z
         .string()
         .describe('Deployment IPFS hash this rule applies to.'),
       rule_params: z
         .record(z.string(), z.unknown())
+        // Belt: reject reserved keys at the schema layer so the caller sees a
+        // clear validation error rather than silent stripping.
+        .refine(
+          (params) =>
+            !Object.keys(params).some((k) => RESERVED_RULE_KEYS.has(k)),
+          {
+            message:
+              'rule_params must not contain `identifier` or `identifierType`; ' +
+              'they are derived from deployment_id.',
+          },
+        )
         .describe(
-          'Open-shape map of rule fields to set; merged with `identifier` ' +
-            'and `identifierType: "deployment"`.',
+          'Open-shape map of rule fields to set; `identifier` / ' +
+            '`identifierType` are reserved and rejected.',
         ),
     },
-    handler: async (args) => {
-      // identifier/identifierType are derived from deployment_id; callers
-      // can still override identifierType via rule_params if they need a
-      // subgraph- or group-level rule.
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      // Suspenders: even though the schema rejects reserved keys, strip them
+      // again here and put derived fields LAST so a spread can never override
+      // them. This is a deployment-scoped tool; do not let user input change
+      // the rule scope.
+      const filteredParams = Object.fromEntries(
+        Object.entries(args.rule_params).filter(
+          ([k]) => !RESERVED_RULE_KEYS.has(k),
+        ),
+      );
       const rule = {
+        ...filteredParams,
         identifier: args.deployment_id,
         identifierType: 'deployment' as const,
-        ...args.rule_params,
       } as Parameters<typeof client.setIndexingRule>[0];
       const result = await client.setIndexingRule(rule);
       return jsonResult(result);
@@ -280,7 +348,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     description:
       'Return all indexing rules currently configured on the agent, with ' +
       'group/global defaults merged in for deployment-level rules.',
-    handler: async () => {
+    handler: async (_args, extra) => {
+      extra.signal.throwIfAborted();
       const result = await client.getIndexingRules();
       return jsonResult(result);
     },
@@ -306,7 +375,8 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         .optional()
         .describe('Optional JSON-encoded variables object.'),
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const result = await client.setCostModel({
         deployment: args.deployment_id,
         model: args.model,

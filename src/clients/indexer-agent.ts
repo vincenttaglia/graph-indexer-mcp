@@ -60,22 +60,16 @@ const QUEUE_ACTIONS_MUTATION = /* GraphQL */ `
   }
 `;
 
-// TODO: verify against live agent schema — the reference indexer-agent uses
-// `updateActions(filter, action)` for state transitions. We expose
-// approveActions as the common bulk-id case; the underlying mutation accepts
-// an ActionFilter with `id` (or `ids`) and an ActionUpdateInput. If the live
-// schema uses `ids: [String!]` switch to that.
-const APPROVE_ACTIONS_MUTATION = /* GraphQL */ `
-  mutation ApproveActions($actionIDs: [String!]!) {
-    approveActions(actionIDs: $actionIDs) {
-      ${ACTION_FIELDS}
-    }
-  }
-`;
-
-const CANCEL_ACTIONS_MUTATION = /* GraphQL */ `
-  mutation CancelActions($actionIDs: [String!]!) {
-    cancelActions(actionIDs: $actionIDs) {
+// The canonical indexer-agent exposes a single `updateActions(filter, action)`
+// mutation for status transitions. Approve/cancel are not standalone
+// mutations; they're status updates ('approved' / 'canceled') applied to a
+// filtered set. We use `id_in: [String!]` to match the bulk-by-id use case
+// our MCP tools surface.
+// TODO: verify against live agent schema — confirm ActionFilter accepts
+// `id_in` (vs. `ids`) and ActionUpdateInput accepts a `status` string field.
+const UPDATE_ACTIONS_MUTATION = /* GraphQL */ `
+  mutation UpdateActions($filter: ActionFilter!, $action: ActionUpdateInput!) {
+    updateActions(filter: $filter, action: $action) {
       ${ACTION_FIELDS}
     }
   }
@@ -131,11 +125,8 @@ interface ActionsResponse {
 interface QueueActionsResponse {
   queueActions: Action[];
 }
-interface ApproveActionsResponse {
-  approveActions: Action[];
-}
-interface CancelActionsResponse {
-  cancelActions: Action[];
+interface UpdateActionsResponse {
+  updateActions: Action[];
 }
 interface IndexingRulesResponse {
   indexingRules: IndexingRule[];
@@ -211,18 +202,27 @@ export function createIndexerAgentClient(
     },
 
     async approveActions(actionIds: string[]): Promise<Action[]> {
-      const res = await gql.request<ApproveActionsResponse>(
-        APPROVE_ACTIONS_MUTATION,
-        { actionIDs: actionIds },
+      // Approval == status transition to 'approved' via updateActions.
+      const res = await gql.request<UpdateActionsResponse>(
+        UPDATE_ACTIONS_MUTATION,
+        {
+          filter: { id_in: actionIds },
+          action: { status: 'approved' },
+        },
       );
-      return res.approveActions ?? [];
+      return res.updateActions ?? [];
     },
 
     async cancelActions(actionIds: string[]): Promise<Action[]> {
-      const res = await gql.request<CancelActionsResponse>(CANCEL_ACTIONS_MUTATION, {
-        actionIDs: actionIds,
-      });
-      return res.cancelActions ?? [];
+      // Cancel == status transition to 'canceled' via updateActions.
+      const res = await gql.request<UpdateActionsResponse>(
+        UPDATE_ACTIONS_MUTATION,
+        {
+          filter: { id_in: actionIds },
+          action: { status: 'canceled' },
+        },
+      );
+      return res.updateActions ?? [];
     },
 
     async getIndexingRules(): Promise<IndexingRule[]> {
