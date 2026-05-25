@@ -26,8 +26,11 @@
       "Bash(true)",
       "Bash(false)",
       "Bash(test:*)",
+      "Bash(cd:*)",
+      "Bash(pwd)",
       "mcp__thegraph-mcp__searchSubgraphs",
-      "mcp__thegraph-mcp__getSubgraphSchema"
+      "mcp__thegraph-mcp__getSubgraphSchema",
+      "mcp__thegraph-mcp__querySubgraph"
     ]
   }
 }
