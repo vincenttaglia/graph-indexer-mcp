@@ -1,0 +1,9 @@
+# Optional dedicated namespace for the MCP server. Skip if you already have
+# a target namespace and apply the rest of the manifests with -n <ns>.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: graph-indexer-mcp
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+    app.kubernetes.io/part-of: graph-protocol-indexer

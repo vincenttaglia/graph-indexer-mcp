@@ -1,0 +1,58 @@
+# =============================================================================
+# graph-indexer-mcp — local development / build verification
+#
+# IMPORTANT: graph-indexer-mcp speaks the MCP stdio transport. That means the
+# container is NOT useful as a long-running daemon service on its own — it
+# expects a parent process (Claude Desktop / Claude Code / another MCP client)
+# attached to its stdin/stdout. The compose file below exists for:
+#
+#   1. Verifying the image builds and the entrypoint validates env correctly.
+#   2. Smoke tests via `docker compose run --rm mcp <args>`.
+#   3. Hand-driven MCP debugging with `docker compose run -i mcp` and a JSON-
+#      RPC payload piped into stdin.
+#
+# For production, deploy via the k8s/ manifests (Deployment + ServiceAccount
+# with namespace-scoped RBAC for `kubectl exec` into graph-node pods) and
+# connect MCP clients via `kubectl exec -it <pod> -- node dist/index.js`.
+# =============================================================================
+services:
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: graph-indexer-mcp:local
+    container_name: graph-indexer-mcp
+    # Required + optional env vars. Copy .env.example -> .env and edit.
+    env_file:
+      - .env
+    # stdio transport: keep stdin open and allocate a TTY so the MCP client
+    # on the other side of `docker attach` / `docker compose run` can drive
+    # the JSON-RPC loop.
+    stdin_open: true
+    tty: true
+    # Restart only on explicit failure; do NOT restart on clean exit (stdio
+    # client disconnect = clean exit).
+    restart: on-failure
+    # Tighten the runtime surface area.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Mount a writable tmpfs for any transient files the runtime may need.
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    # If you want graphman CLI fallback to work from this container, mount
+    # your kubeconfig read-only. The container's user is mcp (uid 10001), so
+    # ensure the file is world-readable or owned by 10001.
+    # volumes:
+    #   - ~/.kube/config:/home/mcp/.kube/config:ro
+    # Conservative resource caps for local dev.
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.10'
+          memory: 128M

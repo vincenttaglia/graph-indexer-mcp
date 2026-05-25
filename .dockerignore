@@ -1,0 +1,43 @@
+# Build artifacts / deps — rebuilt inside the image.
+node_modules/
+dist/
+dist-test/
+coverage/
+
+# Source control and worktrees.
+.git/
+.gitignore
+worktrees/
+
+# Local secrets / env files (never bake into the image).
+.env
+.env.*
+!.env.example
+
+# Logs and OS junk.
+*.log
+.DS_Store
+Thumbs.db
+
+# Docs and tests — not needed at runtime.
+*.md
+docs/
+test/
+
+# Deployment manifests aren't part of the runtime image.
+k8s/
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Scripts: keep entrypoint.sh (Dockerfile copies it); exclude everything else.
+scripts/*
+!scripts/entrypoint.sh
+
+# Editor / tooling.
+.vscode/
+.idea/
+.claude/
+
+# CI / packaging metadata.
+.github/
