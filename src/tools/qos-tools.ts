@@ -23,12 +23,14 @@ import type { QosSubgraphClient } from '../clients/qos-subgraph.js';
  * keep these two in sync.
  */
 const timeRangeSchema = z.union([
-  z.object({ hours: z.number().positive() }),
-  z.object({ days: z.number().positive() }),
-  z.object({
-    epochs: z.number().positive(),
-    seconds_per_epoch: z.number().positive().optional(),
-  }),
+  z.object({ hours: z.number().positive() }).strict(),
+  z.object({ days: z.number().positive() }).strict(),
+  z
+    .object({
+      epochs: z.number().int().positive(),
+      seconds_per_epoch: z.number().positive().optional(),
+    })
+    .strict(),
 ]);
 
 export interface RegisterQosToolsDeps {
@@ -66,10 +68,11 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
       'Omit deployment_id to get all deployments. time_range accepts ' +
       '{ hours: N }, { days: N }, or { epochs: N, seconds_per_epoch?: N }.',
     inputSchema: {
-      deployment_id: z.string().optional(),
+      deployment_id: z.string().min(1).optional(),
       time_range: timeRangeSchema,
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const rows = await client.getQueryVolume({
         deploymentId: args.deployment_id,
         timeRange: args.time_range,
@@ -94,10 +97,11 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
       'time_range accepts { hours: N }, { days: N }, or ' +
       '{ epochs: N, seconds_per_epoch?: N }.',
     inputSchema: {
-      deployment_id: z.string().optional(),
+      deployment_id: z.string().min(1).optional(),
       time_range: timeRangeSchema,
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const rows = await client.getIndexerQoS({
         indexerAddress: config.indexerAddress,
         deploymentId: args.deployment_id,
@@ -122,10 +126,11 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
       'time_range accepts { hours: N }, { days: N }, or ' +
       '{ epochs: N, seconds_per_epoch?: N }.',
     inputSchema: {
-      limit: z.number().int().positive().default(20),
+      limit: z.number().int().positive().max(1000).default(20),
       time_range: timeRangeSchema,
     },
-    handler: async (args) => {
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
       const rows = await client.getTopQueriedDeployments({
         limit: args.limit,
         timeRange: args.time_range,

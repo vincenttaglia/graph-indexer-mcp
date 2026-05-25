@@ -44,11 +44,11 @@ export type TimeRange =
 export interface QueryVolumeRow {
   /** Deployment IPFS hash (Qm...). Optional when caller summed across all. */
   deployment_id?: string;
-  /** Total queries served in the window. */
+  /** Total queries served in the window (sum across all 5-minute buckets). */
   query_count: number;
-  /** Successful queries (status 200, no error). */
+  /** Successful queries (status 200, no error) — summed across buckets. */
   success_count?: number;
-  /** Failed queries (timeouts, 5xx, indexer rejections). */
+  /** Failed queries (timeouts, 5xx, indexer rejections) — summed across buckets. */
   failure_count?: number;
   /** ISO-8601 timestamp at the start of the resolved window. */
   window_start?: string;
@@ -56,6 +56,8 @@ export interface QueryVolumeRow {
   window_end?: string;
   /** Length of the resolved window, in seconds. */
   window_seconds: number;
+  /** True if pagination hit the cap and the result is incomplete. */
+  truncated?: boolean;
 }
 
 /**
@@ -74,18 +76,38 @@ export interface IndexerQoSRow {
   indexer_address: string;
   /** Deployment IPFS hash (Qm...). */
   deployment_id: string;
-  /** Average end-to-end query latency in milliseconds. */
+  /**
+   * Average end-to-end query latency in milliseconds, weighted by per-bucket
+   * `queryCount` when available, otherwise a simple mean across buckets.
+   */
   avg_latency_ms?: number;
-  /** 95th-percentile query latency in milliseconds. */
+  /**
+   * 95th-percentile query latency in milliseconds. Approximated as the
+   * weighted mean of per-bucket p95 values — a true p95 across buckets would
+   * require raw samples, which the QoS subgraph doesn't expose.
+   */
   p95_latency_ms?: number;
-  /** Fraction of successful queries in [0, 1]. */
+  /**
+   * Fraction of successful queries in [0, 1]. Computed as
+   * `success_count / query_count` when those counts are present; otherwise
+   * the weighted mean of per-bucket `successRate`.
+   */
   success_rate?: number;
-  /** Average blocks behind chain head (how stale the indexer's data is). */
+  /**
+   * Average blocks behind chain head, weighted by per-bucket `queryCount`
+   * when available, otherwise a simple mean across buckets.
+   */
   avg_blocks_behind?: number;
-  /** Total queries the gateway routed to this indexer for this deployment. */
+  /** Total queries (sum across buckets) the gateway routed to this indexer for this deployment. */
   query_count?: number;
+  /** Sum of successful queries across buckets, when the subgraph exposes successCount. */
+  success_count?: number;
+  /** Sum of failed queries across buckets, when the subgraph exposes failureCount. */
+  failure_count?: number;
   /** Length of the resolved window, in seconds. */
   window_seconds: number;
+  /** True if pagination hit the cap and the result is incomplete. */
+  truncated?: boolean;
 }
 
 /**
