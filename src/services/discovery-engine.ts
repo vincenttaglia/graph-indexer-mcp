@@ -72,7 +72,6 @@ export interface CleanupAction {
     | 'unassign'
     | 'unused_record'
     | 'unused_remove'
-    | 'drop'
   >;
   rationale: string;
 }
@@ -330,6 +329,9 @@ export class DiscoveryEngine {
     // know pause/assignment state). Concurrency-capped to avoid hammering
     // graphman with a request per deployment.
     const infoById = new Map<string, DeploymentInfo>();
+    // TODO(signal): thread AbortSignal through client methods when Stage 0
+    // polish lands. Today aborts are bounded between items via
+    // `throwIfAborted`, not in-flight client calls.
     await mapPool(
       indexingStatuses,
       FANOUT_CONCURRENCY,
@@ -392,9 +394,34 @@ export class DiscoveryEngine {
       // Classify. First match wins; ordering reflects priority (no signal is
       // the most actionable; orphaned trumps unallocated since it's
       // infrastructure-level).
+      //
+      // `orphaned` requires conjunctive evidence — a deployment that is
+      // *only* paused (with no other corroborating signal) might be a
+      // deliberate maintenance pause and must NOT be proposed for cleanup.
+      // Stronger evidence:
+      //   - unassigned (no node assigned by graphman), OR
+      //   - paused AND (no allocation AND no signal) — i.e. paused on
+      //     something the indexer has no remaining stake in.
+      // graphman exposes `node` on DeploymentInfo, so `unassigned` is a
+      // reliable signal when info was fetched. When info is missing we err
+      // on the safe side: `unassigned` is false, so a deployment we only
+      // know is paused won't be flagged unless allocation+signal also went
+      // away.
       let reason: StaleDeployment['reason'] | null = null;
-      if (unassigned || paused) {
+      if (unassigned) {
         reason = 'orphaned';
+      } else if (paused && !hasAllocation && !hasSignal) {
+        reason = 'orphaned';
+      } else if (paused) {
+        // Paused alone is not enough. Surface a warning so operators can
+        // decide manually, but never auto-propose cleanup.
+        warnings.push(
+          `deployment ${deploymentId} is paused but still has ` +
+            `${hasAllocation ? 'an active allocation' : 'no allocation'} ` +
+            `and ${hasSignal ? 'curation signal' : 'no signal'}; ` +
+            `treating as deliberate maintenance — skipping cleanup.`,
+        );
+        continue;
       } else if (!hasSignal) {
         reason = 'no_signal';
       } else if (!hasAllocation && !isWhitelisted) {
@@ -533,16 +560,41 @@ export class DiscoveryEngine {
     } = args;
 
     // ------------------------------------------------------------------------
-    // Filter candidates: drop already-allocated, already-syncing, and
-    // blacklisted (whitelist wins over blacklist).
+    // Filter candidates: drop already-allocated, already-syncing, rewards-
+    // denied, and blacklisted.
+    //
+    // Blacklist is a *hard* deny — whitelist never overrides it. Whitelist's
+    // only role downstream is to bypass the minimum-signal floor; it must
+    // never resurrect a deployment the operator has explicitly forbidden.
+    //
+    // Rewards-denied deployments (`deniedAt !== 0`) earn zero indexing
+    // rewards on-chain regardless of signal/volume, so promoting them via an
+    // `offchain` rule would tie up sync resources for no reward. Filter them
+    // out unconditionally and surface an aggregate warning.
     // ------------------------------------------------------------------------
     const candidates: SubgraphDeployment[] = [];
+    let deniedDropped = 0;
     for (const dep of signalled) {
       if (allocatedDeploymentIds.has(dep.id)) continue;
       if (syncingIds.has(dep.id)) continue;
       const idLower = dep.id.toLowerCase();
-      if (blacklist.has(idLower) && !whitelist.has(idLower)) continue;
+      if (blacklist.has(idLower)) continue;
+      // `deniedAt` is typed `number` per the network-subgraph schema but the
+      // GraphQL endpoint occasionally returns it as a string. Normalize via
+      // `Number(...)` so `'0'` is treated identically to `0`.
+      const deniedAtNum = Number(dep.deniedAt ?? 0);
+      if (Number.isFinite(deniedAtNum) && deniedAtNum !== 0) {
+        deniedDropped++;
+        continue;
+      }
       candidates.push(dep);
+    }
+
+    if (deniedDropped > 0) {
+      warnings.push(
+        `${deniedDropped} signalled deployment(s) skipped because rewards ` +
+          `are denied (deniedAt !== 0); they would earn zero indexing rewards.`,
+      );
     }
 
     if (candidates.length === 0) {
@@ -559,7 +611,13 @@ export class DiscoveryEngine {
       });
       for (const v of volumes) {
         if (v.deployment_id) {
-          queryVolumeById.set(v.deployment_id, BigInt(Math.max(0, v.query_count | 0)));
+          // `| 0` would truncate to a signed int32 (~2.1B max). Real-world
+          // 30-day query counts on top deployments exceed that comfortably,
+          // so use BigInt directly. `query_count` is typed `number` in the
+          // QoS client; guard against NaN / Infinity / negatives.
+          const n = Number(v.query_count);
+          const safe = Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+          queryVolumeById.set(v.deployment_id, BigInt(safe));
         }
       }
     } catch (err) {
@@ -578,6 +636,9 @@ export class DiscoveryEngine {
     // ------------------------------------------------------------------------
     const opportunities: Opportunity[] = [];
 
+    // TODO(signal): thread AbortSignal through client methods when Stage 0
+    // polish lands. Today aborts are bounded between items via
+    // `throwIfAborted`, not in-flight client calls.
     await mapPool(candidates, FANOUT_CONCURRENCY, async (dep) => {
       throwIfAborted(signal);
 
@@ -672,11 +733,37 @@ export class DiscoveryEngine {
       bigIntToNumber(o.queryVolume30d ?? 0n),
     );
     const signalValues = opportunities.map((o) => bigIntToNumber(o.signalledTokens));
-    // Cost: prefer entityCount; fall back to signalledTokens magnitude so that
-    // when graph-node hasn't seen the candidate (the common case for
-    // discovery), the normalizer doesn't collapse every cost to zero.
+    // Cost: prefer entityCount. When a candidate has no entityCount (the
+    // common case — discovery candidates aren't synced locally yet) we use
+    // the median of the *known* entityCounts as a neutral proxy. This
+    // preserves the dimensional correctness of the cost component (it
+    // represents indexing/storage cost, not curation signal) and avoids
+    // double-counting signal weight via the old fallback to signalledTokens.
+    //
+    // Known limitation: until Stage 4 caches entity counts at the network
+    // level, candidates without local sync state get a flat median cost,
+    // which slightly compresses the cost dimension. See `warnings` below.
+    const knownEntityCounts = opportunities
+      .map((o) => o.entityCount)
+      .filter((c): c is bigint => c !== null)
+      .map((c) => bigIntToNumber(c))
+      .filter((n) => Number.isFinite(n) && n >= 0)
+      .sort((a, b) => a - b);
+    const medianCost =
+      knownEntityCounts.length === 0
+        ? 0
+        : (knownEntityCounts[Math.floor(knownEntityCounts.length / 2)] ?? 0);
+    const missingEntityCount = opportunities.filter((o) => o.entityCount === null).length;
+    if (missingEntityCount > 0) {
+      warnings.push(
+        `${missingEntityCount} candidate(s) have no local entity count; ` +
+          `using median (${medianCost.toFixed(0)}) of ${knownEntityCounts.length} ` +
+          `known candidate(s) as a neutral cost proxy. Pending Stage 4 caching ` +
+          `of entity counts at the network level.`,
+      );
+    }
     const costValues = opportunities.map((o) =>
-      bigIntToNumber(o.entityCount ?? o.signalledTokens),
+      o.entityCount !== null ? bigIntToNumber(o.entityCount) : medianCost,
     );
 
     const aprMax = Math.max(...aprValues, 0);
@@ -771,19 +858,27 @@ function safeBigInt(v: string | number | bigint | null | undefined): bigint {
 }
 
 /**
- * Convert a BigInt to a Number for normalization. Values above `Number.MAX_SAFE_INTEGER`
- * lose precision but stay finite — fine for [0..1] normalization since the
- * relative ordering of magnitudes is preserved within ~15 significant digits.
+ * Convert a BigInt to a Number for normalization. Values above
+ * `Number.MAX_SAFE_INTEGER` (≈9.0e15) lose integer precision in JS — wei-
+ * scale values (1e28) divided by a single 1e9 still land around 1e19, well
+ * above safe-int range, which silently corrupts ordering.
+ *
+ * Iteratively divide by 10 in BigInt-space until the magnitude is within
+ * safe-int range, then reapply the scale in floating-point. This keeps the
+ * top ~15 significant digits exact and the overall magnitude correct —
+ * sufficient for the [0..1] normalization callers do downstream.
  */
 function bigIntToNumber(v: bigint): number {
-  // Fast path: small values.
-  if (v <= 9_007_199_254_740_991n && v >= -9_007_199_254_740_991n) {
-    return Number(v);
+  const negative = v < 0n;
+  let scaled = negative ? -v : v;
+  let shift = 0;
+  const MAX = BigInt(Number.MAX_SAFE_INTEGER);
+  while (scaled > MAX) {
+    scaled /= 10n;
+    shift++;
   }
-  // Large values: divide by 1e9 in BigInt-space then convert. Avoids the
-  // ~15-digit precision cliff for normalization use cases.
-  const scaled = Number(v / 1_000_000_000n);
-  return scaled * 1_000_000_000;
+  const n = Number(scaled) * Math.pow(10, shift);
+  return negative ? -n : n;
 }
 
 /**
