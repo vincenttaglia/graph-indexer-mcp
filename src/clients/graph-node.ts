@@ -48,54 +48,71 @@ export interface GraphNodeClient {
 }
 
 // ---------------------------------------------------------------------------
-// GraphQL query — kept here (not extracted) so the response shape and query
+// GraphQL queries — kept here (not extracted) so the response shape and query
 // stay in lockstep.
+//
+// Two distinct queries on purpose: graph-node panics with "entered unreachable
+// code" when `indexingStatuses(subgraphs: $subgraphs)` is invoked with
+// `$subgraphs` explicitly null. To get "all deployments" we must omit the
+// argument entirely; to filter we must pass a non-null `[String!]!`.
 // ---------------------------------------------------------------------------
 
-const INDEXING_STATUSES_QUERY = /* GraphQL */ `
-  query IndexingStatuses($subgraphs: [String!]) {
+const INDEXING_STATUSES_SELECTION = /* GraphQL */ `
+  subgraph
+  synced
+  health
+  fatalError {
+    message
+    handler
+    deterministic
+    block {
+      number
+      hash
+    }
+  }
+  nonFatalErrors {
+    message
+    handler
+    deterministic
+    block {
+      number
+      hash
+    }
+  }
+  chains {
+    network
+    chainHeadBlock {
+      number
+      hash
+    }
+    latestBlock {
+      number
+      hash
+    }
+    earliestBlock {
+      number
+      hash
+    }
+    lastHealthyBlock {
+      number
+      hash
+    }
+  }
+  entityCount
+`;
+
+const INDEXING_STATUSES_ALL_QUERY = /* GraphQL */ `
+  query IndexingStatusesAll {
+    indexingStatuses {
+      ${INDEXING_STATUSES_SELECTION}
+    }
+  }
+`;
+
+const INDEXING_STATUSES_BY_IDS_QUERY = /* GraphQL */ `
+  query IndexingStatusesByIds($subgraphs: [String!]!) {
     indexingStatuses(subgraphs: $subgraphs) {
-      subgraph
-      synced
-      health
-      fatalError {
-        message
-        handler
-        deterministic
-        block {
-          number
-          hash
-        }
-      }
-      nonFatalErrors {
-        message
-        handler
-        deterministic
-        block {
-          number
-          hash
-        }
-      }
-      chains {
-        network
-        chainHeadBlock {
-          number
-          hash
-        }
-        latestBlock {
-          number
-          hash
-        }
-        earliestBlock {
-          number
-          hash
-        }
-        lastHealthyBlock {
-          number
-          hash
-        }
-      }
-      entityCount
+      ${INDEXING_STATUSES_SELECTION}
     }
   }
 `;
@@ -244,18 +261,24 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     return statusesCache.getOrFetch(
       key,
       async (fetchOpts) => {
-        // graph-node treats `subgraphs: null` (or omitted) as "return everything".
-        // Pass `null` only when the caller didn't filter so we don't send `[]` and
-        // get back an empty list. (The `[]` input path is short-circuited above,
-        // so by here `deploymentIds` is either undefined or non-empty.)
-        const variables = {
-          subgraphs: deploymentIds && deploymentIds.length > 0 ? deploymentIds : null,
-        };
-        const data = await gql.request<IndexingStatusesResponse>(
-          INDEXING_STATUSES_QUERY,
-          variables,
-          fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
-        );
+        // Route to one of two distinct GraphQL operations. graph-node panics
+        // ("entered unreachable code") when `subgraphs: null` is passed
+        // explicitly, so the "all deployments" path must omit the argument
+        // entirely via a separate query with no variables. The `[]` input is
+        // short-circuited above, so by here `deploymentIds` is either
+        // undefined (→ all) or non-empty (→ by-ids).
+        const data =
+          deploymentIds && deploymentIds.length > 0
+            ? await gql.request<IndexingStatusesResponse>(
+                INDEXING_STATUSES_BY_IDS_QUERY,
+                { subgraphs: deploymentIds },
+                fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+              )
+            : await gql.request<IndexingStatusesResponse>(
+                INDEXING_STATUSES_ALL_QUERY,
+                undefined,
+                fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
+              );
         return (data.indexingStatuses ?? []).map(normalizeStatus);
       },
       callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
@@ -273,7 +296,7 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
         // here would route through statusesCache under a single-element key,
         // creating two cache layers for the same data.
         const data = await gql.request<IndexingStatusesResponse>(
-          INDEXING_STATUSES_QUERY,
+          INDEXING_STATUSES_BY_IDS_QUERY,
           { subgraphs: [deploymentId] },
           fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
         );
