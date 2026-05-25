@@ -122,9 +122,12 @@ export function registerCompositeTools(
         .int()
         .positive()
         .describe(
-          'Blocks per year on the chain hosting the network subgraph. ' +
-            'Required, no default — chain-dependent (Ethereum mainnet ~2,628,000; ' +
-            'Arbitrum One ~10,512,000 at 3s block time).',
+          'Blocks per year used to annualize networkGRTIssuancePerBlock. ' +
+            'Required, no default. Recommended value: 2102400 (matches ' +
+            'indexer-tools-v4 canonical formula — 5760 blocks/day × 365). ' +
+            'Applies for both Ethereum mainnet and Arbitrum: ' +
+            'networkGRTIssuancePerBlock is denominated per Ethereum block ' +
+            'regardless of which chain hosts the network subgraph.',
         ),
       indexer_address: z
         .string()
@@ -232,8 +235,12 @@ export function registerCompositeTools(
         .int()
         .positive()
         .describe(
-          'Blocks per year on the chain hosting the network subgraph. ' +
-            'Required, no default — chain-dependent.',
+          'Blocks per year used to annualize networkGRTIssuancePerBlock. ' +
+            'Required, no default. Recommended value: 2102400 (matches ' +
+            'indexer-tools-v4 canonical formula — 5760 blocks/day × 365). ' +
+            'Applies for both Ethereum mainnet and Arbitrum: ' +
+            'networkGRTIssuancePerBlock is denominated per Ethereum block ' +
+            'regardless of which chain hosts the network subgraph.',
         ),
       typical_allocation_grt: z
         .string()
