@@ -235,9 +235,13 @@ async function fetchPauseState(
   graphmanClient: GraphmanClient,
   deploymentId: string,
   errors: string[],
+  signal?: AbortSignal,
 ): Promise<boolean> {
   try {
-    const info = await graphmanClient.getDeploymentInfo(deploymentId);
+    const info = await graphmanClient.getDeploymentInfo(
+      deploymentId,
+      signal ? { signal } : undefined,
+    );
     return Boolean(info.paused);
   } catch (err) {
     errors.push(
@@ -270,16 +274,22 @@ export class AllocationOptimizer {
     // ---------------------------------------------------------------------
     // 1. Gather state in parallel — degrade per-source.
     // ---------------------------------------------------------------------
+    const signal = opts?.signal;
+    const sigOpt = signal ? { signal } : undefined;
+
     const [
       indexerRes,
       activeAllocsRes,
       signalledDeploymentsRes,
       networkParamsRes,
     ] = await Promise.allSettled([
-      this.deps.networkClient.getIndexer(config.indexerAddress),
-      this.deps.networkClient.getActiveAllocations(config.indexerAddress),
-      this.deps.networkClient.getSignalledDeployments(String(toBigInt(config.minSignal))),
-      this.deps.networkClient.getNetworkParameters(),
+      this.deps.networkClient.getIndexer(config.indexerAddress, sigOpt),
+      this.deps.networkClient.getActiveAllocations(config.indexerAddress, sigOpt),
+      this.deps.networkClient.getSignalledDeployments(
+        String(toBigInt(config.minSignal)),
+        sigOpt,
+      ),
+      this.deps.networkClient.getNetworkParameters(sigOpt),
     ]);
 
     opts?.signal?.throwIfAborted?.();
@@ -392,11 +402,14 @@ export class AllocationOptimizer {
     const candidateIdList = Array.from(candidateIds);
 
     const [statusesRes, qosRes] = await Promise.allSettled([
-      this.deps.graphNodeClient.getIndexingStatuses(candidateIdList),
-      this.deps.qosClient.getTopQueriedDeployments({
-        limit: 200,
-        timeRange: { days: 30 },
-      }),
+      this.deps.graphNodeClient.getIndexingStatuses(candidateIdList, sigOpt),
+      this.deps.qosClient.getTopQueriedDeployments(
+        {
+          limit: 200,
+          timeRange: { days: 30 },
+        },
+        sigOpt,
+      ),
     ]);
 
     opts?.signal?.throwIfAborted?.();
@@ -429,7 +442,12 @@ export class AllocationOptimizer {
     // catches per-id.
     const pauseEntries = await Promise.all(
       candidateIdList.map(async (id) => {
-        const paused = await fetchPauseState(this.deps.graphmanClient, id, errors);
+        const paused = await fetchPauseState(
+          this.deps.graphmanClient,
+          id,
+          errors,
+          signal,
+        );
         return [id, paused] as const;
       }),
     );
@@ -455,7 +473,7 @@ export class AllocationOptimizer {
     );
     if (missingIds.length > 0) {
       const hydrateResults = await Promise.allSettled(
-        missingIds.map((id) => this.deps.networkClient.getDeployment(id)),
+        missingIds.map((id) => this.deps.networkClient.getDeployment(id, sigOpt)),
       );
       for (let i = 0; i < missingIds.length; i++) {
         const id = missingIds[i]!;

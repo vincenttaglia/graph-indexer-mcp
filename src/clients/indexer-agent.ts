@@ -171,25 +171,37 @@ export interface IndexerAgentClientOptions {
   endpoint: string;
 }
 
+/**
+ * Optional per-call options for client methods. `signal` is forwarded to the
+ * GraphQL client so caller-initiated cancellation aborts the in-flight fetch.
+ */
+export interface IndexerAgentCallOpts {
+  signal?: AbortSignal;
+}
+
 export interface IndexerAgentClient {
   /**
    * @param statusFilter Pass `'all'` (default) for no filter, otherwise an
    * Action status. The agent's `actions(filter:)` argument is an object; we
    * translate the simple status string into `{ status }` here.
    */
-  getActionQueue(statusFilter?: string): Promise<Action[]>;
-  queueActions(actions: ActionInput[]): Promise<Action[]>;
-  approveActions(actionIds: string[]): Promise<Action[]>;
-  cancelActions(actionIds: string[]): Promise<Action[]>;
-  getIndexingRules(): Promise<IndexingRule[]>;
+  getActionQueue(statusFilter?: string, opts?: IndexerAgentCallOpts): Promise<Action[]>;
+  queueActions(actions: ActionInput[], opts?: IndexerAgentCallOpts): Promise<Action[]>;
+  approveActions(actionIds: string[], opts?: IndexerAgentCallOpts): Promise<Action[]>;
+  cancelActions(actionIds: string[], opts?: IndexerAgentCallOpts): Promise<Action[]>;
+  getIndexingRules(opts?: IndexerAgentCallOpts): Promise<IndexingRule[]>;
   setIndexingRule(
     rule: Partial<IndexingRule> & { identifier: string },
+    opts?: IndexerAgentCallOpts,
   ): Promise<IndexingRule>;
-  setCostModel(model: {
-    deployment: string;
-    model: string;
-    variables?: string;
-  }): Promise<CostModel>;
+  setCostModel(
+    model: {
+      deployment: string;
+      model: string;
+      variables?: string;
+    },
+    opts?: IndexerAgentCallOpts,
+  ): Promise<CostModel>;
 }
 
 /**
@@ -206,57 +218,80 @@ export function createIndexerAgentClient(
   });
 
   return {
-    async getActionQueue(statusFilter?: string): Promise<Action[]> {
+    async getActionQueue(
+      statusFilter?: string,
+      callOpts?: IndexerAgentCallOpts,
+    ): Promise<Action[]> {
       // 'all' / undefined → omit the filter entirely so the agent returns
       // every action regardless of state.
       const filter =
         statusFilter && statusFilter !== 'all' ? { status: statusFilter } : undefined;
-      const res = await gql.request<ActionsResponse>(ACTIONS_QUERY, { filter });
+      const res = await gql.request<ActionsResponse>(
+        ACTIONS_QUERY,
+        { filter },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       return res.actions ?? [];
     },
 
-    async queueActions(actions: ActionInput[]): Promise<Action[]> {
+    async queueActions(
+      actions: ActionInput[],
+      callOpts?: IndexerAgentCallOpts,
+    ): Promise<Action[]> {
       // The agent expects each ActionInput to carry source/reason/priority.
       // Callers (tools) populate those before calling us so this is a
       // pass-through.
-      const res = await gql.request<QueueActionsResponse>(QUEUE_ACTIONS_MUTATION, {
-        actions,
-      });
+      const res = await gql.request<QueueActionsResponse>(
+        QUEUE_ACTIONS_MUTATION,
+        { actions },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       return res.queueActions ?? [];
     },
 
-    async approveActions(actionIds: string[]): Promise<Action[]> {
+    async approveActions(
+      actionIds: string[],
+      callOpts?: IndexerAgentCallOpts,
+    ): Promise<Action[]> {
       // Canonical `approveActions(actionIDs: [String!]!)` mutation — see
       // schema comment above the mutation declaration for verification source.
       const res = await gql.request<ApproveActionsResponse>(
         APPROVE_ACTIONS_MUTATION,
         { actionIDs: actionIds },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
       );
       return res.approveActions ?? [];
     },
 
-    async cancelActions(actionIds: string[]): Promise<Action[]> {
+    async cancelActions(
+      actionIds: string[],
+      callOpts?: IndexerAgentCallOpts,
+    ): Promise<Action[]> {
       // Canonical `cancelActions(actionIDs: [String!]!)` mutation — preserves
       // cancellation-specific resolver behaviour (cleanup, dependent-action
       // handling) that a generic status update would bypass.
       const res = await gql.request<CancelActionsResponse>(
         CANCEL_ACTIONS_MUTATION,
         { actionIDs: actionIds },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
       );
       return res.cancelActions ?? [];
     },
 
-    async getIndexingRules(): Promise<IndexingRule[]> {
+    async getIndexingRules(callOpts?: IndexerAgentCallOpts): Promise<IndexingRule[]> {
       // `merged: true` returns deployment rules with their group/global
       // defaults applied — usually what an operator wants to inspect.
-      const res = await gql.request<IndexingRulesResponse>(INDEXING_RULES_QUERY, {
-        merged: true,
-      });
+      const res = await gql.request<IndexingRulesResponse>(
+        INDEXING_RULES_QUERY,
+        { merged: true },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       return res.indexingRules ?? [];
     },
 
     async setIndexingRule(
       rule: Partial<IndexingRule> & { identifier: string },
+      callOpts?: IndexerAgentCallOpts,
     ): Promise<IndexingRule> {
       // TODO: verify against live agent schema — `identifierType` defaults to
       // `'deployment'` in the agent if omitted; we send what the caller gives
@@ -264,18 +299,24 @@ export function createIndexerAgentClient(
       const res = await gql.request<SetIndexingRuleResponse>(
         SET_INDEXING_RULE_MUTATION,
         { rule },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
       );
       return res.setIndexingRule;
     },
 
-    async setCostModel(model: {
-      deployment: string;
-      model: string;
-      variables?: string;
-    }): Promise<CostModel> {
-      const res = await gql.request<SetCostModelResponse>(SET_COST_MODEL_MUTATION, {
-        costModel: model,
-      });
+    async setCostModel(
+      model: {
+        deployment: string;
+        model: string;
+        variables?: string;
+      },
+      callOpts?: IndexerAgentCallOpts,
+    ): Promise<CostModel> {
+      const res = await gql.request<SetCostModelResponse>(
+        SET_COST_MODEL_MUTATION,
+        { costModel: model },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       return res.setCostModel;
     },
   };

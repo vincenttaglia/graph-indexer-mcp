@@ -73,10 +73,13 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const rows = await client.getQueryVolume({
-        deploymentId: args.deployment_id,
-        timeRange: args.time_range,
-      });
+      const rows = await client.getQueryVolume(
+        {
+          deploymentId: args.deployment_id,
+          timeRange: args.time_range,
+        },
+        { signal: extra.signal },
+      );
       return jsonResult({ rows });
     },
   });
@@ -102,11 +105,14 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const rows = await client.getIndexerQoS({
-        indexerAddress: config.indexerAddress,
-        deploymentId: args.deployment_id,
-        timeRange: args.time_range,
-      });
+      const rows = await client.getIndexerQoS(
+        {
+          indexerAddress: config.indexerAddress,
+          deploymentId: args.deployment_id,
+          timeRange: args.time_range,
+        },
+        { signal: extra.signal },
+      );
       return jsonResult({
         indexer_address: config.indexerAddress,
         rows,
@@ -131,10 +137,13 @@ export function registerQosTools(server: McpServer, deps: RegisterQosToolsDeps):
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const rows = await client.getTopQueriedDeployments({
-        limit: args.limit,
-        timeRange: args.time_range,
-      });
+      const rows = await client.getTopQueriedDeployments(
+        {
+          limit: args.limit,
+          timeRange: args.time_range,
+        },
+        { signal: extra.signal },
+      );
       return jsonResult({ rows });
     },
   });

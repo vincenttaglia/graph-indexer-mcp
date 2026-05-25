@@ -179,11 +179,17 @@ export class DiscoveryEngine {
     let networkParams: GraphNetwork | null = null;
     let indexingStatuses: SubgraphIndexingStatus[] = [];
 
+    const signal = opts?.signal;
+    const sigOpt = signal ? { signal } : undefined;
+
     try {
       const [sig, alloc, net] = await Promise.all([
-        this.deps.networkClient.getSignalledDeployments(config.minSignal.toString()),
-        this.deps.networkClient.getActiveAllocations(lowerAddr),
-        this.deps.networkClient.getNetworkParameters(),
+        this.deps.networkClient.getSignalledDeployments(
+          config.minSignal.toString(),
+          sigOpt,
+        ),
+        this.deps.networkClient.getActiveAllocations(lowerAddr, sigOpt),
+        this.deps.networkClient.getNetworkParameters(sigOpt),
       ]);
       signalledPage = sig;
       activeAllocations = alloc.items;
@@ -201,6 +207,11 @@ export class DiscoveryEngine {
         );
       }
     } catch (err) {
+      // If the caller cancelled mid-fetch, the rejection is an AbortError —
+      // propagate it instead of degrading to an empty DiscoveryResult, which
+      // would silently look like "no work to do" and defeat the signal
+      // threading. Only convert non-abort errors into the fatal-empty path.
+      throwIfAborted(opts?.signal);
       errors.push(`network subgraph fatal: ${describeError(err)}`);
       return {
         stale: [],
@@ -215,8 +226,15 @@ export class DiscoveryEngine {
     throwIfAborted(opts?.signal);
 
     try {
-      indexingStatuses = await this.deps.graphNodeClient.getIndexingStatuses();
+      indexingStatuses = await this.deps.graphNodeClient.getIndexingStatuses(
+        undefined,
+        sigOpt,
+      );
     } catch (err) {
+      // Propagate aborts before degrading. Otherwise a cancelled fetch
+      // becomes a `cleanup half will operate without local sync state`
+      // warning and the rest of the run continues.
+      throwIfAborted(opts?.signal);
       warnings.push(
         `graph-node: getIndexingStatuses failed (${describeError(err)}); ` +
           `cleanup half will operate without local sync state.`,
@@ -311,11 +329,16 @@ export class DiscoveryEngine {
     const sizesById = new Map<string, bigint>();
     if (this.deps.postgresClient) {
       try {
-        const sizes = await this.deps.postgresClient.getAllSubgraphSizes();
+        const sizes = await this.deps.postgresClient.getAllSubgraphSizes(
+          signal ? { signal } : undefined,
+        );
         for (const s of sizes) {
           sizesById.set(s.deploymentId, BigInt(s.sizeBytes));
         }
       } catch (err) {
+        // Abort propagation precedes degradation: a cancelled postgres call
+        // must not look like a postgres outage.
+        throwIfAborted(signal);
         warnings.push(
           `postgres: getAllSubgraphSizes failed (${describeError(err)}); ` +
             `disk-size enrichment skipped for cleanup.`,
@@ -329,18 +352,24 @@ export class DiscoveryEngine {
     // know pause/assignment state). Concurrency-capped to avoid hammering
     // graphman with a request per deployment.
     const infoById = new Map<string, DeploymentInfo>();
-    // TODO(signal): thread AbortSignal through client methods when Stage 0
-    // polish lands. Today aborts are bounded between items via
-    // `throwIfAborted`, not in-flight client calls.
+    // The external AbortSignal is forwarded into each client call so per-
+    // deployment graphman lookups abort mid-flight if the caller cancels.
     await mapPool(
       indexingStatuses,
       FANOUT_CONCURRENCY,
       async (status) => {
         throwIfAborted(signal);
         try {
-          const info = await this.deps.graphmanClient.getDeploymentInfo(status.subgraph);
+          const info = await this.deps.graphmanClient.getDeploymentInfo(
+            status.subgraph,
+            signal ? { signal } : undefined,
+          );
           infoById.set(status.subgraph, info);
         } catch (err) {
+          // Honor cancellation first; otherwise a cancelled batch silently
+          // looks like "every graphman lookup happened to fail" and the
+          // outer mapPool keeps spinning until the queue drains.
+          throwIfAborted(signal);
           // Per-deployment failures aren't fatal; we just lose pause/node
           // state for that one. Record one warning per first occurrence.
           if (infoById.size === 0 && !warnings.some((w) => w.startsWith('graphman:'))) {
@@ -606,9 +635,10 @@ export class DiscoveryEngine {
     // ------------------------------------------------------------------------
     const queryVolumeById = new Map<string, bigint>();
     try {
-      const volumes = await this.deps.qosClient.getQueryVolume({
-        timeRange: { days: 30 },
-      });
+      const volumes = await this.deps.qosClient.getQueryVolume(
+        { timeRange: { days: 30 } },
+        signal ? { signal } : undefined,
+      );
       for (const v of volumes) {
         if (v.deployment_id) {
           // `| 0` would truncate to a signed int32 (~2.1B max). Real-world
@@ -626,6 +656,9 @@ export class DiscoveryEngine {
         }
       }
     } catch (err) {
+      // A caller-initiated abort during the QoS fetch should propagate, not
+      // be reported as a QoS outage with `volumeScore=0`.
+      throwIfAborted(signal);
       warnings.push(
         `qos: 30-day query volume fetch failed (${describeError(err)}); ` +
           `volumeScore will be zero for all candidates.`,
@@ -641,16 +674,19 @@ export class DiscoveryEngine {
     // ------------------------------------------------------------------------
     const opportunities: Opportunity[] = [];
 
-    // TODO(signal): thread AbortSignal through client methods when Stage 0
-    // polish lands. Today aborts are bounded between items via
-    // `throwIfAborted`, not in-flight client calls.
+    // The external AbortSignal is forwarded into each client call so per-
+    // candidate fetches abort mid-flight if the caller cancels.
+    const innerSigOpt = signal ? { signal } : undefined;
     await mapPool(candidates, FANOUT_CONCURRENCY, async (dep) => {
       throwIfAborted(signal);
 
       let totalStakedTokens = 0n;
       let indexerCount = 0;
       try {
-        const allocs = await this.deps.networkClient.getDeploymentAllocations(dep.id);
+        const allocs = await this.deps.networkClient.getDeploymentAllocations(
+          dep.id,
+          innerSigOpt,
+        );
         const uniqueIndexers = new Set<string>();
         for (const a of allocs.items) {
           totalStakedTokens += safeBigInt(a.allocatedTokens);
@@ -658,6 +694,10 @@ export class DiscoveryEngine {
         }
         indexerCount = uniqueIndexers.size;
       } catch (err) {
+        // Cancellation must escape the per-candidate handler so the outer
+        // mapPool tears down; otherwise we silently produce zeros for every
+        // remaining candidate after the abort.
+        throwIfAborted(signal);
         warnings.push(
           `network subgraph: getDeploymentAllocations(${dep.id}) failed ` +
             `(${describeError(err)}); totalStake / indexerCount default to 0.`,
@@ -674,11 +714,12 @@ export class DiscoveryEngine {
       // signalledTokens as a coarse proxy in the normalizer.
       let entityCount: bigint | null = null;
       try {
-        const ec = await this.deps.graphNodeClient.getEntityCount(dep.id);
+        const ec = await this.deps.graphNodeClient.getEntityCount(dep.id, innerSigOpt);
         if (ec !== null) entityCount = safeBigInt(ec);
       } catch {
-        // Swallow — entity count is a `nice to have`. Don't pollute warnings
-        // with one entry per candidate.
+        // Propagate cancellation; otherwise swallow — entity count is a
+        // `nice to have` and we don't want one warning per candidate.
+        throwIfAborted(signal);
       }
 
       // Chain: not currently surfaced on `SubgraphDeployment`. Best-effort
@@ -686,10 +727,12 @@ export class DiscoveryEngine {
       // knows about — usually candidates aren't synced, so this is null).
       let chain: string | null = null;
       try {
-        const info = await this.deps.graphmanClient.getDeploymentInfo(dep.id);
+        const info = await this.deps.graphmanClient.getDeploymentInfo(dep.id, innerSigOpt);
         chain = info.chain ?? null;
       } catch {
-        // Expected: graphman often returns 404 for unknown deployments.
+        // Propagate cancellation. Otherwise expected: graphman often
+        // returns 404 for unknown deployments.
+        throwIfAborted(signal);
       }
 
       opportunities.push({
@@ -702,6 +745,11 @@ export class DiscoveryEngine {
         chain,
       });
     });
+
+    // Final abort gate after the per-candidate fan-out — without this, a
+    // cancellation that races with the last worker completing would still
+    // produce a scored DiscoveryResult.
+    throwIfAborted(signal);
 
     if (opportunities.length === 0) {
       return { opportunities: [], ruleRecommendations: [] };
@@ -831,7 +879,13 @@ export class DiscoveryEngine {
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    // Node's idiom — preserves abort semantics for callers using AbortController.
+    // Prefer the native WHATWG abort propagation so callers receive their
+    // own abort reason (DOMException AbortError or whatever they passed to
+    // `controller.abort(reason)`), not a stand-in Error created here. Fall
+    // back to a stable Error if `signal.reason` is somehow not throwable.
+    if (typeof signal.throwIfAborted === 'function') {
+      signal.throwIfAborted();
+    }
     throw new Error('DiscoveryEngine.run aborted');
   }
 }

@@ -52,7 +52,9 @@ export function registerGraphNodeTools(
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const statuses = await client.getIndexingStatuses(args.deployment_ids);
+      const statuses = await client.getIndexingStatuses(args.deployment_ids, {
+        signal: extra.signal,
+      });
       return {
         content: [
           {
@@ -79,7 +81,9 @@ export function registerGraphNodeTools(
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const status = await client.getDeploymentHealth(args.deployment_id);
+      const status = await client.getDeploymentHealth(args.deployment_id, {
+        signal: extra.signal,
+      });
       if (!status) {
         return {
           content: [
@@ -120,7 +124,9 @@ export function registerGraphNodeTools(
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const entityCount = await client.getEntityCount(args.deployment_id);
+      const entityCount = await client.getEntityCount(args.deployment_id, {
+        signal: extra.signal,
+      });
       return {
         content: [
           {

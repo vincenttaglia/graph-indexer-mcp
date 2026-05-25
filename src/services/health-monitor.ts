@@ -318,15 +318,18 @@ export class HealthMonitor {
     // Step 1: epoch timing
     // -----------------------------------------------------------------------
 
+    const signal = opts.signal;
+    const sigOpt = signal ? { signal } : undefined;
+
     let timing: EpochTiming;
     let protocolChainAlias: string | null = null;
     let protocolEpochStartBlock: number | null = null;
     try {
       const [currentEpoch, networkParams] = await Promise.all([
-        this.deps.eboClient.getCurrentEpoch(),
-        this.deps.networkClient.getNetworkParameters(),
+        this.deps.eboClient.getCurrentEpoch(sigOpt),
+        this.deps.networkClient.getNetworkParameters(sigOpt),
       ]);
-      throwIfAborted(opts.signal);
+      throwIfAborted(signal);
 
       // The protocol chain alias isn't stored on GraphNetwork; we infer it
       // from the EBO's per-chain row that matches the network subgraph's
@@ -353,6 +356,9 @@ export class HealthMonitor {
         protocolEpochStartBlock,
       });
     } catch (err) {
+      // Cancellation must not be converted into a degraded `currentEpoch=0`
+      // timing record; let the caller's AbortError escape.
+      throwIfAborted(signal);
       errors.push(`Failed to determine epoch timing: ${describe(err)}`);
       // Return early-ish: without timing we still try the allocations loop so
       // operators see what's healthy, but risk scoring will be coarse.
@@ -372,8 +378,9 @@ export class HealthMonitor {
     try {
       const page = await this.deps.networkClient.getActiveAllocations(
         opts.indexerAddress,
+        sigOpt,
       );
-      throwIfAborted(opts.signal);
+      throwIfAborted(signal);
       allocations = page.items;
       if (page.truncated) {
         warnings.push(
@@ -381,6 +388,10 @@ export class HealthMonitor {
         );
       }
     } catch (err) {
+      // Propagate cancellation before degrading to a structured empty
+      // HealthCheckResult — a cancelled allocation fetch otherwise looks
+      // identical to a real network-subgraph outage.
+      throwIfAborted(signal);
       errors.push(
         `Failed to fetch active allocations for ${opts.indexerAddress}: ${describe(err)}`,
       );
@@ -403,9 +414,15 @@ export class HealthMonitor {
 
     const classifications = await Promise.allSettled(
       allocations.map((alloc) =>
-        this.classifyAllocation(alloc, timing.currentEpoch, opts.signal),
+        this.classifyAllocation(alloc, timing.currentEpoch, signal),
       ),
     );
+
+    // If the caller cancelled during classification, surface the AbortError
+    // before we start converting rejected results into placeholder failed
+    // AllocationHealth entries. Otherwise an N-allocation cancel becomes
+    // an N-entry "classification failed" report.
+    throwIfAborted(signal);
 
     const allocationHealths: AllocationHealth[] = [];
     classifications.forEach((settled, idx) => {
@@ -519,7 +536,7 @@ export class HealthMonitor {
     const recoveryPlan = await this.buildRecoveryPlan(
       allocations,
       allocationHealths,
-      opts.signal,
+      signal,
     );
 
     return {
@@ -544,8 +561,10 @@ export class HealthMonitor {
     signal?: AbortSignal,
   ): Promise<AllocationHealth> {
     throwIfAborted(signal);
+    const sigOpt = signal ? { signal } : undefined;
     const status = await this.deps.graphNodeClient.getDeploymentHealth(
       alloc.subgraphDeployment.id,
+      sigOpt,
     );
     throwIfAborted(signal);
 
@@ -553,10 +572,12 @@ export class HealthMonitor {
     let epochStartBlock: number | null = null;
     if (chain && currentEpoch > 0) {
       try {
-        const row = await this.deps.eboClient.getEpochBlocks(currentEpoch, chain);
+        const row = await this.deps.eboClient.getEpochBlocks(currentEpoch, chain, sigOpt);
         if (row) epochStartBlock = safeToInt(row.blockNumber);
       } catch {
-        // Swallow — we'll mark epochStartBlock null and downgrade to "none".
+        // Propagate cancellation; otherwise swallow — we'll mark
+        // epochStartBlock null and downgrade closability to "none".
+        throwIfAborted(signal);
       }
     }
 
@@ -640,9 +661,15 @@ export class HealthMonitor {
       // deployment, which is cheap and keeps the public type clean.
       let status: SubgraphIndexingStatus | null = null;
       try {
-        status = await this.deps.graphNodeClient.getDeploymentHealth(ah.deploymentId);
+        status = await this.deps.graphNodeClient.getDeploymentHealth(
+          ah.deploymentId,
+          signal ? { signal } : undefined,
+        );
       } catch {
-        // fall through to manual_review
+        // Propagate cancellation; otherwise fall through to manual_review.
+        // Without this, a cancel during recovery enrichment becomes an
+        // N-deployment "no fatalError detail" manual_review entry list.
+        throwIfAborted(signal);
       }
       throwIfAborted(signal);
 

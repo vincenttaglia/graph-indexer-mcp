@@ -244,7 +244,9 @@ export function registerGraphmanTools(
     inputSchema: deploymentIdShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const info = await client.getDeploymentInfo(args.deployment_id);
+      const info = await client.getDeploymentInfo(args.deployment_id, {
+        signal: extra.signal,
+      });
       return asJsonResult(info);
     },
   });
@@ -257,7 +259,9 @@ export function registerGraphmanTools(
     inputSchema: deploymentIdShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const ack = await client.pauseDeployment(args.deployment_id);
+      const ack = await client.pauseDeployment(args.deployment_id, {
+        signal: extra.signal,
+      });
       return asJsonResult(ack);
     },
   });
@@ -270,7 +274,9 @@ export function registerGraphmanTools(
     inputSchema: deploymentIdShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const ack = await client.resumeDeployment(args.deployment_id);
+      const ack = await client.resumeDeployment(args.deployment_id, {
+        signal: extra.signal,
+      });
       return asJsonResult(ack);
     },
   });
@@ -283,7 +289,9 @@ export function registerGraphmanTools(
     inputSchema: deploymentIdShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.restartDeployment(args.deployment_id);
+      const result = await client.restartDeployment(args.deployment_id, {
+        signal: extra.signal,
+      });
       return asJsonResult({ execution_id: result.executionId });
     },
   });
@@ -296,7 +304,9 @@ export function registerGraphmanTools(
     inputSchema: executionIdShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const status = await client.getExecutionStatus(args.execution_id);
+      const status = await client.getExecutionStatus(args.execution_id, {
+        signal: extra.signal,
+      });
       return asJsonResult(status);
     },
   });
@@ -315,6 +325,7 @@ export function registerGraphmanTools(
         args.deployment_id,
         args.block_number,
         args.block_hash,
+        { signal: extra.signal },
       );
       return asCliResult(result);
     },
@@ -331,6 +342,7 @@ export function registerGraphmanTools(
       const result = await client.reassignDeployment(
         args.deployment_id,
         args.target_node,
+        { signal: extra.signal },
       );
       return asCliResult(result);
     },
@@ -344,7 +356,9 @@ export function registerGraphmanTools(
     inputSchema: deploymentIdShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.unassignDeployment(args.deployment_id);
+      const result = await client.unassignDeployment(args.deployment_id, {
+        signal: extra.signal,
+      });
       return asCliResult(result);
     },
   });
@@ -357,7 +371,9 @@ export function registerGraphmanTools(
     inputSchema: dropShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.dropDeployment(args.deployment_id);
+      const result = await client.dropDeployment(args.deployment_id, {
+        signal: extra.signal,
+      });
       return asCliResult(result);
     },
   });
@@ -369,7 +385,7 @@ export function registerGraphmanTools(
       'Scan shards and mark unused deployments via the graphman CLI. First step in disk-reclamation; pairs with graphman_unused_remove.',
     handler: async (_args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.unusedRecord();
+      const result = await client.unusedRecord({ signal: extra.signal });
       return asCliResult(result);
     },
   });
@@ -387,7 +403,7 @@ export function registerGraphmanTools(
         opts.olderThanMinutes = args.older_than_minutes;
       }
       if (args.count !== undefined) opts.count = args.count;
-      const result = await client.unusedRemove(opts);
+      const result = await client.unusedRemove(opts, { signal: extra.signal });
       return asCliResult(result);
     },
   });
@@ -415,7 +431,7 @@ export function registerGraphmanTools(
       }
       if (validated.from !== undefined) argsForCli.from = validated.from;
       if (validated.to !== undefined) argsForCli.to = validated.to;
-      const result = await client.checkBlocks(argsForCli);
+      const result = await client.checkBlocks(argsForCli, { signal: extra.signal });
       return asCliResult(result);
     },
   });
@@ -428,7 +444,9 @@ export function registerGraphmanTools(
     inputSchema: truncateChainCacheShape,
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.truncateChainCache(args.chain);
+      const result = await client.truncateChainCache(args.chain, {
+        signal: extra.signal,
+      });
       return asCliResult(result);
     },
   });
@@ -453,7 +471,7 @@ export function registerGraphmanTools(
       if (validated.from !== undefined) cliArgs.from = validated.from;
       if (validated.to !== undefined) cliArgs.to = validated.to;
       if (validated.remove_all !== undefined) cliArgs.removeAll = validated.remove_all;
-      const result = await client.clearCallCache(cliArgs);
+      const result = await client.clearCallCache(cliArgs, { signal: extra.signal });
       return asCliResult(result);
     },
   });

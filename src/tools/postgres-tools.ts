@@ -39,12 +39,16 @@ export function registerPostgresTools(
       'Return the on-disk size of a deployment by summing pg_total_relation_size over every table in its sgdN schema. Reads the graph-node Postgres database directly.',
     inputSchema: { deployment_id: z.string() },
     handler: async (args, extra) => {
-      // Honor caller cancellation at entry. node-postgres doesn't natively
-      // observe AbortSignal for in-flight queries, so we can only abort
-      // before the query starts — good enough for the fast path.
+      // Honor caller cancellation at entry AND between query boundaries.
+      // node-postgres doesn't natively observe AbortSignal for in-flight
+      // queries — see TODO(stage4) on PostgresCallOpts — so a single
+      // long-running query can't be cancelled mid-flight today; the signal
+      // is checked before each underlying query in the client.
       extra.signal.throwIfAborted();
       if (!deps.client) return notConfigured();
-      const result = await deps.client.getSubgraphSize(args.deployment_id);
+      const result = await deps.client.getSubgraphSize(args.deployment_id, {
+        signal: extra.signal,
+      });
       if (!result) {
         return {
           content: [
@@ -82,10 +86,11 @@ export function registerPostgresTools(
     description:
       'Return on-disk size for every deployment known to graph-node, ranked descending by size. Useful for capacity planning and cleanup decisions.',
     handler: async (_args, extra) => {
-      // Honor caller cancellation at entry. See note above re: pg AbortSignal.
+      // Honor caller cancellation at entry AND between per-deployment queries
+      // inside the client. See note above re: pg AbortSignal.
       extra.signal.throwIfAborted();
       if (!deps.client) return notConfigured();
-      const sizes = await deps.client.getAllSubgraphSizes();
+      const sizes = await deps.client.getAllSubgraphSizes({ signal: extra.signal });
       const payload = sizes.map((s) => ({
         deployment_id: s.deploymentId,
         namespace: s.namespace,

@@ -14,13 +14,21 @@ import type { NetworkEpochBlockNumber } from '../types/ebo.js';
  * TODO: verify against live schema — entity/field names below mirror the
  * design doc table (§2.2) but the production EBO subgraph may differ.
  */
+/**
+ * Optional per-call options for client methods. `signal` is forwarded to the
+ * GraphQL client so caller-initiated cancellation aborts the in-flight fetch.
+ */
+export interface EboSubgraphCallOpts {
+  signal?: AbortSignal;
+}
+
 export interface EboSubgraphClient {
   /**
    * Returns the latest epoch and the per-chain start blocks within it.
    * Implementation queries the most recent `Epoch` entity, then separately
    * fetches the `NetworkEpochBlockNumber` rows for that epoch number.
    */
-  getCurrentEpoch(): Promise<{
+  getCurrentEpoch(opts?: EboSubgraphCallOpts): Promise<{
     epochNumber: number;
     networkBlocks: Array<{ network: string; blockNumber: string }>;
   }>;
@@ -33,13 +41,18 @@ export interface EboSubgraphClient {
   getEpochBlocks(
     epochNumber: number,
     chain: string,
+    opts?: EboSubgraphCallOpts,
   ): Promise<{ network: string; epochNumber: number; blockNumber: string } | null>;
 
   /**
    * Returns the most recent `limit` epoch-start-block rows for a chain,
    * ordered by descending epoch number. Useful for trending / sanity checks.
    */
-  getNetworkEpochs(chain: string, limit?: number): Promise<NetworkEpochBlockNumber[]>;
+  getNetworkEpochs(
+    chain: string,
+    limit?: number,
+    opts?: EboSubgraphCallOpts,
+  ): Promise<NetworkEpochBlockNumber[]>;
 }
 
 export interface EboSubgraphClientOptions {
@@ -192,8 +205,13 @@ export function createEboSubgraphClient(opts: EboSubgraphClientOptions): EboSubg
   });
 
   return {
-    async getCurrentEpoch() {
-      const latest = await gql.request<LatestEpochResponse>(LATEST_EPOCH_QUERY);
+    async getCurrentEpoch(callOpts) {
+      const reqOpts = callOpts?.signal ? { signal: callOpts.signal } : undefined;
+      const latest = await gql.request<LatestEpochResponse>(
+        LATEST_EPOCH_QUERY,
+        undefined,
+        reqOpts,
+      );
       const epoch = latest.epoches[0];
       if (!epoch) {
         throw new Error('EBO subgraph returned no epochs');
@@ -204,6 +222,7 @@ export function createEboSubgraphClient(opts: EboSubgraphClientOptions): EboSubg
       const blocks = await gql.request<EpochNetworkBlocksResponse>(
         EPOCH_NETWORK_BLOCKS_QUERY,
         { epochNumber: String(epochNumber), limit: 1000 },
+        reqOpts,
       );
 
       return {
@@ -215,11 +234,12 @@ export function createEboSubgraphClient(opts: EboSubgraphClientOptions): EboSubg
       };
     },
 
-    async getEpochBlocks(epochNumber, chain) {
-      const data = await gql.request<EpochBlocksResponse>(EPOCH_BLOCKS_QUERY, {
-        network: chain,
-        epochNumber: String(epochNumber),
-      });
+    async getEpochBlocks(epochNumber, chain, callOpts) {
+      const data = await gql.request<EpochBlocksResponse>(
+        EPOCH_BLOCKS_QUERY,
+        { network: chain, epochNumber: String(epochNumber) },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       const row = data.networkEpochBlockNumbers[0];
       if (!row) return null;
       return {
@@ -229,11 +249,12 @@ export function createEboSubgraphClient(opts: EboSubgraphClientOptions): EboSubg
       };
     },
 
-    async getNetworkEpochs(chain, limit = 10) {
-      const data = await gql.request<NetworkEpochsResponse>(NETWORK_EPOCHS_QUERY, {
-        network: chain,
-        limit,
-      });
+    async getNetworkEpochs(chain, limit = 10, callOpts) {
+      const data = await gql.request<NetworkEpochsResponse>(
+        NETWORK_EPOCHS_QUERY,
+        { network: chain, limit },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       return data.networkEpochBlockNumbers.map((row) => ({
         id: row.id,
         network: row.network,

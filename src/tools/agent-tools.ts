@@ -113,7 +113,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         reason: 'queued via MCP queue_allocate',
         priority: DEFAULT_PRIORITY,
       };
-      const result = await client.queueActions([action]);
+      const result = await client.queueActions([action], { signal: extra.signal });
       return jsonResult(result);
     },
   });
@@ -156,7 +156,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         reason: 'queued via MCP queue_unallocate',
         priority: DEFAULT_PRIORITY,
       };
-      const result = await client.queueActions([action]);
+      const result = await client.queueActions([action], { signal: extra.signal });
       return jsonResult(result);
     },
   });
@@ -201,7 +201,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         reason: 'queued via MCP queue_reallocate',
         priority: DEFAULT_PRIORITY,
       };
-      const result = await client.queueActions([action]);
+      const result = await client.queueActions([action], { signal: extra.signal });
       return jsonResult(result);
     },
   });
@@ -232,7 +232,9 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.getActionQueue(args.status_filter);
+      const result = await client.getActionQueue(args.status_filter, {
+        signal: extra.signal,
+      });
       return jsonResult(result);
     },
   });
@@ -255,7 +257,9 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.approveActions(args.action_ids);
+      const result = await client.approveActions(args.action_ids, {
+        signal: extra.signal,
+      });
       return jsonResult(result);
     },
   });
@@ -277,7 +281,9 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.cancelActions(args.action_ids);
+      const result = await client.cancelActions(args.action_ids, {
+        signal: extra.signal,
+      });
       return jsonResult(result);
     },
   });
@@ -334,7 +340,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         identifier: args.deployment_id,
         identifierType: 'deployment' as const,
       } as Parameters<typeof client.setIndexingRule>[0];
-      const result = await client.setIndexingRule(rule);
+      const result = await client.setIndexingRule(rule, { signal: extra.signal });
       return jsonResult(result);
     },
   });
@@ -350,7 +356,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       'group/global defaults merged in for deployment-level rules.',
     handler: async (_args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.getIndexingRules();
+      const result = await client.getIndexingRules({ signal: extra.signal });
       return jsonResult(result);
     },
   });
@@ -377,11 +383,14 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.setCostModel({
-        deployment: args.deployment_id,
-        model: args.model,
-        variables: args.variables,
-      });
+      const result = await client.setCostModel(
+        {
+          deployment: args.deployment_id,
+          model: args.model,
+          variables: args.variables,
+        },
+        { signal: extra.signal },
+      );
       return jsonResult(result);
     },
   });

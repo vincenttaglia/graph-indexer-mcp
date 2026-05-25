@@ -19,13 +19,35 @@ export interface SubgraphSize {
   sizeBytes: string;
 }
 
+/**
+ * Optional per-call options for client methods. `signal` is honored between
+ * queries (fast-fail at boundaries) and is checked before each per-deployment
+ * iteration in `getAllSubgraphSizes`.
+ *
+ * TODO(stage4): node-postgres has no native AbortSignal integration for
+ * in-flight queries. A full implementation would use `client.cancel()` to
+ * cancel an active query when the signal fires. Current implementation
+ * observes the signal at query boundaries only — good enough for the fast
+ * path; long-running queries on a stuck connection will still need to wait
+ * for the connection's own timeout.
+ */
+export interface PostgresCallOpts {
+  signal?: AbortSignal;
+}
+
 export interface PostgresClient {
   /** Map a deployment IPFS hash to its `sgdN` schema name. Returns null if unknown. */
-  getDeploymentNamespace(deploymentId: string): Promise<string | null>;
+  getDeploymentNamespace(
+    deploymentId: string,
+    opts?: PostgresCallOpts,
+  ): Promise<string | null>;
   /** Disk usage for one deployment. Returns null if the deployment is unknown. */
-  getSubgraphSize(deploymentId: string): Promise<SubgraphSize | null>;
+  getSubgraphSize(
+    deploymentId: string,
+    opts?: PostgresCallOpts,
+  ): Promise<SubgraphSize | null>;
   /** Disk usage for every known deployment, sorted descending by size. */
-  getAllSubgraphSizes(): Promise<SubgraphSize[]>;
+  getAllSubgraphSizes(opts?: PostgresCallOpts): Promise<SubgraphSize[]>;
   /** Release the underlying pool. Safe to call multiple times. */
   close(): Promise<void>;
 }
@@ -80,7 +102,9 @@ export function createPostgresClient(
 
   async function getDeploymentNamespace(
     deploymentId: string,
+    opts?: PostgresCallOpts,
   ): Promise<string | null> {
+    opts?.signal?.throwIfAborted();
     const res = await getPool().query<DeploymentSchemaRow>(
       'SELECT subgraph, name FROM public.deployment_schemas WHERE subgraph = $1 LIMIT 1',
       [deploymentId],
@@ -134,11 +158,14 @@ export function createPostgresClient(
 
   async function getSubgraphSize(
     deploymentId: string,
+    opts?: PostgresCallOpts,
   ): Promise<SubgraphSize | null> {
+    opts?.signal?.throwIfAborted();
     const pool = getPool();
-    const namespace = await getDeploymentNamespace(deploymentId);
+    const namespace = await getDeploymentNamespace(deploymentId, opts);
     if (!namespace) return null;
 
+    opts?.signal?.throwIfAborted();
     try {
       const sizeStr = await sumSchemaSize(pool, namespace);
       // If the schema has zero tables, COALESCE still produces '0' — but if
@@ -153,7 +180,8 @@ export function createPostgresClient(
     }
   }
 
-  async function getAllSubgraphSizes(): Promise<SubgraphSize[]> {
+  async function getAllSubgraphSizes(opts?: PostgresCallOpts): Promise<SubgraphSize[]> {
+    opts?.signal?.throwIfAborted();
     const pool = getPool();
     const schemasRes = await pool.query<DeploymentSchemaRow>(
       'SELECT subgraph, name FROM public.deployment_schemas',
@@ -161,6 +189,10 @@ export function createPostgresClient(
 
     const results: SubgraphSize[] = [];
     for (const row of schemasRes.rows) {
+      // Honor cancellation between per-deployment size queries. In-flight
+      // queries on a single deployment are NOT cancellable here — see the
+      // TODO on PostgresCallOpts for the Stage 4 follow-up.
+      opts?.signal?.throwIfAborted();
       try {
         const sizeStr = await sumSchemaSize(pool, row.name);
         if (sizeStr == null) continue;
