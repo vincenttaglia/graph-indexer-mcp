@@ -68,12 +68,25 @@ Apply the design §4.1 filters in order:
 
 ## Step 3 — Score by APR
 
-For each surviving candidate, call \`calculate_deployment_apr\` with a proposed allocation size. Use the formula from design §4.1 step 3 (also encoded in the tool):
+For each surviving candidate, call \`calculate_deployment_apr\` with **all three required arguments**:
+
+- \`deployment_id\` — the deployment under evaluation.
+- \`allocation_amount\` — the proposed allocation size in wei (BigInt-as-string).
+- \`blocks_per_year\` — the blocks-per-year constant for the chain hosting the Network Subgraph. This argument is REQUIRED (no default — a wrong default would silently skew APR by ~4x). Obtain it from operator input, from \`indexer://config\` if present, or from the chain's known value: Ethereum mainnet ~2,629,800 (12s blocks); Arbitrum One ~10,512,000 (3s nominal). Confirm with the operator if uncertain.
+
+Use the formula from design §4.1 step 3 (also encoded in the tool) — spelled out here so you can verify the tool's output if needed:
 
 \`\`\`
-reward_share  = (deployment_signal / total_signal) * issuance_per_year
-indexer_share = new_allocation / (deployment_stake + new_allocation)
-APR           = reward_share * indexer_share / new_allocation
+issuance_per_year = networkGRTIssuancePerBlock * blocks_per_year
+reward_share      = (deployment_signal / total_signal) * issuance_per_year
+indexer_share     = new_allocation / (deployment_stake + new_allocation)
+APR               = (reward_share * indexer_share) / new_allocation
+\`\`\`
+
+Equivalently, with \`S\` = deployment signal, \`T\` = total signal, \`A_i\` = new allocation, and \`A_total\` = deployment_stake + new_allocation:
+
+\`\`\`
+APR = ((S / T) * issuance_per_year * (A_i / A_total)) / A_i
 \`\`\`
 
 Net APR must subtract \`gas_estimate_grt\` amortized over expected allocation lifetime.

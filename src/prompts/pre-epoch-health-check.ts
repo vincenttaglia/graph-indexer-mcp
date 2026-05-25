@@ -75,24 +75,28 @@ For each closable allocation, compute a priority score:
 
 Process Path A closes first (they expire at the flip). Path B closes can wait if the failure block is already well past.
 
-## Step 5 — Take action
+## Step 5 — Build the close plan (do NOT queue yet)
 
-For each closable allocation, queue close via \`queue_unallocate\`. For each unhealthy-but-degrading allocation that is NOT closable, surface to the operator with a clear explanation of why (which row of the decision matrix it matches).
+For each closable allocation, draft a row in the close plan with deployment id, allocated GRT, path (A/B), and a one-line reason citing the decision-matrix row that classified it. For each unhealthy-but-degrading allocation that is NOT closable, draft a row for operator review with a clear explanation of why (which row of the decision matrix it matches).
 
-For Path A closables flagged as "healthy but stale RPC", call \`graphman_check_blocks\` to diagnose before deciding.
+For Path A closables flagged as "healthy but stale RPC", call \`graphman_check_blocks\` to diagnose before deciding whether to include them in the close plan.
 
 For post-close failed deployments, recommend (but do NOT auto-invoke) the \`recover_failed_deployment\` prompt for follow-up via graphman_restart_deployment / graphman_rewind_deployment / graphman_clear_call_cache.
 
-## Step 6 — Output
+## Step 6 — Output the plan and STOP
 
 Produce two markdown tables:
 
-1. **Closing now** — deployment_id, allocated_grt, path (A/B), reason, queued_action_id.
+1. **Close plan (pending operator approval)** — deployment_id, allocated_grt, path (A/B), reason. Leave a \`queued_action_id\` column blank; it will be filled in only after queueing.
 2. **Operator review** — deployment_id, allocated_grt, health, sync_gap, why-not-closable.
 
-Below the tables, summarize: time-to-flip, total GRT closing this epoch, count by path, count requiring operator review.
+Below the tables, summarize: time-to-flip, total GRT proposed to close this epoch, count by path, count requiring operator review.
 
-**Always produce the classification + plan first, then call queue_unallocate one allocation at a time.** Do NOT call \`approve_actions\` — that is operator-gated.
+**STOP HERE.** Present the close plan as a table and wait for the operator to explicitly say "proceed", "queue these", or otherwise approve the plan. Do NOT call \`queue_unallocate\` until the operator approves. Do NOT call \`approve_actions\` — that is always operator-gated.
+
+## Step 7 — Queue after explicit operator approval
+
+Only after the operator has explicitly approved the close plan above, call \`queue_unallocate\` one allocation at a time, in the priority order from Step 4. For each call, report the returned action ID and a brief result (success / error message) before moving to the next allocation. If any \`queue_unallocate\` call fails, stop and surface the error to the operator before continuing with the remaining allocations.
 `;
       return {
         description: 'Pre-epoch allocation health check.',

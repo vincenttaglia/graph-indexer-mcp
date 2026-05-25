@@ -57,7 +57,18 @@ For every candidate, call (in parallel where possible):
 - \`get_deployment_signal\` — confirm current signal (may have changed since the bulk query).
 - \`get_query_volume\` — QoS data scoped to this deployment.
 - \`get_all_subgraph_sizes\` once, then look up \`get_subgraph_size\` for any deployment-specific drill-down. Entity count is the pre-sync proxy for storage cost.
-- \`calculate_deployment_apr\` — projected APR if the indexer were to allocate. Use the indexer's typical allocation size from \`indexer://config\`.
+- \`calculate_deployment_apr\` — projected APR if the indexer were to allocate. Pass **all three required arguments**:
+  - \`deployment_id\` — the candidate deployment.
+  - \`allocation_amount\` — the indexer's typical allocation size from \`indexer://config\` (wei BigInt-as-string).
+  - \`blocks_per_year\` — REQUIRED (no default). Obtain from operator input, from \`indexer://config\` if present, or from the chain's known value: Ethereum mainnet ~2,629,800 (12s blocks); Arbitrum One ~10,512,000 (3s nominal). Confirm with the operator if uncertain — a wrong value would silently skew APR by ~4x.
+
+APR formula (design §4.1 step 3) — spelled out so you can verify the tool's output if needed. With \`S\` = deployment signal, \`T\` = total signal, \`A_i\` = new allocation, \`A_total\` = deployment_stake + new_allocation:
+
+\`\`\`
+issuance_per_year = networkGRTIssuancePerBlock * blocks_per_year
+reward_share      = (S / T) * issuance_per_year * (A_i / A_total)
+APR               = reward_share / A_i
+\`\`\`
 
 ## Step 3 — Score each candidate
 
