@@ -332,15 +332,13 @@ export class HealthMonitor {
       throwIfAborted(signal);
 
       // The protocol chain alias isn't stored on GraphNetwork; we infer it
-      // from the EBO's per-chain row that matches the network subgraph's
-      // currentEpoch counter. The chain whose epochNumber lines up with
-      // GraphNetwork.currentEpoch is the protocol chain.
-      // In practice this is `arbitrum-one` for mainnet; if no row matches we
-      // fall back to the first networkBlocks row but flag a warning.
+      // from the EBO's per-chain rows. The Graph Network now lives on
+      // Arbitrum One, so prefer that alias first; fall back to the first
+      // per-network row with a warning when no Arbitrum row is present.
       const protocolRow =
-        currentEpoch.networkBlocks.find((r) =>
+        currentEpoch.blockNumbersByNetwork.find((r) =>
           r.network.toLowerCase().includes('arbitrum'),
-        ) ?? currentEpoch.networkBlocks[0];
+        ) ?? currentEpoch.blockNumbersByNetwork[0];
       if (!protocolRow) {
         warnings.push(
           'EBO returned no per-chain start blocks for the current epoch; cannot compute epoch timing precisely.',
@@ -351,7 +349,7 @@ export class HealthMonitor {
       }
 
       timing = computeTiming({
-        currentEpochNumber: currentEpoch.epochNumber,
+        currentEpochNumber: currentEpoch.epoch,
         epochLengthBlocks: networkParams.epochLength,
         protocolEpochStartBlock,
       });
