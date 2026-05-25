@@ -142,9 +142,10 @@ async function fetchNetworkSummary(
   signal: AbortSignal,
 ): Promise<NetworkSummary> {
   signal.throwIfAborted();
-  const indexer = await client.getIndexer(indexerAddress);
+  const sigOpt = { signal };
+  const indexer = await client.getIndexer(indexerAddress, sigOpt);
   signal.throwIfAborted();
-  const allocations = await client.getActiveAllocations(indexerAddress);
+  const allocations = await client.getActiveAllocations(indexerAddress, sigOpt);
 
   return {
     stake: indexer?.stakedTokens ?? '0',
@@ -162,7 +163,8 @@ async function fetchDeploymentsSummary(
   partialErrors: Record<string, string>,
 ): Promise<DeploymentsSummary> {
   signal.throwIfAborted();
-  const statuses = await graphNodeClient.getIndexingStatuses();
+  const sigOpt = { signal };
+  const statuses = await graphNodeClient.getIndexingStatuses(undefined, sigOpt);
   const classified = classifyDeployments(statuses);
 
   // Probe graphman per-deployment for paused state. We deliberately swallow
@@ -177,7 +179,7 @@ async function fetchDeploymentsSummary(
     signal.throwIfAborted();
     probedAtLeastOnce = true;
     try {
-      const info = await graphmanClient.getDeploymentInfo(status.subgraph);
+      const info = await graphmanClient.getDeploymentInfo(status.subgraph, sigOpt);
       if (info.paused) paused++;
       allFailed = false;
     } catch (err) {
@@ -196,7 +198,7 @@ async function fetchDiskUsage(
   signal: AbortSignal,
 ): Promise<string> {
   signal.throwIfAborted();
-  const sizes = await postgresClient.getAllSubgraphSizes();
+  const sizes = await postgresClient.getAllSubgraphSizes({ signal });
   return sumBigIntStrings(sizes.map((s) => s.sizeBytes));
 }
 

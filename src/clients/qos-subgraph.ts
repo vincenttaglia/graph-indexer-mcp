@@ -62,22 +62,40 @@ export function timeRangeToWindowSeconds(tr: TimeRange): number {
 // Public interface
 // =============================================================================
 
+/**
+ * Optional per-call options for client methods. `signal` is forwarded to the
+ * GraphQL client so caller-initiated cancellation aborts the in-flight fetch
+ * (including between pagination iterations).
+ */
+export interface QosSubgraphCallOpts {
+  signal?: AbortSignal;
+}
+
 export interface QosSubgraphClient {
-  getQueryVolume(opts: {
-    deploymentId?: string;
-    timeRange: TimeRange;
-  }): Promise<QueryVolumeRow[]>;
+  getQueryVolume(
+    opts: {
+      deploymentId?: string;
+      timeRange: TimeRange;
+    },
+    callOpts?: QosSubgraphCallOpts,
+  ): Promise<QueryVolumeRow[]>;
 
-  getIndexerQoS(opts: {
-    indexerAddress: string;
-    deploymentId?: string;
-    timeRange: TimeRange;
-  }): Promise<IndexerQoSRow[]>;
+  getIndexerQoS(
+    opts: {
+      indexerAddress: string;
+      deploymentId?: string;
+      timeRange: TimeRange;
+    },
+    callOpts?: QosSubgraphCallOpts,
+  ): Promise<IndexerQoSRow[]>;
 
-  getTopQueriedDeployments(opts: {
-    limit: number;
-    timeRange: TimeRange;
-  }): Promise<DeploymentVolumeRow[]>;
+  getTopQueriedDeployments(
+    opts: {
+      limit: number;
+      timeRange: TimeRange;
+    },
+    callOpts?: QosSubgraphCallOpts,
+  ): Promise<DeploymentVolumeRow[]>;
 }
 
 export interface CreateQosSubgraphClientOptions {
@@ -288,20 +306,31 @@ export function createQosSubgraphClient(
    * Page through a list-returning subgraph query until either the page is
    * short (no more rows) or we hit {@link MAX_PAGES}. Returns the flattened
    * rows plus a `truncated` flag so callers can surface incomplete data.
+   *
+   * The optional `signal` is forwarded to every page request AND checked
+   * between pages so an abort observed after one page doesn't trigger the
+   * next request.
    */
   async function paginate<TRow>(
     query: string,
     baseVars: Record<string, unknown>,
     rowsKey: string,
+    signal?: AbortSignal,
   ): Promise<{ rows: TRow[]; truncated: boolean }> {
     const rows: TRow[] = [];
     let truncated = false;
+    const reqOpts = signal ? { signal } : undefined;
     for (let page = 0; page < MAX_PAGES; page++) {
-      const data = await gql.request<Record<string, TRow[]>>(query, {
-        ...baseVars,
-        first: PAGE_SIZE,
-        skip: page * PAGE_SIZE,
-      });
+      signal?.throwIfAborted();
+      const data = await gql.request<Record<string, TRow[]>>(
+        query,
+        {
+          ...baseVars,
+          first: PAGE_SIZE,
+          skip: page * PAGE_SIZE,
+        },
+        reqOpts,
+      );
       const batch = data[rowsKey] ?? [];
       rows.push(...batch);
       if (batch.length < PAGE_SIZE) {
@@ -314,7 +343,7 @@ export function createQosSubgraphClient(
   }
 
   return {
-    async getQueryVolume({ deploymentId, timeRange }) {
+    async getQueryVolume({ deploymentId, timeRange }, callOpts) {
       const { windowSeconds, windowStart, windowEnd } = windowBounds(timeRange);
       const { rows: raw, truncated } =
         deploymentId !== undefined
@@ -322,11 +351,13 @@ export function createQosSubgraphClient(
               QUERY_VOLUME_QUERY,
               { windowStart, deploymentId },
               'queryDataPoints',
+              callOpts?.signal,
             )
           : await paginate<RawQueryPoint>(
               QUERY_VOLUME_QUERY_ALL,
               { windowStart },
               'queryDataPoints',
+              callOpts?.signal,
             );
 
       const windowStartIso = new Date(windowStart * 1000).toISOString();
@@ -379,7 +410,7 @@ export function createQosSubgraphClient(
       }));
     },
 
-    async getIndexerQoS({ indexerAddress, deploymentId, timeRange }) {
+    async getIndexerQoS({ indexerAddress, deploymentId, timeRange }, callOpts) {
       const { windowSeconds, windowStart } = windowBounds(timeRange);
       const indexer = indexerAddress.toLowerCase();
       const { rows: raw, truncated } =
@@ -388,11 +419,13 @@ export function createQosSubgraphClient(
               INDEXER_QOS_QUERY,
               { windowStart, indexer, deploymentId },
               'indexerDataPoints',
+              callOpts?.signal,
             )
           : await paginate<RawIndexerPoint>(
               INDEXER_QOS_QUERY_ALL,
               { windowStart, indexer },
               'indexerDataPoints',
+              callOpts?.signal,
             );
 
       // Aggregate per (indexer, deployment) across 5-minute buckets.
@@ -528,11 +561,12 @@ export function createQosSubgraphClient(
       });
     },
 
-    async getTopQueriedDeployments({ limit, timeRange }) {
+    async getTopQueriedDeployments({ limit, timeRange }, callOpts) {
       const { windowSeconds, windowStart } = windowBounds(timeRange);
       const data = await gql.request<{ deploymentVolumes: RawDeploymentVolume[] }>(
         TOP_DEPLOYMENTS_QUERY,
         { windowStart, limit },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
       );
       return data.deploymentVolumes.map((d, idx) => ({
         deployment_id: d.subgraphDeployment,

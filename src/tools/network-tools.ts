@@ -4,9 +4,10 @@
  * Each tool is registered via `registerIndexerTool` so that access control,
  * error wrapping, and abort-signal forwarding are uniform. All tools are
  * `read`-class. Each handler calls `extra.signal.throwIfAborted()` up front
- * so client-initiated cancellation is honored before any I/O is issued.
- * (Deeper cancellation through the GraphQL fetch chain would require Stage 0
- * changes to `createGraphqlClient` and is intentionally out of scope here.)
+ * AND forwards `extra.signal` into the client call so cancellation aborts
+ * the in-flight HTTP fetch, not just the handler entry. The signal is
+ * combined with the per-request timeout controller inside
+ * `createGraphqlClient` via `AbortSignal.any`.
  *
  * The APR math in `calculate_deployment_apr` follows the formula sketched in
  * `graph-indexer-mcp-design.md` §3.1 and §4.1 step 3:
@@ -116,6 +117,7 @@ export function registerNetworkTools(
       const { items, truncated } = await deps.client.getAllocations(
         indexer_address,
         mapStatusFilter(status_filter),
+        { signal: extra.signal },
       );
       return asText({
         indexer: indexer_address.toLowerCase(),
@@ -140,7 +142,9 @@ export function registerNetworkTools(
     },
     handler: async ({ deployment_id }, extra) => {
       extra.signal.throwIfAborted();
-      const deployment = await deps.client.getDeployment(deployment_id);
+      const deployment = await deps.client.getDeployment(deployment_id, {
+        signal: extra.signal,
+      });
       if (!deployment) {
         return asText({ deployment_id, found: false });
       }
@@ -163,7 +167,9 @@ export function registerNetworkTools(
     },
     handler: async ({ min_signal }, extra) => {
       extra.signal.throwIfAborted();
-      const { items, truncated } = await deps.client.getSignalledDeployments(min_signal);
+      const { items, truncated } = await deps.client.getSignalledDeployments(min_signal, {
+        signal: extra.signal,
+      });
       return asText({
         min_signal,
         count: items.length,
@@ -183,7 +189,7 @@ export function registerNetworkTools(
       'Fetch global network parameters: total supply, total signalled, total allocated, current epoch, epoch length, per-block GRT issuance, delegation ratio (PPM).',
     handler: async (_args, extra) => {
       extra.signal.throwIfAborted();
-      const network = await deps.client.getNetworkParameters();
+      const network = await deps.client.getNetworkParameters({ signal: extra.signal });
       return asText(network);
     },
   });
@@ -201,7 +207,9 @@ export function registerNetworkTools(
     },
     handler: async ({ deployment_id }, extra) => {
       extra.signal.throwIfAborted();
-      const { items, truncated } = await deps.client.getDeploymentAllocations(deployment_id);
+      const { items, truncated } = await deps.client.getDeploymentAllocations(deployment_id, {
+        signal: extra.signal,
+      });
       return asText({
         deployment_id,
         count: items.length,
@@ -247,8 +255,8 @@ export function registerNetworkTools(
       }
 
       const [deployment, network] = await Promise.all([
-        deps.client.getDeployment(deployment_id),
-        deps.client.getNetworkParameters(),
+        deps.client.getDeployment(deployment_id, { signal: extra.signal }),
+        deps.client.getNetworkParameters({ signal: extra.signal }),
       ]);
 
       if (!deployment) {

@@ -57,7 +57,7 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
       'correct heights at which to compute POIs for the current epoch.',
     handler: async (_args, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.getCurrentEpoch();
+      const result = await client.getCurrentEpoch({ signal: extra.signal });
       return {
         content: [
           {
@@ -91,7 +91,9 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
     },
     handler: async ({ epoch_number, chain_name }, extra) => {
       extra.signal.throwIfAborted();
-      const result = await client.getEpochBlocks(epoch_number, chain_name);
+      const result = await client.getEpochBlocks(epoch_number, chain_name, {
+        signal: extra.signal,
+      });
       return {
         content: [
           {
@@ -156,7 +158,7 @@ export function registerEboTools(server: McpServer, deps: EboToolsDeps): void {
       extra,
     ) => {
       extra.signal.throwIfAborted();
-      const current = await client.getCurrentEpoch();
+      const current = await client.getCurrentEpoch({ signal: extra.signal });
       const match = current.networkBlocks.find((b) => b.network === chain_name);
       if (!match) {
         return {

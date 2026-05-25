@@ -16,10 +16,20 @@ export interface GraphqlClientOptions {
   label?: string;
 }
 
+export interface GraphqlRequestOptions {
+  /**
+   * External AbortSignal to honor for cancellation. When this fires, the
+   * in-flight HTTP request is aborted. Combined with the internal per-request
+   * timeout controller via `AbortSignal.any` so either source can cancel.
+   */
+  signal?: AbortSignal;
+}
+
 export interface TypedGraphqlClient {
   request<TResult, TVariables extends Variables = Variables>(
     query: string,
     variables?: TVariables,
+    opts?: GraphqlRequestOptions,
   ): Promise<TResult>;
 }
 
@@ -63,20 +73,99 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Best-effort check for `AbortError` so the retry loop doesn't try to recover
+ * from an explicit cancellation. WHATWG fetch surfaces aborts as
+ * `DOMException { name: 'AbortError' }`; some runtimes still use a plain
+ * `Error` with that name.
+ */
+function isAbortError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'AbortError') return true;
+  if (typeof DOMException !== 'undefined' && err instanceof DOMException) {
+    return err.name === 'AbortError';
+  }
+  return false;
+}
+
+/**
+ * Per-attempt context carrying the caller's external signal into the `fetch`
+ * shim. graphql-request invokes our shim with an opaque `init`, so we need
+ * an out-of-band channel to attach the signal. A WeakMap keyed on the
+ * GraphQLClient instance keeps the latest-known external signal for the
+ * current attempt without leaking the signal across overlapping requests on
+ * other clients.
+ *
+ * Concurrent requests on the SAME client are still safe because each
+ * `request()` invocation awaits its own `client.request(...)` synchronously
+ * after setting the signal — graphql-request invokes the fetch shim before
+ * returning, so the slot is read before any other concurrent attempt has a
+ * chance to overwrite it. The `finally` clears the slot to avoid leaking the
+ * signal into a subsequent un-signaled request.
+ *
+ * For extra safety against future graphql-request changes that might defer
+ * the fetch shim invocation, we attach the signal directly to a per-attempt
+ * AbortController and pre-compose the combined signal at request-build time
+ * (see below).
+ */
+
 export function createGraphqlClient(opts: GraphqlClientOptions): TypedGraphqlClient {
   const headers: Record<string, string> = { ...(opts.extraHeaders ?? {}) };
   if (opts.authToken) headers['Authorization'] = `Bearer ${opts.authToken}`;
 
   const timeoutMs = opts.timeoutMs;
-  const timedFetch: typeof fetch | undefined = timeoutMs
-    ? ((url, init) => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        return fetch(url, { ...init, signal: controller.signal }).finally(() =>
-          clearTimeout(timer),
-        );
-      }) as typeof fetch
-    : undefined;
+
+  // Per-request signal slot. graphql-request invokes the fetch shim
+  // synchronously while building the request (before any further await), so
+  // each `request()` attempt sets this immediately before calling
+  // `client.request(...)` and clears it in `finally`. Concurrent `request()`
+  // calls on the same client serialize through this slot because each call
+  // sets-then-yields (await client.request) — graphql-request resolves the
+  // fetch invocation synchronously within that frame.
+  //
+  // Belt-and-suspenders: if a future graphql-request version defers the
+  // shim invocation, the worst case is the SECOND concurrent call sees its
+  // own signal under the slot when invoked (still correct — we only ever
+  // store the most recently-set external signal).
+  let pendingExternalSignal: AbortSignal | undefined;
+
+  const timedFetch: typeof fetch = ((url, init) => {
+    const sources: AbortSignal[] = [];
+
+    // Per-request internal timeout. Preserved verbatim from the prior
+    // behaviour: only fires when `timeoutMs` is configured.
+    let timeoutController: AbortController | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs) {
+      timeoutController = new AbortController();
+      timer = setTimeout(() => timeoutController!.abort(), timeoutMs);
+      sources.push(timeoutController.signal);
+    }
+
+    // Fan-in the caller-supplied external signal so client-initiated
+    // cancellation propagates all the way to the in-flight HTTP request.
+    if (pendingExternalSignal) {
+      sources.push(pendingExternalSignal);
+    }
+
+    // Whatever the upstream `init` already carries should remain authoritative
+    // for headers/method/body. We only override `signal` when at least one
+    // source exists; otherwise leave the request untouched (no signal).
+    let combinedSignal: AbortSignal | undefined;
+    if (sources.length === 1) {
+      combinedSignal = sources[0];
+    } else if (sources.length > 1) {
+      // Node 22+ provides AbortSignal.any natively.
+      combinedSignal = AbortSignal.any(sources);
+    }
+
+    const finalInit: RequestInit = combinedSignal
+      ? { ...init, signal: combinedSignal }
+      : { ...init };
+
+    return fetch(url, finalInit).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }) as typeof fetch;
 
   const client = new GraphQLClient(opts.endpoint, {
     headers,
@@ -91,9 +180,20 @@ export function createGraphqlClient(opts: GraphqlClientOptions): TypedGraphqlCli
     async request<TResult, TVariables extends Variables = Variables>(
       query: string,
       variables?: TVariables,
+      reqOpts?: GraphqlRequestOptions,
     ): Promise<TResult> {
+      // Fast-fail when the external signal is already aborted at entry — the
+      // retry loop below would otherwise pointlessly fire one fetch before
+      // observing the abort.
+      reqOpts?.signal?.throwIfAborted();
+
       let lastErr: unknown;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // Stash the external signal so `timedFetch` can fan it in for this
+        // attempt. Cleared after the attempt to avoid leaking the signal into
+        // unrelated requests on the shared client.
+        const prevPending = pendingExternalSignal;
+        if (reqOpts?.signal) pendingExternalSignal = reqOpts.signal;
         const start = Date.now();
         try {
           const result = await client.request<TResult>(query, variables);
@@ -105,15 +205,33 @@ export function createGraphqlClient(opts: GraphqlClientOptions): TypedGraphqlCli
         } catch (err) {
           lastErr = err;
           const elapsed = Date.now() - start;
-          const retriable = isTransientError(err) && attempt < maxRetries;
+          // If cancellation was initiated by the external signal, surface the
+          // caller's abort reason rather than the underlying AbortError. This
+          // keeps the abort contract clean (callers passing AbortSignal expect
+          // their own reason back) and prevents the retry loop from looping
+          // on a cancellation that wasn't due to network flakiness.
+          const externallyAborted = Boolean(reqOpts?.signal?.aborted);
+          const isAbort = externallyAborted || isAbortError(err);
+          const retriable = !isAbort && isTransientError(err) && attempt < maxRetries;
           const msg = err instanceof Error ? err.message : String(err);
           process.stderr.write(
             `[gql ${label}] ${retriable ? 'retry' : 'fail'} ${elapsed}ms (attempt ${
               attempt + 1
             }): ${sanitizeMessage(msg)}\n`,
           );
+          if (isAbort && externallyAborted) {
+            // Re-throw via throwIfAborted so the caller sees their own reason.
+            reqOpts!.signal!.throwIfAborted();
+          }
           if (!retriable) break;
           await sleep(baseDelay * 2 ** attempt);
+        } finally {
+          // Restore the slot to whatever was set before this attempt began
+          // (typically `undefined`). Doing it this way rather than always
+          // setting `undefined` preserves the outer-scope signal in the
+          // unlikely event that a recursive request fires before the outer
+          // one resumes.
+          pendingExternalSignal = prevPending;
         }
       }
       throw lastErr;

@@ -179,11 +179,17 @@ export class DiscoveryEngine {
     let networkParams: GraphNetwork | null = null;
     let indexingStatuses: SubgraphIndexingStatus[] = [];
 
+    const signal = opts?.signal;
+    const sigOpt = signal ? { signal } : undefined;
+
     try {
       const [sig, alloc, net] = await Promise.all([
-        this.deps.networkClient.getSignalledDeployments(config.minSignal.toString()),
-        this.deps.networkClient.getActiveAllocations(lowerAddr),
-        this.deps.networkClient.getNetworkParameters(),
+        this.deps.networkClient.getSignalledDeployments(
+          config.minSignal.toString(),
+          sigOpt,
+        ),
+        this.deps.networkClient.getActiveAllocations(lowerAddr, sigOpt),
+        this.deps.networkClient.getNetworkParameters(sigOpt),
       ]);
       signalledPage = sig;
       activeAllocations = alloc.items;
@@ -215,7 +221,10 @@ export class DiscoveryEngine {
     throwIfAborted(opts?.signal);
 
     try {
-      indexingStatuses = await this.deps.graphNodeClient.getIndexingStatuses();
+      indexingStatuses = await this.deps.graphNodeClient.getIndexingStatuses(
+        undefined,
+        sigOpt,
+      );
     } catch (err) {
       warnings.push(
         `graph-node: getIndexingStatuses failed (${describeError(err)}); ` +
@@ -311,7 +320,9 @@ export class DiscoveryEngine {
     const sizesById = new Map<string, bigint>();
     if (this.deps.postgresClient) {
       try {
-        const sizes = await this.deps.postgresClient.getAllSubgraphSizes();
+        const sizes = await this.deps.postgresClient.getAllSubgraphSizes(
+          signal ? { signal } : undefined,
+        );
         for (const s of sizes) {
           sizesById.set(s.deploymentId, BigInt(s.sizeBytes));
         }
@@ -329,16 +340,18 @@ export class DiscoveryEngine {
     // know pause/assignment state). Concurrency-capped to avoid hammering
     // graphman with a request per deployment.
     const infoById = new Map<string, DeploymentInfo>();
-    // TODO(signal): thread AbortSignal through client methods when Stage 0
-    // polish lands. Today aborts are bounded between items via
-    // `throwIfAborted`, not in-flight client calls.
+    // The external AbortSignal is forwarded into each client call so per-
+    // deployment graphman lookups abort mid-flight if the caller cancels.
     await mapPool(
       indexingStatuses,
       FANOUT_CONCURRENCY,
       async (status) => {
         throwIfAborted(signal);
         try {
-          const info = await this.deps.graphmanClient.getDeploymentInfo(status.subgraph);
+          const info = await this.deps.graphmanClient.getDeploymentInfo(
+            status.subgraph,
+            signal ? { signal } : undefined,
+          );
           infoById.set(status.subgraph, info);
         } catch (err) {
           // Per-deployment failures aren't fatal; we just lose pause/node
@@ -606,9 +619,10 @@ export class DiscoveryEngine {
     // ------------------------------------------------------------------------
     const queryVolumeById = new Map<string, bigint>();
     try {
-      const volumes = await this.deps.qosClient.getQueryVolume({
-        timeRange: { days: 30 },
-      });
+      const volumes = await this.deps.qosClient.getQueryVolume(
+        { timeRange: { days: 30 } },
+        signal ? { signal } : undefined,
+      );
       for (const v of volumes) {
         if (v.deployment_id) {
           // `| 0` would truncate to a signed int32 (~2.1B max). Real-world
@@ -641,16 +655,19 @@ export class DiscoveryEngine {
     // ------------------------------------------------------------------------
     const opportunities: Opportunity[] = [];
 
-    // TODO(signal): thread AbortSignal through client methods when Stage 0
-    // polish lands. Today aborts are bounded between items via
-    // `throwIfAborted`, not in-flight client calls.
+    // The external AbortSignal is forwarded into each client call so per-
+    // candidate fetches abort mid-flight if the caller cancels.
+    const innerSigOpt = signal ? { signal } : undefined;
     await mapPool(candidates, FANOUT_CONCURRENCY, async (dep) => {
       throwIfAborted(signal);
 
       let totalStakedTokens = 0n;
       let indexerCount = 0;
       try {
-        const allocs = await this.deps.networkClient.getDeploymentAllocations(dep.id);
+        const allocs = await this.deps.networkClient.getDeploymentAllocations(
+          dep.id,
+          innerSigOpt,
+        );
         const uniqueIndexers = new Set<string>();
         for (const a of allocs.items) {
           totalStakedTokens += safeBigInt(a.allocatedTokens);
@@ -674,7 +691,7 @@ export class DiscoveryEngine {
       // signalledTokens as a coarse proxy in the normalizer.
       let entityCount: bigint | null = null;
       try {
-        const ec = await this.deps.graphNodeClient.getEntityCount(dep.id);
+        const ec = await this.deps.graphNodeClient.getEntityCount(dep.id, innerSigOpt);
         if (ec !== null) entityCount = safeBigInt(ec);
       } catch {
         // Swallow — entity count is a `nice to have`. Don't pollute warnings
@@ -686,7 +703,7 @@ export class DiscoveryEngine {
       // knows about — usually candidates aren't synced, so this is null).
       let chain: string | null = null;
       try {
-        const info = await this.deps.graphmanClient.getDeploymentInfo(dep.id);
+        const info = await this.deps.graphmanClient.getDeploymentInfo(dep.id, innerSigOpt);
         chain = info.chain ?? null;
       } catch {
         // Expected: graphman often returns 404 for unknown deployments.

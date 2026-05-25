@@ -11,22 +11,39 @@ export interface GraphNodeClientOptions {
   endpoint: string;
 }
 
+/**
+ * Optional per-call options for client methods. `signal` is forwarded to the
+ * GraphQL client so caller-initiated cancellation aborts the in-flight fetch.
+ */
+export interface GraphNodeCallOpts {
+  signal?: AbortSignal;
+}
+
 export interface GraphNodeClient {
   /**
    * Fetch indexing status for the supplied deployments, or for every
    * deployment the node is syncing when `deploymentIds` is omitted/empty.
    */
-  getIndexingStatuses(deploymentIds?: string[]): Promise<SubgraphIndexingStatus[]>;
+  getIndexingStatuses(
+    deploymentIds?: string[],
+    opts?: GraphNodeCallOpts,
+  ): Promise<SubgraphIndexingStatus[]>;
   /**
    * Convenience wrapper around `getIndexingStatuses` for a single deployment.
    * Returns `null` when graph-node doesn't know about the deployment.
    */
-  getDeploymentHealth(deploymentId: string): Promise<SubgraphIndexingStatus | null>;
+  getDeploymentHealth(
+    deploymentId: string,
+    opts?: GraphNodeCallOpts,
+  ): Promise<SubgraphIndexingStatus | null>;
   /**
    * Entity count as a decimal string (BigInt over the wire). Returns `null`
    * when the deployment isn't tracked by this graph-node.
    */
-  getEntityCount(deploymentId: string): Promise<string | null>;
+  getEntityCount(
+    deploymentId: string,
+    opts?: GraphNodeCallOpts,
+  ): Promise<string | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +210,7 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
 
   async function getIndexingStatuses(
     deploymentIds?: string[],
+    callOpts?: GraphNodeCallOpts,
   ): Promise<SubgraphIndexingStatus[]> {
     // graph-node treats `subgraphs: null` (or omitted) as "return everything".
     // Pass `null` only when the caller didn't filter so we don't send `[]` and
@@ -203,19 +221,24 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     const data = await gql.request<IndexingStatusesResponse>(
       INDEXING_STATUSES_QUERY,
       variables,
+      callOpts?.signal ? { signal: callOpts.signal } : undefined,
     );
     return (data.indexingStatuses ?? []).map(normalizeStatus);
   }
 
   async function getDeploymentHealth(
     deploymentId: string,
+    callOpts?: GraphNodeCallOpts,
   ): Promise<SubgraphIndexingStatus | null> {
-    const statuses = await getIndexingStatuses([deploymentId]);
+    const statuses = await getIndexingStatuses([deploymentId], callOpts);
     return statuses[0] ?? null;
   }
 
-  async function getEntityCount(deploymentId: string): Promise<string | null> {
-    const status = await getDeploymentHealth(deploymentId);
+  async function getEntityCount(
+    deploymentId: string,
+    callOpts?: GraphNodeCallOpts,
+  ): Promise<string | null> {
+    const status = await getDeploymentHealth(deploymentId, callOpts);
     return status ? status.entityCount : null;
   }
 

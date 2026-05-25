@@ -41,17 +41,39 @@ export interface PaginatedResult<T> {
   truncated: boolean;
 }
 
+/**
+ * Optional per-call options for client methods. `signal` is forwarded through
+ * the GraphQL client and ultimately to `fetch` so caller-initiated cancellation
+ * aborts the in-flight request.
+ */
+export interface NetworkSubgraphCallOpts {
+  signal?: AbortSignal;
+}
+
 export interface NetworkSubgraphClient {
-  getIndexer(address: string): Promise<Indexer | null>;
-  getActiveAllocations(indexerAddress: string): Promise<PaginatedResult<Allocation>>;
+  getIndexer(address: string, opts?: NetworkSubgraphCallOpts): Promise<Indexer | null>;
+  getActiveAllocations(
+    indexerAddress: string,
+    opts?: NetworkSubgraphCallOpts,
+  ): Promise<PaginatedResult<Allocation>>;
   getAllocations(
     indexerAddress: string,
     status: AllocationStatusFilter,
+    opts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<Allocation>>;
-  getDeployment(deploymentId: string): Promise<SubgraphDeployment | null>;
-  getSignalledDeployments(minSignal: string): Promise<PaginatedResult<SubgraphDeployment>>;
-  getNetworkParameters(): Promise<GraphNetwork>;
-  getDeploymentAllocations(deploymentId: string): Promise<PaginatedResult<Allocation>>;
+  getDeployment(
+    deploymentId: string,
+    opts?: NetworkSubgraphCallOpts,
+  ): Promise<SubgraphDeployment | null>;
+  getSignalledDeployments(
+    minSignal: string,
+    opts?: NetworkSubgraphCallOpts,
+  ): Promise<PaginatedResult<SubgraphDeployment>>;
+  getNetworkParameters(opts?: NetworkSubgraphCallOpts): Promise<GraphNetwork>;
+  getDeploymentAllocations(
+    deploymentId: string,
+    opts?: NetworkSubgraphCallOpts,
+  ): Promise<PaginatedResult<Allocation>>;
 }
 
 // =============================================================================
@@ -245,13 +267,19 @@ function buildAllocationFilter(opts: {
  * rows (natural end) or when `MAX_PAGES` is reached (defensive cap). When the
  * cap is hit, `truncated` is true so callers can warn the user that the
  * result set was clipped at `MAX_PAGES * PAGE_SIZE` rows.
+ *
+ * Honors `signal` between pages so a cancellation observed after one page
+ * doesn't trigger the next request. The signal is also passed into each
+ * `fetchPage` call by the caller.
  */
 async function paginate<TItem>(
   fetchPage: (skip: number) => Promise<TItem[]>,
+  signal?: AbortSignal,
 ): Promise<PaginatedResult<TItem>> {
   const out: TItem[] = [];
   let truncated = true;
   for (let page = 0; page < MAX_PAGES; page++) {
+    signal?.throwIfAborted();
     const rows = await fetchPage(page * PAGE_SIZE);
     out.push(...rows);
     if (rows.length < PAGE_SIZE) {
@@ -270,57 +298,75 @@ export function createNetworkSubgraphClient(
     label: 'network-subgraph',
   });
 
-  async function getIndexer(address: string): Promise<Indexer | null> {
-    const data = await gql.request<IndexerResponse>(GET_INDEXER_QUERY, {
-      id: normalizeAddress(address),
-    });
+  async function getIndexer(
+    address: string,
+    callOpts?: NetworkSubgraphCallOpts,
+  ): Promise<Indexer | null> {
+    const data = await gql.request<IndexerResponse>(
+      GET_INDEXER_QUERY,
+      { id: normalizeAddress(address) },
+      callOpts?.signal ? { signal: callOpts.signal } : undefined,
+    );
     return data.indexer ?? null;
   }
 
   async function getAllocations(
     indexerAddress: string,
     status: AllocationStatusFilter,
+    callOpts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<Allocation>> {
     const where = buildAllocationFilter({ indexer: indexerAddress, status });
     return paginate<Allocation>(async (skip) => {
-      const data = await gql.request<AllocationsResponse>(GET_ALLOCATIONS_QUERY, {
-        where,
-        first: PAGE_SIZE,
-        skip,
-      });
+      const data = await gql.request<AllocationsResponse>(
+        GET_ALLOCATIONS_QUERY,
+        { where, first: PAGE_SIZE, skip },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       return data.allocations;
-    });
+    }, callOpts?.signal);
   }
 
   async function getActiveAllocations(
     indexerAddress: string,
+    callOpts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<Allocation>> {
-    return getAllocations(indexerAddress, 'Active');
+    return getAllocations(indexerAddress, 'Active', callOpts);
   }
 
   async function getDeployment(
     deploymentId: string,
+    callOpts?: NetworkSubgraphCallOpts,
   ): Promise<SubgraphDeployment | null> {
-    const data = await gql.request<DeploymentResponse>(GET_DEPLOYMENT_QUERY, {
-      id: deploymentId,
-    });
+    const data = await gql.request<DeploymentResponse>(
+      GET_DEPLOYMENT_QUERY,
+      { id: deploymentId },
+      callOpts?.signal ? { signal: callOpts.signal } : undefined,
+    );
     return data.subgraphDeployment ?? null;
   }
 
   async function getSignalledDeployments(
     minSignal: string,
+    callOpts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<SubgraphDeployment>> {
     return paginate<SubgraphDeployment>(async (skip) => {
       const data = await gql.request<SignalledDeploymentsResponse>(
         GET_SIGNALLED_DEPLOYMENTS_QUERY,
         { minSignal, first: PAGE_SIZE, skip },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
       );
       return data.subgraphDeployments;
-    });
+    }, callOpts?.signal);
   }
 
-  async function getNetworkParameters(): Promise<GraphNetwork> {
-    const data = await gql.request<GraphNetworkResponseRaw>(GET_NETWORK_QUERY);
+  async function getNetworkParameters(
+    callOpts?: NetworkSubgraphCallOpts,
+  ): Promise<GraphNetwork> {
+    const data = await gql.request<GraphNetworkResponseRaw>(
+      GET_NETWORK_QUERY,
+      undefined,
+      callOpts?.signal ? { signal: callOpts.signal } : undefined,
+    );
     if (!data.graphNetwork) {
       throw new Error('GraphNetwork singleton (id="1") not found in network subgraph.');
     }
@@ -339,16 +385,17 @@ export function createNetworkSubgraphClient(
 
   async function getDeploymentAllocations(
     deploymentId: string,
+    callOpts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<Allocation>> {
     const where = buildAllocationFilter({ deployment: deploymentId, status: 'Active' });
     return paginate<Allocation>(async (skip) => {
-      const data = await gql.request<AllocationsResponse>(GET_ALLOCATIONS_QUERY, {
-        where,
-        first: PAGE_SIZE,
-        skip,
-      });
+      const data = await gql.request<AllocationsResponse>(
+        GET_ALLOCATIONS_QUERY,
+        { where, first: PAGE_SIZE, skip },
+        callOpts?.signal ? { signal: callOpts.signal } : undefined,
+      );
       return data.allocations;
-    });
+    }, callOpts?.signal);
   }
 
   return {

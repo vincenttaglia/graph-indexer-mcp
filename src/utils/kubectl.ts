@@ -20,6 +20,13 @@ export interface KubectlExecOptions {
    * Defaults to 30s.
    */
   timeoutMs?: number;
+  /**
+   * External AbortSignal to honor. When this fires, the in-flight kubectl
+   * process is killed via execa's native signal support. Combined with the
+   * `timeoutMs`-driven internal abort via `AbortSignal.any` so either source
+   * can cancel.
+   */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -46,6 +53,24 @@ function isTimeoutError(err: unknown): boolean {
 }
 
 /**
+ * Build the execa options for a single invocation, fanning in the optional
+ * external signal alongside the per-call timeout. Returns an object with the
+ * fields execa expects (`timeout`, `cancelSignal` when applicable).
+ */
+function buildExecaOpts(timeoutMs: number, signal: AbortSignal | undefined): {
+  reject: false;
+  timeout: number;
+  cancelSignal?: AbortSignal;
+} {
+  const out: { reject: false; timeout: number; cancelSignal?: AbortSignal } = {
+    reject: false,
+    timeout: timeoutMs,
+  };
+  if (signal) out.cancelSignal = signal;
+  return out;
+}
+
+/**
  * Discover the first Running graph-node pod matching `ctx.podLabel`.
  *
  * Filters by `status.phase=="Running"` so we never `kubectl exec` into a
@@ -66,6 +91,9 @@ export async function discoverPod(
     return cachedPod.pod;
   }
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Fast-fail at the boundary so an already-aborted caller doesn't even fork
+  // a kubectl subprocess.
+  opts.signal?.throwIfAborted();
   const args = [
     'get',
     'pods',
@@ -80,8 +108,13 @@ export async function discoverPod(
   process.stderr.write(`[kubectl] discover: kubectl ${args.join(' ')}\n`);
   let result;
   try {
-    result = await execa('kubectl', args, { reject: false, timeout: timeoutMs });
+    result = await execa('kubectl', args, buildExecaOpts(timeoutMs, opts.signal));
   } catch (err) {
+    // External cancellation propagates as the caller's abort reason rather
+    // than a generic "Failed to discover..." error.
+    if (opts.signal?.aborted) {
+      opts.signal.throwIfAborted();
+    }
     // With reject:false execa normally won't throw, but timeouts still can.
     if (isTimeoutError(err)) {
       throw new Error(
@@ -122,9 +155,14 @@ export async function execInPod(
   opts: KubectlExecOptions = {},
 ): Promise<KubectlExecResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Fast-fail at the boundary so an already-aborted caller doesn't even fork
+  // a kubectl subprocess.
+  opts.signal?.throwIfAborted();
   let pod: string;
   try {
-    pod = await discoverPod(ctx, { timeoutMs });
+    const discoverOpts: KubectlExecOptions = { timeoutMs };
+    if (opts.signal) discoverOpts.signal = opts.signal;
+    pod = await discoverPod(ctx, discoverOpts);
   } catch (err) {
     return { stdout: '', stderr: errorMessage(err), exitCode: -1 };
   }
@@ -132,7 +170,7 @@ export async function execInPod(
   const start = Date.now();
   process.stderr.write(`[kubectl] exec: kubectl ${args.join(' ')}\n`);
   try {
-    const result = await execa('kubectl', args, { reject: false, timeout: timeoutMs });
+    const result = await execa('kubectl', args, buildExecaOpts(timeoutMs, opts.signal));
     const elapsed = Date.now() - start;
     process.stderr.write(
       `[kubectl] done ${elapsed}ms exitCode=${result.exitCode ?? -1}\n`,
@@ -146,6 +184,13 @@ export async function execInPod(
     const elapsed = Date.now() - start;
     const message = errorMessage(err);
     process.stderr.write(`[kubectl] error after ${elapsed}ms: ${message}\n`);
+    // External cancellation: propagate so the caller's abort contract is
+    // honored. We do NOT swallow the abort into a structured `{ exitCode: -1 }`
+    // because callers (tool handlers) need the throw to surface as their own
+    // abort reason via `extra.signal.throwIfAborted()`.
+    if (opts.signal?.aborted) {
+      opts.signal.throwIfAborted();
+    }
     if (isTimeoutError(err)) {
       return { stdout: '', stderr: `timeout after ${timeoutMs}ms`, exitCode: -1 };
     }

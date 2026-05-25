@@ -318,15 +318,18 @@ export class HealthMonitor {
     // Step 1: epoch timing
     // -----------------------------------------------------------------------
 
+    const signal = opts.signal;
+    const sigOpt = signal ? { signal } : undefined;
+
     let timing: EpochTiming;
     let protocolChainAlias: string | null = null;
     let protocolEpochStartBlock: number | null = null;
     try {
       const [currentEpoch, networkParams] = await Promise.all([
-        this.deps.eboClient.getCurrentEpoch(),
-        this.deps.networkClient.getNetworkParameters(),
+        this.deps.eboClient.getCurrentEpoch(sigOpt),
+        this.deps.networkClient.getNetworkParameters(sigOpt),
       ]);
-      throwIfAborted(opts.signal);
+      throwIfAborted(signal);
 
       // The protocol chain alias isn't stored on GraphNetwork; we infer it
       // from the EBO's per-chain row that matches the network subgraph's
@@ -372,8 +375,9 @@ export class HealthMonitor {
     try {
       const page = await this.deps.networkClient.getActiveAllocations(
         opts.indexerAddress,
+        sigOpt,
       );
-      throwIfAborted(opts.signal);
+      throwIfAborted(signal);
       allocations = page.items;
       if (page.truncated) {
         warnings.push(
@@ -403,7 +407,7 @@ export class HealthMonitor {
 
     const classifications = await Promise.allSettled(
       allocations.map((alloc) =>
-        this.classifyAllocation(alloc, timing.currentEpoch, opts.signal),
+        this.classifyAllocation(alloc, timing.currentEpoch, signal),
       ),
     );
 
@@ -519,7 +523,7 @@ export class HealthMonitor {
     const recoveryPlan = await this.buildRecoveryPlan(
       allocations,
       allocationHealths,
-      opts.signal,
+      signal,
     );
 
     return {
@@ -544,8 +548,10 @@ export class HealthMonitor {
     signal?: AbortSignal,
   ): Promise<AllocationHealth> {
     throwIfAborted(signal);
+    const sigOpt = signal ? { signal } : undefined;
     const status = await this.deps.graphNodeClient.getDeploymentHealth(
       alloc.subgraphDeployment.id,
+      sigOpt,
     );
     throwIfAborted(signal);
 
@@ -553,7 +559,7 @@ export class HealthMonitor {
     let epochStartBlock: number | null = null;
     if (chain && currentEpoch > 0) {
       try {
-        const row = await this.deps.eboClient.getEpochBlocks(currentEpoch, chain);
+        const row = await this.deps.eboClient.getEpochBlocks(currentEpoch, chain, sigOpt);
         if (row) epochStartBlock = safeToInt(row.blockNumber);
       } catch {
         // Swallow — we'll mark epochStartBlock null and downgrade to "none".
@@ -640,7 +646,10 @@ export class HealthMonitor {
       // deployment, which is cheap and keeps the public type clean.
       let status: SubgraphIndexingStatus | null = null;
       try {
-        status = await this.deps.graphNodeClient.getDeploymentHealth(ah.deploymentId);
+        status = await this.deps.graphNodeClient.getDeploymentHealth(
+          ah.deploymentId,
+          signal ? { signal } : undefined,
+        );
       } catch {
         // fall through to manual_review
       }
