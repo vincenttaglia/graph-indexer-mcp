@@ -227,6 +227,31 @@ describe('DiscoveryEngine scoring', () => {
     // All three should be scored (none dropped for missing entityCount).
     const ids = result.opportunities.map((o) => o.deploymentId).sort();
     assert.deepEqual(ids, ['Qm_a', 'Qm_b', 'Qm_c']);
+
+    // Assert the median fallback produces the *expected* value, not just a
+    // warning. With known entityCounts [100, 200], the engine takes the
+    // upper-middle (floor(2/2)=1 → 200) as the median proxy for Qm_c. So:
+    //   costValues = [100, 200, 200], costMax = 200,
+    //   costScore(Qm_a) = 0.5, costScore(Qm_b) = costScore(Qm_c) = 1.0
+    // If the fallback regressed to 0 → Qm_c.costScore would be 0 (≠ 1.0).
+    // If the fallback regressed to `signalledTokens` (~5e22) → costMax would
+    // be dominated by it and Qm_a/Qm_b.costScore would collapse to ~0.
+    const byId = new Map(result.opportunities.map((o) => [o.deploymentId, o]));
+    const a = byId.get('Qm_a')!;
+    const b = byId.get('Qm_b')!;
+    const c = byId.get('Qm_c')!;
+    assert.equal(
+      c.components.costScore,
+      b.components.costScore,
+      'Qm_c (null entityCount) must inherit the median cost, matching Qm_b',
+    );
+    assert.equal(c.components.costScore, 1.0, 'median proxy → costScore = 1.0');
+    assert.equal(b.components.costScore, 1.0);
+    assert.equal(a.components.costScore, 0.5, 'Qm_a (100) / costMax (200) = 0.5');
+    // Sanity: regression-to-zero check. If the fallback fell back to 0,
+    // Qm_a.costScore would still be 1.0 (100/100) but Qm_c.costScore would
+    // be 0, so a.costScore > c.costScore — the assertion below would fail.
+    assert.ok(c.components.costScore >= a.components.costScore);
   });
 
   it('with identical signal/volume/cost, candidate with higher APR wins the top slot', async () => {

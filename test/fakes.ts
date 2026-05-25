@@ -4,7 +4,7 @@
  * are wired up. Override per-test via shallow-merge.
  */
 import type { NetworkSubgraphClient, PaginatedResult } from '../src/clients/network-subgraph.js';
-import type { GraphmanClient } from '../src/clients/graphman.js';
+import type { GraphmanClient, GraphmanMutationAck } from '../src/clients/graphman.js';
 import type { GraphNodeClient } from '../src/clients/graph-node.js';
 import type { QosSubgraphClient } from '../src/clients/qos-subgraph.js';
 import type { EboSubgraphClient } from '../src/clients/ebo-subgraph.js';
@@ -17,7 +17,8 @@ import type {
   SubgraphDeployment,
 } from '../src/types/network.js';
 import type { SubgraphIndexingStatus } from '../src/types/graphnode.js';
-import type { DeploymentInfo } from '../src/types/graphman.js';
+import type { DeploymentInfo, GraphmanCliResult } from '../src/types/graphman.js';
+import type { CostModel, IndexingRule } from '../src/types/agent.js';
 import type {
   DeploymentVolumeRow,
   IndexerQoSRow,
@@ -249,14 +250,65 @@ export interface FakeGraphmanClientOpts {
 }
 
 export function fakeGraphmanClient(opts: FakeGraphmanClientOpts = {}): GraphmanClient {
-  const base: Partial<GraphmanClient> = {
+  // Default CLI result returned by every no-op CLI stub. Keeping a single
+  // shape here lets a single regression in `GraphmanCliResult` flag every
+  // call site at typecheck time, instead of being masked by a `Partial`
+  // cast (the Stage 4 audit, Finding 4).
+  const cliOk = (command: string[]): GraphmanCliResult => ({
+    stdout: '',
+    stderr: '',
+    exitCode: 0,
+    command,
+  });
+  const ack: GraphmanMutationAck = { success: true };
+  return {
+    // ---- GraphQL ----
     async getDeploymentInfo(id) {
       if (opts.throwOnGetDeploymentInfo) throw opts.throwOnGetDeploymentInfo;
       if (opts.infoById && id in opts.infoById) return opts.infoById[id]!;
       return opts.defaultInfo ?? { id, paused: false };
     },
+    async pauseDeployment(_id) {
+      return ack;
+    },
+    async resumeDeployment(_id) {
+      return ack;
+    },
+    async restartDeployment(_id) {
+      return { executionId: 'fake-exec-id' };
+    },
+    async getExecutionStatus(id) {
+      return { id, state: 'SUCCEEDED' };
+    },
+    // ---- CLI fallback ----
+    async rewindDeployment(id, blockNumber, blockHash) {
+      return cliOk(['graphman', 'rewind', id, String(blockNumber), blockHash]);
+    },
+    async reassignDeployment(id, targetNode) {
+      return cliOk(['graphman', 'reassign', id, targetNode]);
+    },
+    async unassignDeployment(id) {
+      return cliOk(['graphman', 'unassign', id]);
+    },
+    async dropDeployment(id) {
+      return cliOk(['graphman', 'drop', id]);
+    },
+    async unusedRecord() {
+      return cliOk(['graphman', 'unused', 'record']);
+    },
+    async unusedRemove() {
+      return cliOk(['graphman', 'unused', 'remove']);
+    },
+    async checkBlocks(args) {
+      return cliOk(['graphman', 'check-blocks', args.chain]);
+    },
+    async truncateChainCache(chain) {
+      return cliOk(['graphman', 'chain', 'truncate', chain]);
+    },
+    async clearCallCache(args) {
+      return cliOk(['graphman', 'chain', 'clear-call-cache', args.chain]);
+    },
   };
-  return base as GraphmanClient;
 }
 
 export interface FakeQosClientOpts {
@@ -335,11 +387,30 @@ export function fakeAgentClient(): IndexerAgentClient {
     async getIndexingRules() {
       return [];
     },
+    // Echo the request back as a fully-shaped IndexingRule with safe defaults
+    // for the fields the caller may not have supplied. No `as` cast — if the
+    // IndexingRule shape changes, this fake will fail typecheck and the
+    // mismatch surfaces here instead of being silently masked (Finding 4).
     async setIndexingRule(rule) {
-      return rule as never;
+      const out: IndexingRule = {
+        identifier: rule.identifier,
+        identifierType: rule.identifierType ?? 'deployment',
+        decisionBasis: rule.decisionBasis ?? 'rules',
+      };
+      if (rule.allocationAmount !== undefined) out.allocationAmount = rule.allocationAmount;
+      if (rule.allocationLifetime !== undefined) out.allocationLifetime = rule.allocationLifetime;
+      if (rule.requireSupported !== undefined) out.requireSupported = rule.requireSupported;
+      if (rule.safety !== undefined) out.safety = rule.safety;
+      if (rule.custom !== undefined) out.custom = rule.custom;
+      return out;
     },
     async setCostModel(model) {
-      return model as never;
+      const out: CostModel = {
+        deployment: model.deployment,
+        model: model.model,
+      };
+      if (model.variables !== undefined) out.variables = model.variables;
+      return out;
     },
   };
 }

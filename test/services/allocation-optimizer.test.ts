@@ -178,13 +178,12 @@ describe('AllocationOptimizer.run', () => {
     assert.equal(result.proposedAllocations.length, 0);
   });
 
-  it('preserves a current allocation whose signal dipped below minSignal (survives the candidate filter)', async () => {
+  it('preserves a current allocation whose signal dipped below minSignal (survives the candidate filter and stays in the plan)', async () => {
     // Finding 2 from the source: a deployment whose signal dipped below
     // minSignal between runs should NOT be force-dropped by the candidate
-    // filter when the indexer already has an allocation on it. We verify the
-    // candidate survives filtering (CandidatesAfterFilter >= 1). Whether the
-    // downstream gas floor / sizing keeps it in the plan is a separate
-    // concern owned by the optimizer's reward math.
+    // filter when the indexer already has an allocation on it. The candidate
+    // must survive filtering AND land in `proposedAllocations`, AND must NOT
+    // produce an `unallocate` action.
     const lowDep = deployment({ id: 'Qm_now_low', signal: GRT(10n), staked: GRT(50n) });
     const alloc = allocation({
       id: '0xalloc1',
@@ -206,9 +205,41 @@ describe('AllocationOptimizer.run', () => {
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
     });
-    const result = await opt.run(baseConfig({ minSignal: GRT(5_000n) }));
+    const result = await opt.run(
+      baseConfig({
+        minSignal: GRT(5_000n),
+        // Bypass the gas floor so we test preservation in isolation —
+        // separately covered by `skips a candidate when projected annual
+        // reward < 2x gas budget`.
+        gasEstimateGrt: GRT(0n),
+      }),
+    );
     assert.equal(result.state.candidatesConsidered, 1);
     assert.equal(result.state.candidatesAfterFilter, 1);
+    // Preservation: deployment must appear in proposedAllocations.
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === 'Qm_now_low'),
+      `expected Qm_now_low in proposedAllocations, got: ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
+    );
+    // Preservation: must NOT emit an `unallocate` action against it. If the
+    // filter regressed and the candidate dropped pre-plan, the diff would
+    // emit unallocate (current ∋ id, proposed ∌ id).
+    const unallocatesForLow = result.actions
+      .filter((a) => a.deploymentId === 'Qm_now_low' && a.type === 'unallocate')
+      .map((a) => ({
+        type: a.type,
+        deploymentId: a.deploymentId,
+        amount: a.amount?.toString() ?? null,
+      }));
+    assert.equal(
+      unallocatesForLow.length,
+      0,
+      `expected no unallocate action for Qm_now_low, got: ${JSON.stringify(
+        unallocatesForLow,
+      )}`,
+    );
   });
 
   it('frozen deployment is preserved at current size and reserves a slot', async () => {

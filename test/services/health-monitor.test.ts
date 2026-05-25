@@ -328,6 +328,64 @@ describe('HealthMonitor risk-tier matrix', () => {
     const small = res.risk.find((r) => r.allocationId === 'sml');
     assert.equal(small!.level, 'medium');
   });
+
+  it('failed (deterministic) + closable + small + not urgent → medium', async () => {
+    // Companion of the unhealthy/medium case above — exercises the `failed`
+    // health branch with a Path-B closable allocation. Without this case the
+    // matrix only proves the `unhealthy → medium` edge, leaving the `failed →
+    // medium` edge un-tested (Stage 4 audit, Finding 6).
+    //
+    // Comparator: a 100-GRT median paired with a 1-GRT subject. The subject
+    // is well below 2× median, so it is NOT flagged large via the relative
+    // rule, and well below the 100k GRT absolute floor.
+    const res = await runMulti({
+      allocs: [
+        mkAlloc('big2', GRT(100n)),
+        mkAlloc('smF', GRT(1n)),
+      ],
+      statuses: [
+        // Median basis: healthy big alloc (low-risk, just there for sizing).
+        mkStatus('big2', { health: 'healthy', latestBlock: EPOCH_START_BLOCK + 10 }),
+        // Subject: failed + deterministic + above epoch start → Path B closable.
+        mkStatus('smF', {
+          health: 'failed',
+          latestBlock: EPOCH_START_BLOCK + 50,
+          fatalError: { message: 'det boom', deterministic: true, blockNumber: 1042 },
+        }),
+      ],
+      urgent: false,
+    });
+    const sml = res.risk.find((r) => r.allocationId === 'smF');
+    assert.ok(sml, 'expected risk entry for the failed small allocation');
+    assert.equal(sml!.level, 'medium');
+    // Reasons must reflect the FAILED health (not unhealthy), and must NOT
+    // contain trigger-specific reason lines for urgency / large alloc /
+    // notClosable — those would imply a mis-tier. (The summary line "Tier:
+    // medium — failingHealth without any of (large, urgent, notClosable)"
+    // mentions those words; check the individual reason entries instead of
+    // a blanket substring match on the join.)
+    const reasons = sml!.reasons;
+    assert.ok(
+      reasons.some((r) => /FAILED/.test(r)),
+      `expected a FAILED-health reason, got: ${JSON.stringify(reasons)}`,
+    );
+    assert.ok(
+      !reasons.some((r) => /h until epoch flip/.test(r)),
+      `medium tier must not include the urgency reason, got: ${JSON.stringify(reasons)}`,
+    );
+    assert.ok(
+      !reasons.some((r) => /Large allocation|>2x the median/.test(r)),
+      `medium tier must not include a large-allocation reason, got: ${JSON.stringify(
+        reasons,
+      )}`,
+    );
+    assert.ok(
+      !reasons.some((r) => /cannot be safely closed/.test(r)),
+      `closable failed allocation must not include the notClosable reason, got: ${JSON.stringify(
+        reasons,
+      )}`,
+    );
+  });
 });
 
 describe('HealthMonitor recovery heuristics', () => {
