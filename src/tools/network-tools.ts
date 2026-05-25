@@ -3,16 +3,31 @@
  *
  * Each tool is registered via `registerIndexerTool` so that access control,
  * error wrapping, and abort-signal forwarding are uniform. All tools are
- * `read`-class.
+ * `read`-class. Each handler calls `extra.signal.throwIfAborted()` up front
+ * so client-initiated cancellation is honored before any I/O is issued.
+ * (Deeper cancellation through the GraphQL fetch chain would require Stage 0
+ * changes to `createGraphqlClient` and is intentionally out of scope here.)
  *
  * The APR math in `calculate_deployment_apr` follows the formula sketched in
  * `graph-indexer-mcp-design.md` §3.1 and §4.1 step 3:
  *
- *   reward_share  = (deployment.signalledTokens / network.totalTokensSignalled)
- *                   * network.issuancePerYear
- *   indexer_share = new_allocation / (deployment.stakedTokens + new_allocation)
+ *   issuance_per_year = network.networkGRTIssuancePerBlock * blocks_per_year
+ *   reward_share      = (deployment.signalledTokens / network.totalTokensSignalled)
+ *                       * issuance_per_year
+ *   indexer_share     = new_allocation / (deployment.stakedTokens + new_allocation)
  *   indexer_reward_per_year = reward_share * indexer_share
- *   apr           = indexer_reward_per_year / new_allocation
+ *   apr               = indexer_reward_per_year / new_allocation
+ *
+ * `networkGRTIssuancePerBlock` is the canonical field on the live mainnet
+ * network subgraph. It is the per-block GRT issuance dedicated to indexing
+ * rewards (wei). To annualize we multiply by `blocks_per_year`, a chain-
+ * specific constant (default ~2,628,000 for a 12s block time — Arbitrum and
+ * other host chains have different block cadences; callers can override).
+ *
+ * Reward-denied deployments (`deniedAt != 0`) MUST be excluded from APR per
+ * design §4.1. We surface `apr: 0` with `denied: true` so the caller can see
+ * the deployment is on the denylist instead of silently returning a stale
+ * non-zero APR.
  *
  * All on-chain values are BigInt-as-string in wei. To avoid Number precision
  * loss the intermediate math is performed against `bigint`, with a final
@@ -34,6 +49,17 @@ export interface NetworkToolDeps {
 }
 
 const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
+
+/**
+ * Default blocks-per-year for annualizing `networkGRTIssuancePerBlock`.
+ *
+ * Mainnet Ethereum: 12s block time -> 365.25 * 24 * 3600 / 12 ≈ 2,629,800.
+ * The mainnet network subgraph is the canonical source for issuance, so we
+ * default to that cadence. Callers can override via the `blocks_per_year`
+ * input on `calculate_deployment_apr` when querying a non-mainnet deployment
+ * of the subgraph (e.g. Arbitrum-anchored variants).
+ */
+const DEFAULT_BLOCKS_PER_YEAR = 2_629_800;
 
 /** Map the lowercase user-facing filter to the subgraph enum. */
 function mapStatusFilter(
@@ -93,16 +119,18 @@ export function registerNetworkTools(
         .regex(EVM_ADDRESS, 'must be a 0x-prefixed 40-character hex address'),
       status_filter: z.enum(['active', 'closed', 'all']).default('active'),
     },
-    handler: async ({ indexer_address, status_filter }) => {
-      const allocations = await deps.client.getAllocations(
+    handler: async ({ indexer_address, status_filter }, extra) => {
+      extra.signal.throwIfAborted();
+      const { items, truncated } = await deps.client.getAllocations(
         indexer_address,
         mapStatusFilter(status_filter),
       );
       return asText({
         indexer: indexer_address.toLowerCase(),
         status_filter,
-        count: allocations.length,
-        allocations,
+        count: items.length,
+        truncated,
+        allocations: items,
       });
     },
   });
@@ -118,7 +146,8 @@ export function registerNetworkTools(
     inputSchema: {
       deployment_id: z.string().min(1),
     },
-    handler: async ({ deployment_id }) => {
+    handler: async ({ deployment_id }, extra) => {
+      extra.signal.throwIfAborted();
       const deployment = await deps.client.getDeployment(deployment_id);
       if (!deployment) {
         return asText({ deployment_id, found: false });
@@ -140,12 +169,14 @@ export function registerNetworkTools(
         .string()
         .regex(/^\d+$/, 'min_signal must be a non-negative integer string in wei'),
     },
-    handler: async ({ min_signal }) => {
-      const deployments = await deps.client.getSignalledDeployments(min_signal);
+    handler: async ({ min_signal }, extra) => {
+      extra.signal.throwIfAborted();
+      const { items, truncated } = await deps.client.getSignalledDeployments(min_signal);
       return asText({
         min_signal,
-        count: deployments.length,
-        deployments,
+        count: items.length,
+        truncated,
+        deployments: items,
       });
     },
   });
@@ -157,8 +188,9 @@ export function registerNetworkTools(
     name: 'get_network_parameters',
     permissionClass: 'read',
     description:
-      'Fetch global network parameters: total supply, total signalled, total allocated, current epoch, epoch length, annual issuance.',
-    handler: async () => {
+      'Fetch global network parameters: total supply, total signalled, total allocated, current epoch, epoch length, per-block GRT issuance, delegation ratio (PPM).',
+    handler: async (_args, extra) => {
+      extra.signal.throwIfAborted();
       const network = await deps.client.getNetworkParameters();
       return asText(network);
     },
@@ -175,12 +207,14 @@ export function registerNetworkTools(
     inputSchema: {
       deployment_id: z.string().min(1),
     },
-    handler: async ({ deployment_id }) => {
-      const allocations = await deps.client.getDeploymentAllocations(deployment_id);
+    handler: async ({ deployment_id }, extra) => {
+      extra.signal.throwIfAborted();
+      const { items, truncated } = await deps.client.getDeploymentAllocations(deployment_id);
       return asText({
         deployment_id,
-        count: allocations.length,
-        allocations,
+        count: items.length,
+        truncated,
+        allocations: items,
       });
     },
   });
@@ -193,14 +227,26 @@ export function registerNetworkTools(
     permissionClass: 'read',
     description:
       'Estimate the indexing-reward APR for opening (or growing) an allocation on a deployment. ' +
-      'Inputs are wei BigInt strings. Returns APR as a decimal fraction (1.0 = 100%).',
+      'Inputs are wei BigInt strings. Returns APR as a decimal fraction (1.0 = 100%). ' +
+      'Deployments with rewards denied (deniedAt != 0) return apr=0 and denied=true.',
     inputSchema: {
       deployment_id: z.string().min(1),
       allocation_amount: z
         .string()
         .regex(/^\d+$/, 'allocation_amount must be a non-negative integer string in wei'),
+      blocks_per_year: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          'Blocks per year used to annualize per-block issuance. ' +
+            `Defaults to ${DEFAULT_BLOCKS_PER_YEAR} (12s mainnet block time).`,
+        ),
     },
-    handler: async ({ deployment_id, allocation_amount }) => {
+    handler: async ({ deployment_id, allocation_amount, blocks_per_year }, extra) => {
+      extra.signal.throwIfAborted();
+
       const newAllocation = parseWei('allocation_amount', allocation_amount);
       if (newAllocation === 0n) {
         throw new Error('allocation_amount must be > 0 to compute APR.');
@@ -215,19 +261,42 @@ export function registerNetworkTools(
         throw new Error(`Deployment ${deployment_id} not found in network subgraph.`);
       }
 
+      // Rewards-denied deployments earn no indexing rewards (design §4.1).
+      // Surface a clear `denied: true` field with apr=0 rather than returning
+      // a nonzero APR based on stale signal/issuance state.
+      if (BigInt(deployment.deniedAt ?? 0) > 0n) {
+        return asText({
+          deployment_id,
+          allocation_amount,
+          apr: 0,
+          denied: true,
+          reason: `Deployment rewards were denied at block ${deployment.deniedAt}.`,
+          formula_inputs: {
+            deployment_signalled_tokens: deployment.signalledTokens,
+            deployment_staked_tokens: deployment.stakedTokens,
+            deployment_denied_at: deployment.deniedAt,
+          },
+        });
+      }
+
+      const blocksPerYear = BigInt(blocks_per_year ?? DEFAULT_BLOCKS_PER_YEAR);
+
       const signalled = parseWei('deployment.signalledTokens', deployment.signalledTokens);
       const totalSignalled = parseWei(
         'network.totalTokensSignalled',
         network.totalTokensSignalled,
       );
-      const issuancePerYear = parseWei(
-        'network.issuancePerYear',
-        network.issuancePerYear,
+      const issuancePerBlock = parseWei(
+        'network.networkGRTIssuancePerBlock',
+        network.networkGRTIssuancePerBlock,
       );
       const existingStake = parseWei('deployment.stakedTokens', deployment.stakedTokens);
       const denomStake = existingStake + newAllocation;
 
-      // reward_share = (signal_i / total_signal) * issuance_per_year   [wei]
+      // issuance_per_year [wei] = per-block issuance * blocks_per_year
+      const issuancePerYear = issuancePerBlock * blocksPerYear;
+
+      // reward_share = (signal_i / total_signal) * issuance_per_year   [wei/year]
       const rewardSharePerYear =
         totalSignalled === 0n ? 0n : (signalled * issuancePerYear) / totalSignalled;
 
@@ -235,7 +304,9 @@ export function registerNetworkTools(
       const indexerSharePerYear =
         denomStake === 0n ? 0n : (rewardSharePerYear * newAllocation) / denomStake;
 
-      // APR = indexer_reward_per_year / new_allocation, returned as a decimal fraction.
+      // APR = indexer_reward_per_year / new_allocation, returned as a decimal
+      // fraction. Single scaled divide avoids the double-floor that the prior
+      // two-step intermediate division introduced.
       const apr = ratioToNumber(indexerSharePerYear, newAllocation);
 
       // Friendly debug/explainability fields — every input is echoed verbatim
@@ -244,6 +315,7 @@ export function registerNetworkTools(
         deployment_id,
         allocation_amount,
         apr,
+        denied: false,
         reward_share: rewardSharePerYear.toString(),
         indexer_share: indexerSharePerYear.toString(),
         formula_inputs: {
@@ -252,7 +324,9 @@ export function registerNetworkTools(
           deployment_denied_at: deployment.deniedAt,
           network_total_tokens_signalled: network.totalTokensSignalled,
           network_total_tokens_allocated: network.totalTokensAllocated,
-          network_issuance_per_year: network.issuancePerYear,
+          network_issuance_per_block: network.networkGRTIssuancePerBlock,
+          blocks_per_year: blocksPerYear.toString(),
+          network_issuance_per_year: issuancePerYear.toString(),
           new_allocation_plus_existing_stake: denomStake.toString(),
         },
       });

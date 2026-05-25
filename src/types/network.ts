@@ -21,6 +21,10 @@ export type AllocationStatus = 'Active' | 'Closed' | 'Null' | 'Finalized' | 'Cla
  * `tokenCapacity` represents the indexer's maximum allocatable stake taking
  * delegation into account (own stake + delegated stake capped by the protocol
  * delegation ratio). Reward/fee cuts are PPM (parts-per-million, 1e6 = 100%).
+ *
+ * Note: the protocol-wide `delegationRatio` lives on `GraphNetwork`, not on
+ * `Indexer`. The live network subgraph schema has no per-indexer
+ * `delegationRatio` field; querying it returns a GraphQL validation error.
  */
 export interface Indexer {
   id: string;
@@ -32,8 +36,6 @@ export interface Indexer {
   delegatedTokens: string;
   /** Effective max allocatable stake including delegation, in wei. */
   tokenCapacity: string;
-  /** Delegation capacity ratio (PPM). */
-  delegationRatio: number;
   /** Share of indexing rewards retained by indexer (PPM, 1e6 = 100%). */
   indexingRewardCut: number;
   /** Share of query fees retained by indexer (PPM). */
@@ -138,9 +140,18 @@ export interface SubgraphRef {
 /**
  * GraphNetwork singleton — global protocol parameters used for APR math.
  *
- * `issuancePerYear` (often `networkGRTIssuance` on older schemas) is the
- * annual GRT issuance dedicated to indexing rewards. `totalTokensSignalled`
- * and `totalTokensAllocated` are the denominators in the reward share math.
+ * `networkGRTIssuancePerBlock` is the canonical schema field on the live
+ * mainnet network subgraph: it is the per-block GRT issuance dedicated to
+ * indexing rewards (wei). To convert to an annualized figure, multiply by the
+ * number of blocks per year on the host chain (see `blocksPerYear` in
+ * `calculate_deployment_apr`). Older subgraph versions exposed
+ * `networkGRTIssuance` as an annual amount — the client maps that legacy
+ * spelling onto `networkGRTIssuancePerBlock = (legacyAnnual / blocksPerYear)`
+ * is *not* attempted here; we read the canonical field directly and surface
+ * it raw so reviewers can verify against the live schema.
+ *
+ * `delegationRatio` is the protocol-wide max delegation multiplier (PPM,
+ * 1e6 = 1x). It lives on `GraphNetwork`, not on `Indexer`.
  */
 export interface GraphNetwork {
   id: string;
@@ -153,8 +164,11 @@ export interface GraphNetwork {
   currentEpoch: number;
   /** Epoch length in blocks. */
   epochLength: number;
-  /** Annual issuance dedicated to indexing rewards (wei). */
-  // TODO: verify against live schema — may be `networkGRTIssuance` or
-  // `issuancePerBlock` depending on subgraph version.
-  issuancePerYear: string;
+  /**
+   * Per-block GRT issuance dedicated to indexing rewards (wei BigInt string).
+   * Canonical schema field name: `networkGRTIssuancePerBlock`.
+   */
+  networkGRTIssuancePerBlock: string;
+  /** Protocol-wide delegation capacity multiplier (PPM, 1e6 = 1x). */
+  delegationRatio: number;
 }

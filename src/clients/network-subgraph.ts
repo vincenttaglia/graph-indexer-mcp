@@ -31,23 +31,37 @@ export interface NetworkSubgraphClientOptions {
 /** Status filter accepted by `getAllocations`. */
 export type AllocationStatusFilter = 'Active' | 'Closed' | 'all';
 
+/**
+ * Result of a paginated list query — `truncated` is true when the iterator
+ * stopped because it hit `MAX_PAGES`, false when it stopped because the most
+ * recent page was short (i.e. the natural end of the result set).
+ */
+export interface PaginatedResult<T> {
+  items: T[];
+  truncated: boolean;
+}
+
 export interface NetworkSubgraphClient {
   getIndexer(address: string): Promise<Indexer | null>;
-  getActiveAllocations(indexerAddress: string): Promise<Allocation[]>;
+  getActiveAllocations(indexerAddress: string): Promise<PaginatedResult<Allocation>>;
   getAllocations(
     indexerAddress: string,
     status: AllocationStatusFilter,
-  ): Promise<Allocation[]>;
+  ): Promise<PaginatedResult<Allocation>>;
   getDeployment(deploymentId: string): Promise<SubgraphDeployment | null>;
-  getSignalledDeployments(minSignal: string): Promise<SubgraphDeployment[]>;
+  getSignalledDeployments(minSignal: string): Promise<PaginatedResult<SubgraphDeployment>>;
   getNetworkParameters(): Promise<GraphNetwork>;
-  getDeploymentAllocations(deploymentId: string): Promise<Allocation[]>;
+  getDeploymentAllocations(deploymentId: string): Promise<PaginatedResult<Allocation>>;
 }
 
 // =============================================================================
 // GraphQL fragments / queries
 // =============================================================================
 
+// NOTE: `delegationRatio` is intentionally NOT listed here — the live network
+// subgraph schema defines `delegationRatio` on `GraphNetwork` (protocol-wide),
+// not on `Indexer`. Querying it on `Indexer` produces a GraphQL validation
+// error. See `getNetworkParameters` for the corresponding field.
 const INDEXER_FIELDS = /* GraphQL */ `
   fragment IndexerFields on Indexer {
     id
@@ -55,7 +69,6 @@ const INDEXER_FIELDS = /* GraphQL */ `
     allocatedTokens
     delegatedTokens
     tokenCapacity
-    delegationRatio
     indexingRewardCut
     queryFeeCut
     url
@@ -148,6 +161,11 @@ const GET_SIGNALLED_DEPLOYMENTS_QUERY = /* GraphQL */ `
   }
 `;
 
+// `networkGRTIssuancePerBlock` is the canonical field on the live mainnet
+// network subgraph (per-block issuance, wei). It REPLACES the older
+// `networkGRTIssuance` (which was an annual rate in some forks). We expose
+// the per-block value raw and let callers convert using a chain-specific
+// `blocksPerYear` constant. `delegationRatio` is the protocol-wide cap.
 const GET_NETWORK_QUERY = /* GraphQL */ `
   query GetNetworkParameters {
     graphNetwork(id: "1") {
@@ -157,7 +175,8 @@ const GET_NETWORK_QUERY = /* GraphQL */ `
       totalTokensSignalled
       currentEpoch
       epochLength
-      networkGRTIssuance
+      networkGRTIssuancePerBlock
+      delegationRatio
     }
   }
 `;
@@ -188,10 +207,12 @@ interface SignalledDeploymentsResponse {
 }
 
 interface GraphNetworkResponseRaw {
-  graphNetwork: (Omit<GraphNetwork, 'issuancePerYear'> & {
-    networkGRTIssuance?: string | null;
-    issuancePerYear?: string | null;
-  }) | null;
+  graphNetwork:
+    | (Omit<GraphNetwork, 'networkGRTIssuancePerBlock' | 'delegationRatio'> & {
+        networkGRTIssuancePerBlock?: string | null;
+        delegationRatio?: number | null;
+      })
+    | null;
 }
 
 function normalizeAddress(addr: string): string {
@@ -221,18 +242,24 @@ function buildAllocationFilter(opts: {
 
 /**
  * Paginate a list endpoint. Stops when a page returns fewer than `PAGE_SIZE`
- * rows or when `MAX_PAGES` is reached (defensive cap).
+ * rows (natural end) or when `MAX_PAGES` is reached (defensive cap). When the
+ * cap is hit, `truncated` is true so callers can warn the user that the
+ * result set was clipped at `MAX_PAGES * PAGE_SIZE` rows.
  */
 async function paginate<TItem>(
   fetchPage: (skip: number) => Promise<TItem[]>,
-): Promise<TItem[]> {
+): Promise<PaginatedResult<TItem>> {
   const out: TItem[] = [];
+  let truncated = true;
   for (let page = 0; page < MAX_PAGES; page++) {
     const rows = await fetchPage(page * PAGE_SIZE);
     out.push(...rows);
-    if (rows.length < PAGE_SIZE) break;
+    if (rows.length < PAGE_SIZE) {
+      truncated = false;
+      break;
+    }
   }
-  return out;
+  return { items: out, truncated };
 }
 
 export function createNetworkSubgraphClient(
@@ -253,7 +280,7 @@ export function createNetworkSubgraphClient(
   async function getAllocations(
     indexerAddress: string,
     status: AllocationStatusFilter,
-  ): Promise<Allocation[]> {
+  ): Promise<PaginatedResult<Allocation>> {
     const where = buildAllocationFilter({ indexer: indexerAddress, status });
     return paginate<Allocation>(async (skip) => {
       const data = await gql.request<AllocationsResponse>(GET_ALLOCATIONS_QUERY, {
@@ -265,7 +292,9 @@ export function createNetworkSubgraphClient(
     });
   }
 
-  async function getActiveAllocations(indexerAddress: string): Promise<Allocation[]> {
+  async function getActiveAllocations(
+    indexerAddress: string,
+  ): Promise<PaginatedResult<Allocation>> {
     return getAllocations(indexerAddress, 'Active');
   }
 
@@ -280,7 +309,7 @@ export function createNetworkSubgraphClient(
 
   async function getSignalledDeployments(
     minSignal: string,
-  ): Promise<SubgraphDeployment[]> {
+  ): Promise<PaginatedResult<SubgraphDeployment>> {
     return paginate<SubgraphDeployment>(async (skip) => {
       const data = await gql.request<SignalledDeploymentsResponse>(
         GET_SIGNALLED_DEPLOYMENTS_QUERY,
@@ -296,9 +325,6 @@ export function createNetworkSubgraphClient(
       throw new Error('GraphNetwork singleton (id="1") not found in network subgraph.');
     }
     const raw = data.graphNetwork;
-    // TODO: verify against live schema — the issuance field name has shifted
-    // between subgraph versions. Accept either spelling, default to "0".
-    const issuance = raw.networkGRTIssuance ?? raw.issuancePerYear ?? '0';
     return {
       id: raw.id,
       totalSupply: raw.totalSupply,
@@ -306,13 +332,14 @@ export function createNetworkSubgraphClient(
       totalTokensSignalled: raw.totalTokensSignalled,
       currentEpoch: raw.currentEpoch,
       epochLength: raw.epochLength,
-      issuancePerYear: issuance,
+      networkGRTIssuancePerBlock: raw.networkGRTIssuancePerBlock ?? '0',
+      delegationRatio: raw.delegationRatio ?? 0,
     };
   }
 
   async function getDeploymentAllocations(
     deploymentId: string,
-  ): Promise<Allocation[]> {
+  ): Promise<PaginatedResult<Allocation>> {
     const where = buildAllocationFilter({ deployment: deploymentId, status: 'Active' });
     return paginate<Allocation>(async (skip) => {
       const data = await gql.request<AllocationsResponse>(GET_ALLOCATIONS_QUERY, {
