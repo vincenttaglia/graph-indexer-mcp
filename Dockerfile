@@ -42,10 +42,11 @@ RUN npm prune --omit=dev
 # path. Pinning to a specific minor version keeps the image reproducible.
 #
 # Kubernetes version-skew policy: kubectl is supported within ±1 minor of the
-# kube-apiserver it talks to. Pinning to 1.34 covers apiserver 1.33-1.35,
-# which spans the currently-supported k8s minor versions (1.32, 1.33, 1.34 as
-# of this writing). If your cluster runs older or newer, bump this tag to
-# match — kubectl tags follow upstream k8s releases.
+# kube-apiserver it talks to. Pinning to 1.34 covers apiserver 1.33-1.35.
+# If your cluster runs an apiserver outside that range, bump this tag —
+# kubectl tags follow upstream k8s releases; see
+# https://kubernetes.io/releases/version-skew-policy/ for the current
+# supported set.
 FROM bitnami/kubectl:1.34.0 AS kubectl
 
 
