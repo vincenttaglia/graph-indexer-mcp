@@ -6,6 +6,11 @@
  * deterministic failure), or not safely closable, then queue closes for
  * the closables before the epoch boundary flips.
  *
+ * PRIMARY PATH recommends the Stage 3 composite tool `run_health_check`
+ * which produces the same plan in one call. The Stage 1 step-by-step
+ * walkthrough is preserved as the ALTERNATIVE PATH for debugging /
+ * manual override of individual classifications.
+ *
  * Timing is load-bearing — Path A depends on health AT THE EPOCH-START
  * BLOCK, which the next flip will invalidate. The prompt instructs Claude
  * to compute hours-remaining first and prioritize work accordingly.
@@ -26,6 +31,26 @@ export function registerPreEpochHealthCheckPrompt(server: McpServer): void {
 Goal: before the next epoch boundary flips, classify every active allocation as Path A closable, Path B closable, or not-closable, then queue closes for the closables.
 
 Why this is time-sensitive: Path A closability depends on the subgraph being healthy at the CURRENT epoch-start block. Once the epoch flips, the reference block changes — a subgraph that crashed mid-epoch is closable now but won't be closable after the flip.
+
+## PRIMARY PATH — composite tool
+
+Call \`run_health_check\` (optional args: \`indexer_address\`, \`urgency_threshold_hours\` defaulting to 6). It returns a \`HealthCheckResult\` with:
+
+- \`timing\` — currentEpoch, hoursUntilNextEpoch, epochLengthBlocks, currentBlock. Use \`hoursUntilNextEpoch\` to decide urgency BEFORE doing anything else.
+- \`allocations\` — per-allocation closability classification (allocationId, deploymentId, allocatedTokens, health, synced, latestBlock, epochStartBlock, closability ('A' | 'B' | 'none'), closabilityReason, fatalErrorDeterministic, lastHealthyBlock, fatalErrorBlock).
+- \`risk\` — per-allocation RiskAssessment with level ('low' | 'medium' | 'high' | 'critical') and reasons.
+- \`closePlan\` — closable AND worth-closing-now entries (allocationId, deploymentId, path, poiBlock?, reason). This is the operator-facing table.
+- \`blockedFromClose\` — unhealthy/failed allocations that can't be safely closed this epoch (surface as operator-review table).
+- \`recoveryPlan\` — graphman recovery recommendations for failed deployments (type: 'restart' | 'rewind' | 'check_blocks' | 'clear_call_cache' | 'manual_review', with deploymentId, rationale, args).
+- \`warnings\` and \`errors\` — surface prominently.
+
+Present \`closePlan\` and \`blockedFromClose\` as markdown tables and summarize timing + counts. **STOP HERE. Wait for explicit operator approval before executing any \`queue_unallocate\` for closePlan entries, OR any graphman_* recovery command from recoveryPlan.** \`approve_actions\` is always operator-gated.
+
+The composite is plan-only; this prompt still walks the operator through execution after approval. If the composite returns blocking errors, or you need to debug an individual classification, fall back to the ALTERNATIVE PATH below.
+
+## ALTERNATIVE PATH — constituent-tool walkthrough
+
+Use this path when you need to inspect a single allocation's classification by hand, override the matrix decision, or debug the composite's output.
 
 ## Reference resources
 

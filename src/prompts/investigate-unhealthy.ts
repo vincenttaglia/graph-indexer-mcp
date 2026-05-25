@@ -37,6 +37,10 @@ export function registerInvestigateUnhealthyPrompt(server: McpServer): void {
 
 Goal: diagnose the unhealthy state of deployment \`${deploymentId}\` and recommend a remediation path.
 
+## Before diving in — try the composite first
+
+Consider calling \`run_health_check\` first. If deployment \`${deploymentId}\` shows up in the \`blockedFromClose\` list, the \`closabilityReason\` and \`fatalErrorDeterministic\` / \`lastHealthyBlock\` / \`fatalErrorBlock\` fields often give you the diagnosis immediately. If it shows up in \`recoveryPlan\` with a concrete \`type\` ('restart' | 'rewind' | 'check_blocks' | 'clear_call_cache' | 'manual_review'), you can short-circuit straight to a \`recover_failed_deployment\` recommendation. This prompt is still read-only — even if the composite returns a recoveryPlan entry, do NOT auto-execute graphman_* tools from here.
+
 ## Reference resources
 
 - \`indexer://config\` — indexer address and graph-node/graphman endpoints.

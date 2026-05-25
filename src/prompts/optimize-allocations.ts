@@ -2,10 +2,12 @@
  * Prompt: `optimize_allocations`
  *
  * Walks Claude through the full allocation-optimization workflow described
- * in `graph-indexer-mcp-design.md` §4.1. The prompt is intentionally a
- * single user-role message: it lays out the goal, the exact Stage 1 tools
- * to call (no Stage 3 composite tools — those do not exist yet), and the
- * APR formula and per-deployment cap rules from the design doc.
+ * in `graph-indexer-mcp-design.md` §4.1. The prompt recommends the Stage 3
+ * composite tool `run_allocation_optimization` as the PRIMARY PATH and
+ * keeps the Stage 1 constituent-tool walkthrough as an ALTERNATIVE PATH
+ * for debugging / custom workflows. APR formula and per-deployment cap
+ * rules from the design doc are spelled out in the alternative path so
+ * Claude can verify the composite's output if needed.
  *
  * The `dry_run` arg defaults to true. When true, the prompt instructs
  * Claude to produce a plan only and wait for operator approval before
@@ -37,12 +39,31 @@ Goal: rebalance the indexer's stake across deployments to maximize indexing-rewa
 
 Mode: ${dryRun ? '**dry_run = true** — produce a plan only; do NOT call any queue_* tool until the operator approves.' : '**dry_run = false** — operator has opted into queuing actions on the Indexer Agent after producing the plan.'}
 
+## PRIMARY PATH — composite tool
+
+Call \`run_allocation_optimization\` with the **required** \`blocks_per_year\` argument (Ethereum mainnet ~2,628,000; Arbitrum One ~10,512,000 at 3s block time; confirm with the operator if uncertain — a wrong value would silently skew APR by ~4x). Optional overrides: \`indexer_address\`, \`max_allocations\`, \`max_allocation_pct\`, \`risky_deployment_cap_pct\`, \`min_signal_grt\`, \`gas_estimate_grt\`.
+
+It returns an \`OptimizationResult\` with:
+
+- \`state\` — totalStake, availableStake, candidate counts.
+- \`proposedAllocations\` — deploymentId, allocatedTokens (wei), projectedAprFraction, rationale.
+- \`actions\` — concrete \`{type: 'allocate' | 'unallocate' | 'reallocate', deploymentId, amount?, allocationId?, reason}\` entries.
+- \`warnings\` and \`errors\` — surface these prominently.
+
+Present \`actions\` as a markdown table and \`proposedAllocations\` as a per-deployment summary. **STOP and wait for explicit operator approval before executing any action via the individual \`queue_allocate\` / \`queue_unallocate\` / \`queue_reallocate\` tools.** \`approve_actions\` is operator-only — never call it without explicit instruction.
+
+If the composite returns blocking errors, or you need fine-grained control / debugging of intermediate state, fall back to the ALTERNATIVE PATH below.
+
+## ALTERNATIVE PATH — constituent-tool walkthrough
+
+Use this path when you need to gather state manually, override individual steps, or debug what the composite would have done.
+
 ## Reference resources
 
 Read these first so all numbers below come from one source of truth:
 
 - \`indexer://config\` — indexer address, max_allocations, max_allocation_pct, risky_deployment_cap_pct, min_signal, gas_estimate_grt, whitelist/blacklist/frozenlist.
-- \`indexer://overview\` — cached infrastructure summary (current stake, allocation count, recent epoch).
+- \`indexer://overview\` — cached infrastructure summary (current stake, allocation count, recent epoch). The \`get_infrastructure_overview\` tool returns the same payload for clients that don't surface resources.
 - \`indexer://glossary\` — Graph Protocol terminology if any term below is unclear.
 
 ## Step 1 — Gather state

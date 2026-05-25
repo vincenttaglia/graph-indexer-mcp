@@ -1,11 +1,11 @@
 /**
  * Prompt: `discover_new_subgraphs`
  *
- * Implements the design §4.3 discovery half. Walks Claude through finding
- * high-signal / high-volume deployments the indexer is NOT currently
- * syncing, scoring them with the explicit weighted formula from the
- * design doc, and recommending an offchain indexing rule for the
- * top-ranked candidates.
+ * Implements the design §4.3 discovery half. The PRIMARY PATH calls the
+ * Stage 3 composite tool `run_discovery`, which produces the ranked
+ * candidate list and offchain indexing rule recommendations in one shot.
+ * The Stage 1 step-by-step walkthrough is preserved as the ALTERNATIVE
+ * PATH for debugging or overriding the scoring weights.
  *
  * `max_candidates` caps the size of the ranked list to keep the output
  * actionable.
@@ -32,10 +32,36 @@ export function registerDiscoverNewSubgraphsPrompt(server: McpServer): void {
 
 Goal: identify the top ${maxCandidates} deployments the indexer is NOT currently syncing that look like profitable additions, and produce a ranked recommendation list with an offchain indexing rule for the operator to approve.
 
+## PRIMARY PATH — composite tool
+
+Call \`run_discovery\` with **required** args:
+
+- \`blocks_per_year\` — Ethereum mainnet ~2,628,000; Arbitrum One ~10,512,000 at 3s block time. Confirm with operator if uncertain — wrong values silently skew APR by ~4x.
+- \`typical_allocation_grt\` — GRT decimal (e.g. "30000"). A reasonable default is \`total_stake_grt / max_allocations\` — pull totalStake from \`indexer://overview\` or \`get_infrastructure_overview\`, and max_allocations from \`indexer://config\`.
+
+Optional args: \`indexer_address\`, \`max_candidates\` (default 10, max 500 — pass ${maxCandidates} for this run), \`min_signal_grt\`.
+
+It returns a \`DiscoveryResult\` with:
+
+- \`stale\` — stale deployments (deploymentId, reason, sizeBytes, paused, hasAllocation, isFrozen). Cleanup is covered by \`cleanup_stale_deployments\`; ignore here.
+- \`cleanup\` — ordered cleanup step sequences per stale deployment. Same — ignore for discovery.
+- \`opportunities\` — raw candidates with signalledTokens, totalStakedTokens, indexerCount, queryVolume30d, entityCount, chain.
+- \`scoredOpportunities\` — ranked by §4.3 score, with \`score\`, \`components\` (aprScore, volumeScore, signalScore, costScore), and \`projectedAprFraction\`. This is the discovery-facing table.
+- \`ruleRecommendations\` — suggested \`{deploymentId, decisionBasis: 'offchain', allocationAmount (wei string), rationale}\` entries for the top scored opportunities.
+- \`warnings\` and \`errors\` — surface prominently.
+
+Present \`scoredOpportunities\` as a markdown table (rank, deploymentId, score, projectedAprFraction, signalledTokens, queryVolume30d, entityCount, chain, rationale) and list \`ruleRecommendations\` underneath. **STOP. Wait for explicit operator approval before calling \`set_indexing_rule\` for any recommendation.** Do NOT call \`queue_allocate\` for newly-discovered deployments — they aren't synced yet; allocation belongs to a later \`optimize_allocations\` pass.
+
+If the composite returns blocking errors, or you need to debug an individual score / override the candidate filter, fall back to the ALTERNATIVE PATH below.
+
+## ALTERNATIVE PATH — constituent-tool walkthrough
+
+Use this path when you need to gather candidate data manually, override scoring weights, or debug what the composite would have ranked.
+
 ## Reference resources
 
 - \`indexer://config\` — indexer address, min_signal, max_allocations, current whitelist/blacklist.
-- \`indexer://overview\` — current sync footprint and disk usage summary.
+- \`indexer://overview\` — current sync footprint and disk usage summary. \`get_infrastructure_overview\` returns the same payload for tool-only clients.
 - \`indexer://glossary\` — definitions for "curation signal", "offchain", "query fee rebates".
 
 ## Step 1 — Find candidate universe
