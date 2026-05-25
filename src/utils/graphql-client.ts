@@ -74,20 +74,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Best-effort check for `AbortError` so the retry loop doesn't try to recover
- * from an explicit cancellation. WHATWG fetch surfaces aborts as
- * `DOMException { name: 'AbortError' }`; some runtimes still use a plain
- * `Error` with that name.
- */
-function isAbortError(err: unknown): boolean {
-  if (err instanceof Error && err.name === 'AbortError') return true;
-  if (typeof DOMException !== 'undefined' && err instanceof DOMException) {
-    return err.name === 'AbortError';
-  }
-  return false;
-}
-
-/**
  * Per-attempt context carrying the caller's external signal into the `fetch`
  * shim. graphql-request invokes our shim with an opaque `init`, so we need
  * an out-of-band channel to attach the signal. A WeakMap keyed on the
@@ -205,22 +191,32 @@ export function createGraphqlClient(opts: GraphqlClientOptions): TypedGraphqlCli
         } catch (err) {
           lastErr = err;
           const elapsed = Date.now() - start;
-          // If cancellation was initiated by the external signal, surface the
-          // caller's abort reason rather than the underlying AbortError. This
-          // keeps the abort contract clean (callers passing AbortSignal expect
-          // their own reason back) and prevents the retry loop from looping
-          // on a cancellation that wasn't due to network flakiness.
+          // Distinguish EXTERNAL cancellation (caller's AbortSignal) from
+          // the INTERNAL per-request timeout controller. Both surface as
+          // AbortError, but they have different retry semantics:
+          //
+          //   - external: caller explicitly cancelled — must NOT retry, and
+          //     must propagate the caller's own abort reason.
+          //   - internal timeout: a transient network condition the caller
+          //     wants us to recover from. Before the abort plumbing landed,
+          //     these matched the retry regex /aborted/i and were retried;
+          //     we preserve that by treating internal aborts as transient.
+          //
+          // `isAbortError(err)` alone can't tell them apart, so we key on
+          // the external signal's `.aborted` state at catch time.
           const externallyAborted = Boolean(reqOpts?.signal?.aborted);
-          const isAbort = externallyAborted || isAbortError(err);
-          const retriable = !isAbort && isTransientError(err) && attempt < maxRetries;
+          const retriable =
+            !externallyAborted && isTransientError(err) && attempt < maxRetries;
           const msg = err instanceof Error ? err.message : String(err);
           process.stderr.write(
             `[gql ${label}] ${retriable ? 'retry' : 'fail'} ${elapsed}ms (attempt ${
               attempt + 1
             }): ${sanitizeMessage(msg)}\n`,
           );
-          if (isAbort && externallyAborted) {
-            // Re-throw via throwIfAborted so the caller sees their own reason.
+          if (externallyAborted) {
+            // Re-throw via throwIfAborted so the caller sees their own reason
+            // (e.g. the DOMException AbortError they passed to abort(reason))
+            // rather than whatever the underlying fetch surfaced.
             reqOpts!.signal!.throwIfAborted();
           }
           if (!retriable) break;

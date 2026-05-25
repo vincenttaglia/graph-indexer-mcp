@@ -164,6 +164,14 @@ export async function execInPod(
     if (opts.signal) discoverOpts.signal = opts.signal;
     pod = await discoverPod(ctx, discoverOpts);
   } catch (err) {
+    // discoverPod rethrows the caller's abort reason when cancellation
+    // wins the race; propagate it instead of flattening to a structured
+    // `{ exitCode: -1 }` result. Otherwise graphman CLI fallback tools
+    // would surface a generic "Failed to discover pod" error rather than
+    // honoring the operator's cancel.
+    if (opts.signal?.aborted) {
+      opts.signal.throwIfAborted();
+    }
     return { stdout: '', stderr: errorMessage(err), exitCode: -1 };
   }
   const args = ['exec', '-n', ctx.namespace, pod, '--', ...command];

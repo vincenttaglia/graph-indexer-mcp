@@ -224,6 +224,13 @@ export async function buildOverview(
       : Promise.resolve<string | null>(null),
   ]);
 
+  // If the caller's signal aborted during the parallel fan-out, surface the
+  // AbortError rather than converting each per-source AbortError into a
+  // `partialErrors` entry and returning a degraded payload. Without this, a
+  // mid-flight cancellation would silently look like "every source failed"
+  // — defeating the end-to-end signal threading.
+  signal.throwIfAborted();
+
   let stake: string | null = null;
   let allocations: AllocationsSummary | null = null;
   if (networkResult.status === 'fulfilled') {
@@ -246,6 +253,11 @@ export async function buildOverview(
   } else {
     partialErrors['postgres'] = sanitizeError(diskResult.reason);
   }
+
+  // Belt-and-suspenders: a late abort (e.g., between Promise.allSettled
+  // resolving and us returning) should still propagate rather than appear
+  // as a successful build.
+  signal.throwIfAborted();
 
   return {
     indexerAddress: deps.config.indexerAddress,
