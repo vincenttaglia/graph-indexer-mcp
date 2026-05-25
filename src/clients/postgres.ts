@@ -92,19 +92,34 @@ export function createPostgresClient(
   /**
    * Sum `pg_total_relation_size` over every table in the given schema.
    *
-   * We list table names via `information_schema.tables` (parameterized), then
-   * compute the per-table size inside the query using `quote_ident` so the
-   * schema/table identifiers are safely composed inside Postgres — no string
-   * interpolation in Node.
+   * We first check whether the schema actually exists via `to_regnamespace`
+   * (returns NULL when absent). This distinguishes two cases that the previous
+   * aggregate-with-COALESCE conflated:
+   *   - schema exists but has zero base tables → return '0' (legitimate)
+   *   - schema was dropped (or never created)  → return null
+   *
+   * Then we list table names via `information_schema.tables` (parameterized)
+   * and compute the per-table size inside the query using `format` +
+   * `quote_ident` so the schema/table identifiers are safely composed inside
+   * Postgres — no string interpolation in Node.
    */
   async function sumSchemaSize(
     client: PoolClient | Pool,
     schema: string,
   ): Promise<string | null> {
+    // Existence check first. `to_regnamespace` returns NULL for unknown
+    // schemas rather than raising, which is exactly the branch we need.
+    const nsRes = await client.query<{ exists: boolean }>(
+      'SELECT to_regnamespace($1) IS NOT NULL AS exists',
+      [schema],
+    );
+    if (!nsRes.rows[0]?.exists) return null;
+
     // The aggregate query joins to `information_schema.tables` to iterate the
     // tables, then constructs the qualified identifier with `format` +
     // `quote_ident` — so the schema string only ever reaches Postgres as a
-    // bound parameter, never as raw SQL text.
+    // bound parameter, never as raw SQL text. COALESCE to '0' here is now
+    // unambiguous: schema exists, just has no base tables.
     const res = await client.query<SizeRow>(
       `SELECT COALESCE(SUM(pg_total_relation_size(
          format('%I.%I', table_schema, table_name)::regclass
@@ -114,7 +129,7 @@ export function createPostgresClient(
       [schema],
     );
     const row = res.rows[0];
-    return row ? row.size : null;
+    return row ? row.size : '0';
   }
 
   async function getSubgraphSize(
