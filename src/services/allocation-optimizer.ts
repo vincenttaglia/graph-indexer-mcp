@@ -163,8 +163,32 @@ export interface AllocationOptimizerDeps {
 // Implementation
 // ===========================================================================
 
-/** Probe size used to rank candidates by per-unit APR before sizing. */
-const PROBE_PROPORTION_PCT = 1n; // 1% of stake — small enough not to dominate
+/**
+ * Newton's-method square root for BigInt. Returns floor(sqrt(n)).
+ *
+ * Used by the water-filling distribution to invert the closed-form
+ *   A_i(λ) = sqrt(R_i × D_i / λ) − D_i
+ * at BigInt precision. Number's IEEE 754 sqrt would lose precision for
+ * wei-scale inputs (typically 18+ decimal digits past the precision limit
+ * of 53-bit mantissa); a converging BigInt sqrt keeps the equilibrium
+ * exact to the last wei.
+ *
+ * Exported for direct unit testing (round-trip on perfect squares,
+ * monotonicity).
+ */
+export function bigIntSqrt(n: bigint): bigint {
+  if (n < 0n) throw new RangeError('bigIntSqrt: negative input');
+  if (n < 2n) return n;
+  // Newton's method. Seed with x = n (upper bound) and iterate
+  // y = (x + n/x) / 2 until y >= x — at which point x is floor(sqrt(n)).
+  let x = n;
+  let y = (x + 1n) / 2n;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) / 2n;
+  }
+  return x;
+}
 
 /** Convert a `bigint | string` to bigint, treating strings as decimal. */
 function toBigInt(v: bigint | string | undefined | null): bigint {
@@ -817,28 +841,31 @@ export class AllocationOptimizer {
   // -------------------------------------------------------------------------
 
   /**
-   * Greedy allocator with rebalancing.
+   * Water-filling allocator with cap binding.
    *
    * Strategy:
-   *   1. Rank candidates by per-unit APR at a small probe size. Whitelisted
-   *      candidates float to the top.
-   *   2. Pick up to `maxAllocations - frozenSlots` candidates.
-   *   3. Distribute `availableStake` across picks proportional to
-   *      `signal / max(other_indexers_stake, 1_GRT_floor)`. This is the
-   *      marginal-APR weighting — deployments with high signal relative to
-   *      existing competing stake get more of the budget, converging to the
-   *      APR-maximizing equilibrium. Cap each allocation by
-   *      `maxAllocationPct * totalStake` (or `riskyDeploymentCapPct * totalStake`
-   *      for risky).
+   *   1. Rank candidates by APR at the per-deployment cap (saturation-aware
+   *      — fresh D=0 deployments don't artificially top the list because
+   *      APR = R/cap is the realistic full-allocation yield, not R/probe).
+   *      Whitelisted candidates float to the top.
+   *   2. Pick top `maxAllocations - frozenSlots` candidates.
+   *   3. Bisection-solve for the Lagrange multiplier λ such that the summed
+   *      water-filled allocations equal `availableStake`. Each
+   *        A_i = max(0, sqrt(R_i × D_i / λ) − D_i)
+   *      clamped to [0, cap_i]. This is the canonical marginal-APR-equalizing
+   *      distribution that maximizes total annual rewards under the cap
+   *      constraint, since
+   *        reward_i(A_i) = R_i × A_i / (D_i + A_i)
+   *        marginal_i    = R_i × D_i / (D_i + A_i)²
+   *      and setting marginal_i = λ across all unbound picks gives the
+   *      closed form above.
    *   4. Drop any allocation whose projected annual reward is less than
    *      `2 * gasEstimateGrt`.
    *
-   * The marginal-APR weighting follows from differentiating the per-pick
-   * reward w.r.t. our allocation A_i: at small A_i,
-   *   marginal_i ≈ (S_i / T) × issuance / A_other_i
-   * so weighting by S_i / A_other_i equalizes marginal APRs across picks
-   * at the water-filling optimum under signal-share-equilibrium assumptions
-   * (the same model indexer-tools / autoagent use).
+   * Fresh deployments (D=0) correctly receive zero water-filled allocation
+   * because indexer reward at D=0 is constant in A_i — the indexer already
+   * captures 100% of R, and adding stake doesn't increase rewards.
+   * Distributing budget to them is a pure loss.
    */
   private optimize(args: {
     candidates: OptimizationCandidate[];
@@ -883,16 +910,22 @@ export class AllocationOptimizer {
       return [];
     }
 
-    // -- 1. Probe APR for ranking. --
-    // Use a small notional probe so we get a stable ranking that doesn't
-    // depend on the candidate's current share of the deployment.
-    const probeAmount = availableStake / 100n > 0n ? availableStake / 100n : 1n;
+    // -- 1. Rank by APR at the per-deployment cap. --
+    //
+    // Cap-aware ranking is saturation-aware: a fresh D=0 deployment with
+    // S=100 ranks by R/cap (e.g. ~10.8% APR) instead of R/probe (~271%
+    // with probe=availableStake/100). A saturated D=117k S=2037 ranks by
+    // R/(D+cap) ≈ 39.5%, which is the actual yield if we filled the cap.
+    // This puts the user's real high-yield current allocations at the top
+    // instead of letting fresh-deployment artifacts crowd them out.
 
     interface Ranked {
       candidate: OptimizationCandidate;
-      probeApr: number;
+      rankApr: number;
       whitelisted: boolean;
       otherIndexers: bigint;
+      /** Cached per-deployment cap so we don't recompute it during sizing. */
+      cap: bigint;
     }
 
     const whitelistSet = new Set(config.whitelist);
@@ -901,26 +934,28 @@ export class AllocationOptimizer {
         c.totalStakedTokens - c.currentAllocation > 0n
           ? c.totalStakedTokens - c.currentAllocation
           : 0n;
-      const probeApr = calculateApr({
+      const cap = perDeploymentCap(totalStake, c.isRisky, config);
+      const rankApr = calculateApr({
         signal: c.signalledTokens,
         totalSignal,
         issuancePerYear,
-        proposedAllocation: probeAmount,
+        proposedAllocation: cap,
         otherIndexersAllocation: otherIndexers,
       });
       return {
         candidate: c,
-        probeApr,
+        rankApr,
         whitelisted: whitelistSet.has(c.deploymentId),
         otherIndexers,
+        cap,
       };
     });
 
-    // Whitelisted first, then by descending probe APR. Tie-break on query
+    // Whitelisted first, then by descending cap-APR. Tie-break on query
     // volume so we prefer deployments with proven gateway traffic.
     ranked.sort((a, b) => {
       if (a.whitelisted !== b.whitelisted) return a.whitelisted ? -1 : 1;
-      if (a.probeApr !== b.probeApr) return b.probeApr - a.probeApr;
+      if (a.rankApr !== b.rankApr) return b.rankApr - a.rankApr;
       const av = a.candidate.queryVolume30d ?? 0n;
       const bv = b.candidate.queryVolume30d ?? 0n;
       if (av !== bv) return av > bv ? -1 : 1;
@@ -931,58 +966,41 @@ export class AllocationOptimizer {
     // baked into the ordering). --
     const picks = ranked.slice(0, remainingSlots);
 
-    // -- 3. Distribute by marginal-APR weight, applying per-deployment caps.
+    // -- 3. Bisection water-filling distribution.
     //
-    // Weight each pick by signal / (other_indexers_allocation + floor). High
-    // signal relative to existing competing stake = high marginal APR =
-    // should get more of the budget. This converges to the marginal-APR-
-    // equalizing (water-filling) optimum under signal-share-equilibrium
-    // assumptions.
-    //
-    // FLOOR is needed because a fresh deployment with zero other allocations
-    // would have weight=Infinity. Use 1 GRT as the floor: small enough to
-    // barely affect saturated deployments, large enough that brand-new
-    // deployments don't dominate the budget.
-    const FLOOR = 10n ** 18n; // 1 GRT in wei
+    // For each pick precompute R_i = (S_i / T) × issuance, in wei. The
+    // water-filling closed form A_i(λ) = sqrt(R_i × D_i / λ) − D_i then
+    // gives the allocation that equalizes marginal APR at λ. We bisect λ
+    // until summed A_i (clamped to [0, cap_i]) hits availableStake.
 
-    interface Weighted {
+    interface Pick {
       ranked: Ranked;
-      /** signalledTokens × 1e18 / max(otherIndexers, FLOOR). */
-      weight: bigint;
+      /** R_i = (S_i × issuancePerYear) / T, in wei. */
+      R: bigint;
+      /** D_i = other indexers' stake on this deployment, in wei. */
+      D: bigint;
+      /** cap_i = per-deployment cap, in wei. */
+      cap: bigint;
     }
 
-    const weighted: Weighted[] = picks.map((r) => {
-      const denom = r.otherIndexers > FLOOR ? r.otherIndexers : FLOOR;
-      // Scale numerator by 1e18 so we keep ~18 decimals of precision before
-      // dividing. Otherwise small-signal/big-stake candidates underflow to 0n.
-      const weight = (r.candidate.signalledTokens * 10n ** 18n) / denom;
-      return { ranked: r, weight };
-    });
+    const pickInputs: Pick[] = picks.map((r) => ({
+      ranked: r,
+      // (S × issuancePerYear) / T. S and issuancePerYear are wei-scale; T
+      // is wei-scale too, so the division gives wei-scale R.
+      R: (r.candidate.signalledTokens * issuancePerYear) / totalSignal,
+      D: r.otherIndexers,
+      cap: r.cap,
+    }));
 
-    let totalWeight = 0n;
-    for (const w of weighted) totalWeight += w.weight;
-    if (totalWeight === 0n) {
-      warnings.push(
-        'picked candidates have zero total signal/stake weight — cannot distribute',
-      );
-      return [];
-    }
+    const amounts = bisectLambda(pickInputs, availableStake);
 
     const gas = toBigInt(config.gasEstimateGrt);
     const proposals: ProposedAllocation[] = [];
-    let remainingStake = availableStake;
-    for (const w of weighted) {
-      if (remainingStake === 0n) break;
-      const r = w.ranked;
-      const cand = r.candidate;
-      const cap = perDeploymentCap(totalStake, cand.isRisky, config);
-
-      // Marginal-APR-weighted allocation, capped by both per-deployment cap
-      // and the remaining stake budget.
-      let amount = (availableStake * w.weight) / totalWeight;
-      if (amount > cap) amount = cap;
-      if (amount > remainingStake) amount = remainingStake;
-      if (amount === 0n) continue;
+    for (let i = 0; i < pickInputs.length; i++) {
+      const p = pickInputs[i]!;
+      const amount = amounts[i]!;
+      if (amount === 0n) continue; // D=0 (fresh) or bisection assigned zero
+      const cand = p.ranked.candidate;
 
       // Project APR at the actual chosen size.
       const projectedAprFraction = calculateApr({
@@ -990,20 +1008,14 @@ export class AllocationOptimizer {
         totalSignal,
         issuancePerYear,
         proposedAllocation: amount,
-        otherIndexersAllocation: r.otherIndexers,
+        otherIndexersAllocation: p.D,
       });
 
       // Gas-floor check: skip if projected annual reward < 2× gas (Finding 3).
-      // Compute reward directly in BigInt to avoid Number/PPM precision loss
-      // at the threshold boundary:
-      //   reward = (signal * issuance_per_year * A_i)
-      //          / (totalSignal * (otherIndexers + A_i))
-      // All inputs are BigInt wei; `gas` is normalized to BigInt above.
-      const gasDenom = totalSignal * (r.otherIndexers + amount);
+      // Reward_i(A_i) = R_i × A_i / (D_i + A_i). All BigInt wei.
+      const totalAlloc = p.D + amount;
       const projectedRewardWei =
-        gasDenom === 0n
-          ? 0n
-          : (cand.signalledTokens * issuancePerYear * amount) / gasDenom;
+        totalAlloc === 0n ? 0n : (p.R * amount) / totalAlloc;
       if (gas > 0n && projectedRewardWei < gas * 2n) {
         warnings.push(
           `skipped ${cand.deploymentId}: projected annual reward < 2× gas budget`,
@@ -1011,10 +1023,13 @@ export class AllocationOptimizer {
         continue;
       }
 
+      const atCap = amount >= p.cap;
       const rationale = [
-        r.whitelisted ? 'whitelisted' : `ranked #${proposals.length + 1} by APR`,
+        p.ranked.whitelisted ? 'whitelisted' : `ranked #${proposals.length + 1} by cap APR`,
         cand.isRisky ? 'risky cap applied' : null,
-        `marginal weight ${shareLabel(w.weight, totalWeight)}`,
+        atCap
+          ? `cap-bound at ${shareLabel(p.cap, totalStake)} of total stake`
+          : 'water-filling equilibrium (marginal APR ≈ λ)',
       ]
         .filter((s): s is string => Boolean(s))
         .join('; ');
@@ -1025,7 +1040,6 @@ export class AllocationOptimizer {
         projectedAprFraction,
         rationale,
       });
-      remainingStake -= amount;
     }
 
     return proposals;
@@ -1139,4 +1153,124 @@ function shareLabel(part: bigint, whole: bigint): string {
   if (whole === 0n) return '0%';
   const ratio = bigintRatioToNumber(part * 10_000n, whole);
   return `${(ratio / 100).toFixed(2)}%`;
+}
+
+// ===========================================================================
+// Water-filling
+// ===========================================================================
+
+/**
+ * A bisection input: per-pick R (reward coefficient = S/T × issuance),
+ * D (other-indexers' stake on the deployment), and per-deployment cap.
+ */
+interface WaterFillPick {
+  R: bigint;
+  D: bigint;
+  cap: bigint;
+}
+
+/**
+ * Scale factor used to carry λ at sub-wei precision during bisection.
+ * λ has units of wei-rewards-per-wei-allocation, which is a dimensionless
+ * decimal much smaller than 1. We multiply by 1e18 so bigint arithmetic
+ * keeps ~18 fractional digits without underflow.
+ */
+const LAMBDA_SCALE = 10n ** 18n;
+
+/**
+ * Closed-form per-pick allocation for a given λ. For each pick:
+ *   A_i(λ) = max(0, sqrt(R_i × D_i / λ) − D_i), clamped to [0, cap_i].
+ *
+ * Fresh deployments (D_i = 0) get zero by construction: indexer reward
+ * R_i × A_i / (D_i + A_i) = R_i when D_i = 0, independent of A_i — adding
+ * stake doesn't increase the reward, so water-filling correctly skips them.
+ */
+function allocationAtLambda(picks: WaterFillPick[], lambdaScaled: bigint): bigint[] {
+  return picks.map(({ R, D, cap }) => {
+    if (D === 0n || R === 0n || lambdaScaled <= 0n) return 0n;
+    // A_i = sqrt(R × D × LAMBDA_SCALE / lambdaScaled) − D
+    const numer = R * D * LAMBDA_SCALE;
+    const radicand = numer / lambdaScaled;
+    const sqrtVal = bigIntSqrt(radicand);
+    const Ai = sqrtVal > D ? sqrtVal - D : 0n;
+    return Ai > cap ? cap : Ai;
+  });
+}
+
+function totalAllocatedAtLambda(picks: WaterFillPick[], lambdaScaled: bigint): bigint {
+  let sum = 0n;
+  for (const a of allocationAtLambda(picks, lambdaScaled)) sum += a;
+  return sum;
+}
+
+/**
+ * Bisect λ until summed water-filled allocations equal availableStake.
+ * Higher λ → tighter constraint → smaller allocations.
+ * Lower  λ → looser constraint  → larger allocations.
+ *
+ * Bracket [1, hi] where hi is the max marginal-at-zero across picks
+ * (R_i × LAMBDA_SCALE / D_i for picks with D_i > 0). At λ ≥ hi every
+ * unclamped A_i is 0; at λ → 0 every A_i → cap. The total is monotonic
+ * non-increasing in λ, so bisection converges.
+ *
+ * Returns the per-pick allocations at the final λ. If the picks' capped
+ * sum is itself less than availableStake, the function returns the all-cap
+ * vector (the caps are the binding constraint, not λ).
+ */
+export function bisectLambda(picks: WaterFillPick[], availableStake: bigint): bigint[] {
+  if (picks.length === 0) return [];
+
+  // Edge: every pick has D=0 (all fresh) → every A_i = 0 regardless of λ.
+  // Return zeros directly; bisection would degenerate otherwise.
+  let anyD = false;
+  for (const p of picks) {
+    if (p.D > 0n && p.R > 0n) {
+      anyD = true;
+      break;
+    }
+  }
+  if (!anyD) return picks.map(() => 0n);
+
+  // If the all-cap total (over D>0 picks only) fits in availableStake, the
+  // caps are the binding constraint for those picks — λ → 0 and each D>0
+  // pick gets its cap. D=0 picks always stay at zero (water-filling math:
+  // their reward doesn't depend on A_i, so allocating to them is a pure
+  // loss versus any other use of the budget — including leaving it idle).
+  let effectiveCapsSum = 0n;
+  for (const p of picks) {
+    if (p.D > 0n && p.R > 0n) effectiveCapsSum += p.cap;
+  }
+  if (effectiveCapsSum <= availableStake) {
+    return picks.map((p) => (p.D > 0n && p.R > 0n ? p.cap : 0n));
+  }
+
+  // Upper bound for λ: at this value every (unclamped) A_i is exactly 0,
+  // because sqrt(R × D × LAMBDA_SCALE / hi) = D. Above this λ the sum is
+  // strictly 0, so the answer is bracketed at or below hi.
+  let hi = 1n;
+  for (const { R, D } of picks) {
+    if (D > 0n && R > 0n) {
+      // marginal-at-zero = R / D, scaled.
+      const marginalAtZeroScaled = (R * LAMBDA_SCALE) / D;
+      if (marginalAtZeroScaled > hi) hi = marginalAtZeroScaled;
+    }
+  }
+  let lo = 1n;
+
+  // 80 iterations of bisection over a ~10^36-wide bracket gives ~10^-24
+  // precision on the BigInt λ — far more than needed for wei-scale outputs.
+  for (let i = 0; i < 80; i++) {
+    if (hi - lo < 2n) break;
+    const mid = (lo + hi) / 2n;
+    const total = totalAllocatedAtLambda(picks, mid);
+    if (total > availableStake) {
+      // Allocations too large — need tighter λ.
+      lo = mid + 1n;
+    } else {
+      // Allocations fit — try a looser λ to see if we can give more.
+      hi = mid;
+    }
+  }
+
+  return allocationAtLambda(picks, hi);
 }

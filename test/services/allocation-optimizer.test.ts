@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AllocationOptimizer,
+  bigIntSqrt,
   calculateApr,
   type OptimizerConfig,
 } from '../../src/services/allocation-optimizer.js';
@@ -245,7 +246,17 @@ describe('AllocationOptimizer.run', () => {
     // filter when the indexer already has an allocation on it. The candidate
     // must survive filtering AND land in `proposedAllocations`, AND must NOT
     // produce an `unallocate` action.
-    const lowDep = deployment({ id: Q.NOW_LOW, signal: GRT(10n), staked: GRT(50n) });
+    //
+    // `staked` here is total across all indexers (this indexer + others).
+    // We set staked=150 and the indexer's allocation=50 so D = staked −
+    // currentAllocation = 100 GRT > 0, which makes the water-filling math
+    // assign a non-zero allocation. Water-filling specifically gives D=0
+    // picks zero (canonical math: indexer reward at D=0 doesn't depend on
+    // A_i), which would otherwise drop this candidate from the plan and
+    // trigger a force-unallocate — exactly the regression this test guards
+    // against. So set D>0 to keep the test focused on the candidate-filter
+    // preservation behavior.
+    const lowDep = deployment({ id: Q.NOW_LOW, signal: GRT(10n), staked: GRT(150n) });
     const alloc = allocation({
       id: '0xalloc1',
       deploymentId: Q.NOW_LOW,
@@ -542,14 +553,26 @@ describe('AllocationOptimizer.run', () => {
     );
   });
 
-  it('distributes stake by signal/stake ratio not raw signal', async () => {
+  it('distributes stake by water-filling (B with lower D gets more than A with higher D)', async () => {
     // Two candidates with equal signal but very different saturation:
     //   A: S=10k, other_stake=15M (saturated, low marginal APR)
     //   B: S=10k, other_stake=100k (underallocated, high marginal APR)
-    // With raw-signal weighting both would get equal stake; with signal/
-    // stake weighting B should get materially more (the cap typically
-    // bounds the absolute ratio in tests, but B > 5×A is a strong signal
-    // that the marginal-APR weighting is in effect).
+    //
+    // Water-filling assigns A_i = sqrt(R_i × D_i / λ) − D_i with the
+    // same R_i across both (equal signal). For the budget to actually
+    // constrain — otherwise both get their cap and the test asserts
+    // nothing about the algorithm — the indexer's stake must be small
+    // enough that 2× cap > availableStake. With totalStake=1M and
+    // maxAllocationPct=0.5 the per-deployment cap is 500k; combined caps
+    // (1M) exceed availableStake (1M GRT) only at the edge, so we drop
+    // the indexer's stake to 100k so the budget binds well below caps.
+    //
+    // Under water-filling with binding budget, B (smaller D) gets more
+    // stake than A (larger D) — the ratio depends on the D ratio:
+    //   A_A = sqrt(R × 15M / λ) − 15M
+    //   A_B = sqrt(R × 100k / λ) − 100k
+    // For 150× ratio in D, A_B is materially larger than A_A even with
+    // both terms positive.
     const A = deployment({
       id: Q.OK,
       signal: GRT(10_000n),
@@ -562,7 +585,9 @@ describe('AllocationOptimizer.run', () => {
     });
     const opt = new AllocationOptimizer({
       networkClient: fakeNetworkClient({
-        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        // Small indexer stake so the available-stake budget binds before
+        // the per-deployment caps would clamp either pick.
+        indexer: indexer({ stakedTokens: GRT(50_000n).toString() }),
         signalledDeployments: [A, B],
         networkParams: networkParams(),
       }),
@@ -576,7 +601,11 @@ describe('AllocationOptimizer.run', () => {
       agentClient: fakeAgentClient(),
     });
     const result = await opt.run(
-      baseConfig({ maxAllocations: 2, gasEstimateGrt: GRT(0n) }),
+      baseConfig({
+        maxAllocations: 2,
+        maxAllocationPct: 1.0, // no per-deployment cap binding
+        gasEstimateGrt: GRT(0n),
+      }),
     );
     const aAmount =
       result.proposedAllocations.find((p) => p.deploymentId === Q.OK)
@@ -585,21 +614,34 @@ describe('AllocationOptimizer.run', () => {
       result.proposedAllocations.find((p) => p.deploymentId === Q.RUNNING)
         ?.allocatedTokens ?? 0n;
     assert.ok(
-      aAmount > 0n,
-      `expected saturated A to still receive some stake; got A=${aAmount}`,
+      bAmount > aAmount,
+      `expected B (low D) to receive more than A (high D) under water-filling; ` +
+        `got A=${aAmount}, B=${bAmount}`,
     );
+    // Sanity: the disparity should be substantial given the 150× D ratio.
+    // Under linear S/D weighting the ratio was unbounded; water-filling
+    // dampens it via the sqrt, but B should still get >2× A.
     assert.ok(
-      bAmount > 5n * aAmount,
-      `expected B (low other-stake) to get >5× more stake than A (saturated); ` +
+      bAmount > 2n * aAmount,
+      `expected B (low D) to get >2× more than A (high D) under water-filling; ` +
         `got A=${aAmount}, B=${bAmount}`,
     );
   });
 
-  it('handles fresh deployments with zero other_indexers_stake (floor weight, no Infinity)', async () => {
-    // Fresh deployment (no other indexers) gets the floor in the denominator
-    // so its weight is large-but-finite. Compare against a saturated peer.
-    // The fresh one should outrank the saturated one and stay bounded by
-    // the per-deployment cap.
+  it('fresh deployment (D=0) receives zero water-filled allocation when a saturated peer exists', async () => {
+    // Water-filling math: A_i = max(0, sqrt(R_i × D_i / λ) − D_i). For
+    // D_i = 0 this collapses to sqrt(0) − 0 = 0. The economic intuition:
+    // indexer reward on a deployment is R_i × A_i / (D_i + A_i), which at
+    // D_i = 0 equals R_i for any A_i > 0. Adding stake to a fresh
+    // deployment doesn't increase reward; spending the budget on a
+    // saturated peer (where marginal reward > 0) strictly dominates.
+    //
+    // This previously failed in the most user-impacting way: the linear
+    // S/D weighting assigned the lion's share of the budget to fresh
+    // D=0 deployments (denominator was floored at 1 GRT → weight blew
+    // up), only to realize APR ≈ 0 once allocated. Now the saturated
+    // peer correctly absorbs all the budget, and the fresh one is
+    // skipped (no entry in proposedAllocations).
     const fresh = deployment({
       id: Q.OK,
       signal: GRT(1_000n),
@@ -631,21 +673,150 @@ describe('AllocationOptimizer.run', () => {
       gasEstimateGrt: GRT(0n),
     });
     const result = await opt.run(cfg);
-    const freshAmount =
-      result.proposedAllocations.find((p) => p.deploymentId === Q.OK)
-        ?.allocatedTokens ?? 0n;
-    // Fresh deployment must still receive an allocation (no Infinity / NaN
-    // crash, no divide-by-zero) and be bounded by the per-deployment cap.
-    // Cap = 0.2 × 1,000,000 GRT = 200,000 GRT.
+    const freshProp = result.proposedAllocations.find((p) => p.deploymentId === Q.OK);
+    const saturatedProp = result.proposedAllocations.find(
+      (p) => p.deploymentId === Q.RUNNING,
+    );
+    // Fresh deployment is not proposed (water-filling assigns it zero).
+    assert.equal(
+      freshProp,
+      undefined,
+      `expected fresh D=0 deployment to be skipped from proposals; got ${
+        freshProp ? `amount=${freshProp.allocatedTokens.toString()}` : 'undefined'
+      }`,
+    );
+    // Saturated peer absorbs budget (bounded by per-deployment cap).
+    assert.ok(saturatedProp, 'saturated peer must be in proposals');
+    assert.ok(
+      saturatedProp!.allocatedTokens > 0n,
+      `saturated peer should receive a positive allocation; got ${saturatedProp!.allocatedTokens}`,
+    );
+    // Per-deployment cap = 0.2 × 1,000,000 = 200,000 GRT.
     const cap = GRT(200_000n);
     assert.ok(
-      freshAmount > 0n,
-      `expected fresh deployment to receive an allocation; got ${freshAmount}`,
+      saturatedProp!.allocatedTokens <= cap,
+      `saturated peer should be bounded by per-deployment cap; ` +
+        `got ${saturatedProp!.allocatedTokens} > cap ${cap}`,
     );
+  });
+
+  it('matches or exceeds status-quo realized APR (water-filling beats linear weighting + cap-aware ranking)', async () => {
+    // Regression test for the user's reported bug: optimizer produced
+    // ~0.82% weighted APR vs ~17.4% status quo because:
+    //   (a) probe-APR ranking inflated fresh D=0 deployments' rank by
+    //       dividing by probeAmount ≈ 1k GRT instead of the realistic
+    //       full-allocation denominator, crowding out the user's
+    //       current saturated-but-healthy allocations.
+    //   (b) S/D linear weighting then assigned most of the budget to
+    //       those fresh deployments (D=0 → weight ≈ ∞), where realized
+    //       APR collapsed.
+    //
+    // Scenario: one high-signal saturated current allocation + one fresh
+    // zero-D deployment with the same signal. Cap-aware ranking puts
+    // the saturated one first (its R/(D+cap) APR is realistic; the
+    // fresh one's R/cap APR is also moderate, but tie-broken away).
+    // Water-filling allocates a meaningful amount to the saturated
+    // pick and ZERO to the fresh one.
+    const saturated = deployment({
+      id: Q.OK,
+      signal: GRT(2_037n),
+      staked: GRT(117_000n) + GRT(11_000n), // D=117k + currentAlloc=11k → totalStakedTokens
+    });
+    const fresh = deployment({
+      id: Q.RUNNING,
+      signal: GRT(2_037n),
+      staked: 0n,
+    });
+    const currentAlloc = allocation({
+      id: '0xcurrent',
+      deploymentId: Q.OK,
+      allocatedTokens: GRT(11_000n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(100_000n).toString() }),
+        signalledDeployments: [saturated, fresh],
+        activeAllocations: [currentAlloc],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: Q.OK }),
+          indexingStatus({ id: Q.RUNNING }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        maxAllocations: 2,
+        maxAllocationPct: 0.2,
+        gasEstimateGrt: GRT(0n),
+      }),
+    );
+    const saturatedAmount =
+      result.proposedAllocations.find((p) => p.deploymentId === Q.OK)
+        ?.allocatedTokens ?? 0n;
+    const freshAmount =
+      result.proposedAllocations.find((p) => p.deploymentId === Q.RUNNING)
+        ?.allocatedTokens ?? 0n;
+    // The saturated, currently-allocated, high-signal deployment must
+    // receive a meaningful water-filled allocation (>5k GRT, well above
+    // any noise threshold).
     assert.ok(
-      freshAmount <= cap,
-      `expected fresh deployment to be bounded by per-deployment cap; ` +
-        `got ${freshAmount} > cap ${cap}`,
+      saturatedAmount > GRT(5_000n),
+      `expected saturated high-S deployment to get >5k GRT; got ${saturatedAmount}`,
     );
+    // The fresh D=0 deployment must get zero — water-filling correctly
+    // refuses to waste budget on a deployment where indexer reward is
+    // independent of A_i.
+    assert.equal(
+      freshAmount,
+      0n,
+      `fresh D=0 deployment must get zero water-filled allocation; got ${freshAmount}`,
+    );
+  });
+});
+
+describe('bigIntSqrt', () => {
+  it('returns 0 for 0', () => {
+    assert.equal(bigIntSqrt(0n), 0n);
+  });
+
+  it('returns 1 for 1', () => {
+    assert.equal(bigIntSqrt(1n), 1n);
+  });
+
+  it('round-trips on perfect squares', () => {
+    for (const x of [2n, 3n, 7n, 10n, 100n, 12345n, 10n ** 18n, 10n ** 36n]) {
+      assert.equal(bigIntSqrt(x * x), x, `sqrt(${x}²) === ${x}`);
+    }
+  });
+
+  it('returns floor(sqrt(n)) for non-perfect-squares', () => {
+    // floor(sqrt(2)) = 1, floor(sqrt(3)) = 1, floor(sqrt(10)) = 3
+    assert.equal(bigIntSqrt(2n), 1n);
+    assert.equal(bigIntSqrt(3n), 1n);
+    assert.equal(bigIntSqrt(10n), 3n);
+    assert.equal(bigIntSqrt(99n), 9n);
+    // floor(sqrt(10^37)) = 3162277660168379331998893544432718031 (~3.162e18)
+    const big = 10n ** 37n;
+    const root = bigIntSqrt(big);
+    assert.ok(root * root <= big, `floor: root² ≤ n`);
+    assert.ok((root + 1n) * (root + 1n) > big, `tight: (root+1)² > n`);
+  });
+
+  it('is monotonic non-decreasing', () => {
+    let prev = 0n;
+    for (let n = 0n; n < 1000n; n++) {
+      const s = bigIntSqrt(n);
+      assert.ok(s >= prev, `monotonic at n=${n}: prev=${prev}, s=${s}`);
+      prev = s;
+    }
+  });
+
+  it('throws on negative input', () => {
+    assert.throws(() => bigIntSqrt(-1n), /negative/);
   });
 });
