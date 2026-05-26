@@ -69,4 +69,10 @@ export interface SubgraphIndexingStatus {
   chains: ChainIndexingStatus[];
   /** Total entities stored, as a decimal string (graph-node returns BigInt). */
   entityCount: string;
+  /** Whether the deployment is currently paused (graph-node-side). */
+  paused: boolean;
+  /** Index-node assignment (e.g. "default", "index_node_0"); null when unassigned. */
+  node: string | null;
+  /** Optional block-history retention setting reported by graph-node. */
+  historyBlocks: number | null;
 }

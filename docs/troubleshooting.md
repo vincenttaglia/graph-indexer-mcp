@@ -135,6 +135,18 @@ stdout/stderr from CLI graphman invocations are capped at 32 KiB per stream. Whe
 
 ---
 
+## graph-node version requirements
+
+The MCP queries `paused`, `node`, and `historyBlocks` on `subgraph_indexing_status`. These fields exist on graph-node >= 0.30.0 (released 2022). If you're running an older graph-node, the GraphQL query will fail with a schema-validation error before the MCP can normalize — the client's safe defaults only cover the case where a *successful* response omits the field, not the case where the server rejects the selection set up front.
+
+Recommended: graph-node >= 0.35.0 for full compatibility with current MCP semantics. If you're stuck on an older version, the simplest workaround is to upgrade — these fields are foundational to cleanup / discovery classification and there's no MCP setting to selectively disable querying them.
+
+Symptom on too-old graph-node: every call into `get_indexing_statuses` (and any composite tool that uses it — discovery, health checks, optimizer) fails with a GraphQL error message containing `Cannot query field "paused"` (or `"node"` / `"historyBlocks"`). The MCP surfaces the error verbatim in the tool result wrapper.
+
+Note: even on a supported graph-node version, the discovery cleanup classifier intentionally does NOT auto-emit `orphaned` based on `status.node === null` alone. Older servers may default the field to null on successful responses, and transient unassignment is common during node restarts. The conjunctive rule (`paused` AND no allocation AND no curation signal) is the only trigger for an `orphaned` cleanup step.
+
+---
+
 ## Reporting bugs
 
 Include:

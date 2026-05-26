@@ -115,6 +115,19 @@ export function indexingStatus(
       blockNumber?: number;
     };
     entityCount?: string;
+    /**
+     * Pause state as graph-node would report it. Defaults to `false` so
+     * existing fixtures keep behaving like "healthy, synced, unpaused".
+     */
+    paused?: boolean;
+    /**
+     * Index-node assignment as graph-node would report it. Defaults to
+     * `'default'` — i.e. assigned. Pass `null` to simulate an unassigned
+     * deployment (used by the new orphaned-classification tests).
+     */
+    node?: string | null;
+    /** Block-history retention setting; mirrors graph-node's optional field. */
+    historyBlocks?: number | null;
   },
 ): SubgraphIndexingStatus {
   const chains = [
@@ -137,6 +150,9 @@ export function indexingStatus(
     nonFatalErrors: [],
     chains,
     entityCount: spec.entityCount ?? '0',
+    paused: spec.paused ?? false,
+    node: spec.node === undefined ? 'default' : spec.node,
+    historyBlocks: spec.historyBlocks ?? null,
   };
   if (spec.fatalError) {
     out.fatalError = {

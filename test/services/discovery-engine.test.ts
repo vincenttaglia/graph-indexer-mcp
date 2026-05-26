@@ -54,9 +54,7 @@ describe('DiscoveryEngine cleanup', () => {
         statuses: [indexingStatus({ id: depId, synced: true })],
       }),
       postgresClient: fakePostgresClient(),
-      graphmanClient: fakeGraphmanClient({
-        defaultInfo: { id: depId, paused: false, node: 'index-node-0' },
-      }),
+      graphmanClient: fakeGraphmanClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(baseConfig());
@@ -89,9 +87,7 @@ describe('DiscoveryEngine cleanup', () => {
         statuses: [indexingStatus({ id: depId, synced: true })],
       }),
       postgresClient: fakePostgresClient(),
-      graphmanClient: fakeGraphmanClient({
-        defaultInfo: { id: depId, paused: false, node: 'index-node-0' },
-      }),
+      graphmanClient: fakeGraphmanClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(baseConfig());
@@ -99,6 +95,73 @@ describe('DiscoveryEngine cleanup', () => {
       assert.ok(
         !action.steps.includes('drop' as never),
         'drop must never appear in cleanup steps',
+      );
+    }
+  });
+
+  it('node:null alone is NOT enough to classify a deployment orphaned — audit-hardened against false-positive cleanup', async () => {
+    // Audit High: the prior implementation classified any deployment with
+    // `status.node === null` as orphaned. That mis-fires when older
+    // graph-node versions omit the field (the client normalizer defaults
+    // it to null), or on transient unassignment during node restarts.
+    // The conjunctive rule (paused + no-allocation + no-signal) is now the
+    // ONLY trigger for `orphaned`; node:null on its own must not produce
+    // any cleanup action.
+    //
+    // The synthetic case here pairs `node: null` with `paused: false` and
+    // a non-empty allocation set, which is the worst-case shape: an older
+    // graph-node returning null for `node` on a still-allocated deployment.
+    // Expectation: no orphaned classification, no cleanup action, no
+    // graphman dependency.
+    const depId = 'Qm_node_null_not_orphaned';
+    const alloc = allocation({
+      id: '0xalloc',
+      deploymentId: depId,
+      allocatedTokens: GRT(10_000n),
+    });
+    // Also include a signalled deployment so the deployment looks healthy
+    // along every dimension except `node`.
+    const signalled = deployment({ id: depId, signal: GRT(50_000n) });
+    const engine = new DiscoveryEngine({
+      networkClient: fakeNetworkClient({
+        signalledDeployments: [signalled],
+        activeAllocations: [alloc],
+        networkParams: networkParams(),
+      }),
+      qosClient: fakeQosClient(),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: depId, synced: true, node: null, paused: false }),
+        ],
+      }),
+      postgresClient: fakePostgresClient(),
+      // graphmanClient intentionally omitted — proves discovery's read path
+      // does not depend on graphman.
+      agentClient: fakeAgentClient(),
+    });
+    const result = await engine.run(baseConfig());
+
+    // No orphaned classification.
+    const staleEntry = result.stale.find((s) => s.deploymentId === depId);
+    assert.equal(
+      staleEntry,
+      undefined,
+      `node:null alone must not produce a stale entry; got ${JSON.stringify(staleEntry)}`,
+    );
+
+    // No cleanup action.
+    assert.equal(
+      result.cleanup.filter((c) => c.deploymentId === depId).length,
+      0,
+      'node:null alone must not produce a cleanup action',
+    );
+
+    // Sanity: no graphman-related warnings (discovery's read path is
+    // graphman-free regardless of classification).
+    for (const w of result.warnings) {
+      assert.ok(
+        !/graphman/i.test(w),
+        `expected no graphman warnings; got: ${w}`,
       );
     }
   });
@@ -121,9 +184,7 @@ describe('DiscoveryEngine cleanup', () => {
         statuses: [indexingStatus({ id: depId, synced: true })],
       }),
       postgresClient: fakePostgresClient(),
-      graphmanClient: fakeGraphmanClient({
-        defaultInfo: { id: depId, paused: false, node: 'index-node-0' },
-      }),
+      graphmanClient: fakeGraphmanClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(baseConfig({ frozenlist: [depId] }));

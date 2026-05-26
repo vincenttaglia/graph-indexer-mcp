@@ -116,13 +116,57 @@ describe('AllocationOptimizer.run', () => {
         throwOnGetActiveAllocations: boom,
       }),
       graphNodeClient: fakeGraphNodeClient({ throwOnGetIndexingStatuses: boom }),
-      graphmanClient: fakeGraphmanClient({ throwOnGetDeploymentInfo: boom }),
+      // graphmanClient intentionally omitted — the optimizer's read path no
+      // longer touches graphman, so the test no longer needs to wire one.
       qosClient: fakeQosClient({ throwOnTopQueried: boom }),
       agentClient: fakeAgentClient(),
     });
     const result = await opt.run(baseConfig({ whitelist: [] }));
     assert.ok(result.errors.length >= 2);
     assert.equal(result.proposedAllocations.length, 0);
+  });
+
+  it('excludes a deployment whose graph-node status reports paused=true (no graphman wired)', async () => {
+    // Pause state used to come from graphman.getDeploymentInfo; it now
+    // comes from graph-node's indexingStatuses.paused. Prove the new path
+    // by wiring graphmanClient: undefined and asserting the paused
+    // deployment is filtered out and never proposed for allocation.
+    const okDep = deployment({ id: 'Qm_running', signal: GRT(50_000n), staked: GRT(1n) });
+    const pausedDep = deployment({ id: 'Qm_paused', signal: GRT(50_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [okDep, pausedDep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: 'Qm_running' }),
+          indexingStatus({ id: 'Qm_paused', paused: true }),
+        ],
+      }),
+      // No graphmanClient — proves the optimizer runs end-to-end without
+      // graphman wired and still honors pause state.
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+    const ids = result.proposedAllocations.map((p) => p.deploymentId);
+    assert.ok(
+      ids.includes('Qm_running'),
+      `expected Qm_running in plan; got ${JSON.stringify(ids)}`,
+    );
+    assert.ok(
+      !ids.includes('Qm_paused'),
+      `paused deployment must be excluded; got ${JSON.stringify(ids)}`,
+    );
+    // Sanity: no graphman-related errors should appear in the result —
+    // we never called graphman so we can't have failed against it.
+    for (const e of result.errors) {
+      assert.ok(
+        !/graphman/i.test(e),
+        `expected no graphman errors; got: ${e}`,
+      );
+    }
   });
 
   it('drops candidates below minSignal unless whitelisted', async () => {

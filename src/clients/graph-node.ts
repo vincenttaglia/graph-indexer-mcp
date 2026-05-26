@@ -100,6 +100,9 @@ const INDEXING_STATUSES_SELECTION = /* GraphQL */ `
     }
   }
   entityCount
+  paused
+  node
+  historyBlocks
 `;
 
 const INDEXING_STATUSES_ALL_QUERY = /* GraphQL */ `
@@ -151,6 +154,9 @@ interface RawIndexingStatus {
   nonFatalErrors?: RawSubgraphError[] | null;
   chains?: RawChain[] | null;
   entityCount: string;
+  paused?: boolean | null;
+  node?: string | null;
+  historyBlocks?: number | string | null;
 }
 
 interface IndexingStatusesResponse {
@@ -202,6 +208,20 @@ function coerceHealth(value: string): SubgraphIndexingStatus['health'] {
 }
 
 function normalizeStatus(raw: RawIndexingStatus): SubgraphIndexingStatus {
+  // Safe defaults for the pause-state fields: older graph-node versions
+  // don't expose `paused`/`node`/`historyBlocks` at all (the GraphQL server
+  // happily returns the surrounding fields and omits the unknown ones).
+  // Treat "missing" as "not paused, unassigned-unknown, no retention info"
+  // so the new read path degrades to today's behavior instead of throwing.
+  const paused = raw.paused === true;
+  const node = typeof raw.node === 'string' && raw.node.length > 0 ? raw.node : null;
+  let historyBlocks: number | null = null;
+  if (typeof raw.historyBlocks === 'number' && Number.isFinite(raw.historyBlocks)) {
+    historyBlocks = raw.historyBlocks;
+  } else if (typeof raw.historyBlocks === 'string' && raw.historyBlocks !== '') {
+    const parsed = Number(raw.historyBlocks);
+    historyBlocks = Number.isFinite(parsed) ? parsed : null;
+  }
   const status: SubgraphIndexingStatus = {
     subgraph: raw.subgraph,
     synced: raw.synced,
@@ -211,6 +231,9 @@ function normalizeStatus(raw: RawIndexingStatus): SubgraphIndexingStatus {
       .filter((e): e is SubgraphError => e !== undefined),
     chains: (raw.chains ?? []).map(normalizeChain),
     entityCount: raw.entityCount,
+    paused,
+    node,
+    historyBlocks,
   };
   const fatal = normalizeError(raw.fatalError);
   if (fatal) status.fatalError = fatal;

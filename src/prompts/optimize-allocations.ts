@@ -87,7 +87,7 @@ Apply the design §4.1 filters in order:
 2. Drop deployments with \`deniedAt != 0\` (rewards denied) — surfaced by \`get_all_signalled_deployments\`.
 3. Drop deployments below \`min_signal\` from \`indexer://config\`.
 4. Drop blacklisted deployments. Keep frozenlist allocations as-is (do not propose changes to them).
-5. For any deployment with graphman state, call \`graphman_deployment_info\` and drop if paused.
+5. Drop paused deployments. \`get_indexing_statuses\` already surfaces \`paused\` (and \`node\`) natively, so no graphman call is needed for analysis — graphman is required only when *executing* the resulting mutation plan (pause/unassign/etc.).
 
 ## Step 3 — Score by APR
 
