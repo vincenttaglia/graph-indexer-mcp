@@ -163,7 +163,6 @@ These supply defaults for `run_allocation_optimization` / `run_discovery` / `run
 - **Tuning:**
   - Default (`0.3`) suits **single-mode submission** on Arbitrum One.
   - **Batched action queues** via indexer-agent see ~$0.02 / 100 = ~$0.0002/action ≈ ~0.004 GRT per lifecycle — override to `0.01` or lower if you batch.
-  - **Mainnet** operators (rare now) should override significantly higher — Ethereum L1 at 30 gwei × ~900k gas is ~$70 per lifecycle, i.e. ~`700` GRT at GRT ≈ $0.10.
 
 ---
 

@@ -56,9 +56,7 @@ export const configSchema = z.object({
    * The default of 0.3 GRT covers the single-mode lifecycle (0.2 GRT)
    * with 50% headroom for gas-price spikes and GRT/ETH price swings.
    * Operators using batched action queues (typical via indexer-agent)
-   * can override to 0.01 or lower. Mainnet operators (rare now) should
-   * override significantly higher — Ethereum L1 gas at 30 gwei × ~900k
-   * gas is ~$70 per lifecycle, i.e. ~700 GRT at GRT ≈ $0.10.
+   * can override to 0.01 or lower.
    *
    * The optimizer's gas-floor filter is `projectedReward < 2 × gasEstimateGrt`,
    * so at the 0.3 GRT default it admits any deployment expected to

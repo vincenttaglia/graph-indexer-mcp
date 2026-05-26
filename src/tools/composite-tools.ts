@@ -139,8 +139,7 @@ export function registerCompositeTools(
           'Gas budget per allocation lifecycle (open + close) in GRT (decimal). ' +
             'Defaults to 0.3 GRT — Arbitrum One single-mode (non-batched) ' +
             'submission with ~50% headroom (real cost ~0.2 GRT/lifecycle). ' +
-            'Drop to ~0.01 if you batch via the indexer-agent action queue; ' +
-            'bump to ~700 for Ethereum L1 (rare; ~$70/lifecycle at GRT ≈ $0.10).',
+            'Drop to ~0.01 if you batch via the indexer-agent action queue.',
         ),
     },
     handler: async (args, extra) => {
