@@ -187,6 +187,112 @@ describe('AllocationOptimizer.run', () => {
     }
   });
 
+  it('keeps healthy deployments that are temporarily behind chainhead (synced=false)', async () => {
+    // User-reported: graph-node flips `synced` to false the moment
+    // latestBlock falls behind chainHead — even by a single block.
+    // Restarts, brief RPC lag, normal pacing all cause transient
+    // synced=false on otherwise healthy deployments. Allocating to a
+    // healthy lagging deployment is correct behavior: it earns future-
+    // epoch rewards once it catches up. Closability for the CURRENT
+    // epoch is the HealthMonitor's concern (latestBlock >=
+    // epochStartBlock), not the optimizer's eligibility check.
+    //
+    // Before the fix: the candidate filter dropped any deployment with
+    // synced=false, so a deployment that was 1 block behind chainHead
+    // would get force-unallocated mid-rebalance.
+    // After the fix: synced is captured on the candidate for diagnostics
+    // but is NOT a gate — only healthy + !paused matter.
+    const candidate = deployment({
+      id: Q.RUNNING,
+      signal: GRT(50_000n),
+      staked: GRT(1n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(100_000n).toString() }),
+        signalledDeployments: [candidate],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({
+            id: Q.RUNNING,
+            synced: false, // key: behind chainhead
+            health: 'healthy', // but healthy
+            paused: false,
+          }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // The candidate survives the filter.
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      1,
+      `expected healthy-but-lagging candidate to survive; if 0, the synced ` +
+        `gate has been reintroduced`,
+    );
+
+    // The candidate gets allocated.
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === Q.RUNNING),
+      `expected healthy-but-lagging deployment to be allocated; got ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
+    );
+
+    // No unallocate action against it.
+    const unallocates = result.actions.filter(
+      (a) => a.deploymentId === Q.RUNNING && a.type === 'unallocate',
+    );
+    assert.equal(
+      unallocates.length,
+      0,
+      `expected no unallocate action for healthy-but-lagging deployment; ` +
+        `got ${JSON.stringify(unallocates)}`,
+    );
+  });
+
+  it('still drops a deployment whose health is unhealthy regardless of sync state', async () => {
+    // Companion to the synced=false regression test: the optimizer must
+    // continue to gate on `healthy`. An unhealthy deployment is not
+    // allocatable even if it claims to be synced.
+    const candidate = deployment({
+      id: Q.RUNNING,
+      signal: GRT(50_000n),
+      staked: GRT(1n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(100_000n).toString() }),
+        signalledDeployments: [candidate],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({
+            id: Q.RUNNING,
+            synced: true,
+            health: 'failed', // not healthy
+          }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+    assert.equal(
+      result.proposedAllocations.length,
+      0,
+      `expected unhealthy deployment to be filtered out; got ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
+    );
+  });
+
   it('drops candidates below minSignal unless whitelisted', async () => {
     const lowSig = deployment({ id: Q.LOW, signal: GRT(10n), staked: GRT(1n) });
     const okSig = deployment({ id: Q.OK, signal: GRT(10_000n), staked: GRT(1n) });
