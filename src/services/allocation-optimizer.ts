@@ -981,10 +981,10 @@ export class AllocationOptimizer {
     // Iterative-greedy water-filling.
     //
     // Slot accounting: each candidate already holding an on-chain
-    // allocation (currentAllocation > 0) is pre-seated — it consumes a
-    // slot up-front and does not face the slot guard when it claims its
-    // first chunk. Rationale: the indexer has already paid the gas cost
-    // to open this allocation; the optimizer's job is to size it
+    // allocation (currentAllocation > 0) is a pre-seating CANDIDATE — it
+    // consumes a slot up-front and does not face the slot guard when it
+    // claims its first chunk. Rationale: the indexer has already paid the
+    // gas cost to open this allocation; the optimizer's job is to size it
     // correctly, not to evict it in favor of a fresh D=0 deployment
     // whose only edge is the MAX_MARGINAL "claim me first" sentinel.
     // Without this pre-seating, a tight maxAllocations (e.g. 15 fresh
@@ -992,22 +992,68 @@ export class AllocationOptimizer {
     // let the fresh picks consume every slot and leave the current with
     // nothing — exactly the regression the iterative-greedy rewrite is
     // meant to fix.
+    //
+    // Slot cap enforcement: pre-seating is capped at `remainingSlots`.
+    // When the indexer has more current allocations than the cap allows,
+    // we rank currents by their marginal APR at their existing allocation
+    // level (i.e., what they're actually earning per unit of stake right
+    // now) and pre-seat only the top `remainingSlots`. The remaining
+    // currents (the slot-overflow) go through the loop with
+    // preSeated=false. They can still re-claim a slot if their
+    // marginal-at-zero beats the field, but if not they correctly fall
+    // out of the proposal and the diff emits unallocate actions — the
+    // RIGHT answer when current count exceeds maxAllocations. Without
+    // this cap, the optimizer would silently violate the operator's
+    // configured `maxAllocations` setting (e.g. 32 currents → 32
+    // positive proposals when maxAllocations=15).
     const allocations = new Array<bigint>(picks.length).fill(0n);
-    const preSeated = new Array<boolean>(picks.length).fill(false);
-    let slotsUsed = 0;
+
+    // Score each current by its marginal APR at its existing allocation
+    // level. This is the realized economic case for keeping the
+    // allocation open as-is: high score = the indexer is currently
+    // earning a lot per unit of stake. Non-currents score 0n (they're
+    // not pre-seating candidates).
+    const marginalAtCurrent: bigint[] = picks.map((p) =>
+      p.candidate.currentAllocation > 0n
+        ? computeMarginal(p.R, p.D, p.candidate.currentAllocation, false)
+        : 0n,
+    );
+
+    // Sort currents by marginal-at-current descending; pre-seat top
+    // remainingSlots. Ties broken by stable insertion order (no
+    // additional tiebreak — the input order from `candidates` is
+    // already deterministic upstream).
+    const currentsByMarginal: { idx: number; score: bigint }[] = [];
     for (let i = 0; i < picks.length; i++) {
       if (picks[i]!.candidate.currentAllocation > 0n) {
-        preSeated[i] = true;
-        slotsUsed++;
+        currentsByMarginal.push({ idx: i, score: marginalAtCurrent[i]! });
       }
     }
-    // If currents already exceed remainingSlots, the diff will close the
-    // overflow; for the loop, we cap slotsUsed at remainingSlots so the
-    // guard still admits resizing the kept ones (they're all at A=0 in
-    // the proposal so far). The loop's slot guard only excludes brand-new
-    // (no current) candidates from claiming a slot we don't have.
-    if (slotsUsed > remainingSlots) {
-      slotsUsed = remainingSlots;
+    currentsByMarginal.sort((a, b) => {
+      if (a.score > b.score) return -1;
+      if (a.score < b.score) return 1;
+      return a.idx - b.idx;
+    });
+
+    const preSeatCap = remainingSlots;
+    const preSeated = new Array<boolean>(picks.length).fill(false);
+    const preSeatLimit = Math.min(currentsByMarginal.length, preSeatCap);
+    for (let k = 0; k < preSeatLimit; k++) {
+      preSeated[currentsByMarginal[k]!.idx] = true;
+    }
+    let slotsUsed = preSeatLimit;
+
+    // Operator UX: warn when current count exceeds the slot cap. The
+    // overflow currents will be evaluated for closure, which is correct
+    // behavior but surprising if the operator doesn't realize their
+    // maxAllocations setting is below the actual current count.
+    if (currentsByMarginal.length > preSeatCap) {
+      const overflow = currentsByMarginal.length - preSeatCap;
+      warnings.push(
+        `indexer has ${currentsByMarginal.length} current allocations but maxAllocations=${config.maxAllocations}; ` +
+          `the ${overflow} lowest-marginal currents will be evaluated for closure. ` +
+          `Increase maxAllocations if you want to keep all of them.`,
+      );
     }
     let remaining = availableStake;
 

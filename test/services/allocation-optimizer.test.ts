@@ -942,5 +942,135 @@ describe('AllocationOptimizer.run', () => {
       `expected total proposed ≤ 3 chunks; got ${total}`,
     );
   });
+
+  it('enforces maxAllocations even when current count exceeds slot cap (regression: pre-seat cap)', async () => {
+    // The audit bug: pre-seating unconditionally marked every
+    // currentAllocation > 0 candidate as slot-guard-bypassing. With 5
+    // currents and maxAllocations=3, the optimizer would emit 5 positive
+    // proposals — silently violating the configured cap.
+    //
+    // Fix: rank currents by marginal-at-current-allocation; pre-seat
+    // only the top 3. The lowest-marginal 2 fall out (their D=0 nature
+    // means even their marginal-at-zero won't beat the saturated kept
+    // ones once those are in the loop), get proposed=0, and the diff
+    // emits unallocate actions for them.
+    const { toQmDeploymentId } = await import('../../src/utils/ipfs.js');
+
+    // 5 currents with varied marginal-at-current. We control marginal
+    // via D (other indexers' stake) — higher D + same allocation = lower
+    // marginal APR. Signal is the same on each so R is the same. With
+    // currentAlloc fixed, marginal = R*D/(D+A)² — D dominates inversely
+    // for the high-D end and quadratically for the low-D end. We pick:
+    //   HIGH1, HIGH2: small D → high marginal
+    //   MED:          medium D → medium marginal
+    //   LOW, VLOW:    large D → low marginal
+    const HIGH1 = toQmDeploymentId('0x' + '00'.repeat(31) + 'a1');
+    const HIGH2 = toQmDeploymentId('0x' + '00'.repeat(31) + 'a2');
+    const MED = toQmDeploymentId('0x' + '00'.repeat(31) + 'b1');
+    const LOW = toQmDeploymentId('0x' + '00'.repeat(31) + 'c1');
+    const VLOW = toQmDeploymentId('0x' + '00'.repeat(31) + 'c2');
+
+    const CURR = GRT(5_000n);
+    // D values: smaller D → higher marginal-at-current. (R is the same
+    // for all since signal is the same.)
+    const Ds = new Map<string, bigint>([
+      [HIGH1, GRT(10_000n)],
+      [HIGH2, GRT(12_000n)],
+      [MED, GRT(100_000n)],
+      [LOW, GRT(1_000_000n)],
+      [VLOW, GRT(2_000_000n)],
+    ]);
+
+    const deps = [HIGH1, HIGH2, MED, LOW, VLOW].map((id) =>
+      deployment({
+        id,
+        signal: GRT(10_000n),
+        // totalStakedTokens = D + currentAlloc
+        staked: Ds.get(id)! + CURR,
+      }),
+    );
+    const allocs = [HIGH1, HIGH2, MED, LOW, VLOW].map((id, i) =>
+      allocation({
+        id: `0xcurrent_${i}`,
+        deploymentId: id,
+        allocatedTokens: CURR,
+      }),
+    );
+    const statuses = [HIGH1, HIGH2, MED, LOW, VLOW].map((id) =>
+      indexingStatus({ id }),
+    );
+
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(100_000n).toString() }),
+        signalledDeployments: deps,
+        activeAllocations: allocs,
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({ statuses }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        maxAllocations: 3,
+        maxAllocationPct: 0.5,
+        gasEstimateGrt: GRT(0n),
+      }),
+    );
+
+    // Cap enforcement: total non-zero proposals must be ≤ maxAllocations.
+    const nonZero = result.proposedAllocations.filter(
+      (p) => p.allocatedTokens > 0n,
+    );
+    assert.ok(
+      nonZero.length <= 3,
+      `expected ≤3 non-zero proposals, got ${nonZero.length} ` +
+        `(deployments: ${nonZero.map((p) => p.deploymentId).join(', ')})`,
+    );
+
+    // Top-marginal currents (HIGH1, HIGH2) should be in the plan with a
+    // positive allocation — they're the strongest economic case.
+    const amountOf = (id: string): bigint =>
+      result.proposedAllocations.find((p) => p.deploymentId === id)
+        ?.allocatedTokens ?? 0n;
+    assert.ok(
+      amountOf(HIGH1) > 0n,
+      `HIGH1 (top marginal) should keep an allocation; got ${amountOf(HIGH1)}`,
+    );
+    assert.ok(
+      amountOf(HIGH2) > 0n,
+      `HIGH2 (top marginal) should keep an allocation; got ${amountOf(HIGH2)}`,
+    );
+
+    // Lowest-marginal current (VLOW) should NOT be in the plan with a
+    // positive allocation — the slot cap forces closure of the weakest.
+    assert.equal(
+      amountOf(VLOW),
+      0n,
+      `VLOW (lowest marginal) should be unallocated under cap=3; ` +
+        `got ${amountOf(VLOW)}`,
+    );
+
+    // Slot-overflow warning must be emitted naming both the current
+    // count (5) and the configured maxAllocations (3).
+    const hasOverflowWarning = result.warnings.some(
+      (w) =>
+        w.includes('maxAllocations') && w.includes('5') && w.includes('3'),
+    );
+    assert.ok(
+      hasOverflowWarning,
+      `expected slot-overflow warning mentioning 5 currents and ` +
+        `maxAllocations=3; got warnings:\n  ${result.warnings.join('\n  ')}`,
+    );
+
+    // The diff should emit unallocate actions for the dropped currents.
+    const unallocates = result.actions.filter((a) => a.type === 'unallocate');
+    assert.ok(
+      unallocates.length >= 2,
+      `expected ≥2 unallocate actions for slot-overflow currents; ` +
+        `got ${unallocates.length}`,
+    );
+  });
 });
 
