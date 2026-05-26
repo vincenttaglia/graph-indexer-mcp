@@ -116,7 +116,7 @@ If you're seeing unprofitable allocations slip through:
 - Raise it. Compute your observed median lifecycle cost (open + close + POI submission), then add ~50% safety headroom.
 - The 2× multiplier in the filter is intentional and already gives some headroom — set the env to your true median cost, not your tail-risk worst case.
 - Single-mode submission on Arbitrum (no batching): ~0.2 GRT per lifecycle is typical; the 0.3 default suits this.
-- Ethereum L1 (rare): ~0.7 GRT and up.
+- Ethereum L1 (rare): ~$70/lifecycle = ~700 GRT at GRT ≈ $0.10.
 
 ---
 

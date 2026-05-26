@@ -58,7 +58,7 @@ export const configSchema = z.object({
    * Operators using batched action queues (typical via indexer-agent)
    * can override to 0.01 or lower. Mainnet operators (rare now) should
    * override significantly higher — Ethereum L1 gas at 30 gwei × ~900k
-   * gas is ~$70 = ~0.7 GRT per lifecycle.
+   * gas is ~$70 per lifecycle, i.e. ~700 GRT at GRT ≈ $0.10.
    *
    * The optimizer's gas-floor filter is `projectedReward < 2 × gasEstimateGrt`,
    * so at the 0.3 GRT default it admits any deployment expected to
