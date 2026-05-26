@@ -164,30 +164,56 @@ export interface AllocationOptimizerDeps {
 // ===========================================================================
 
 /**
- * Newton's-method square root for BigInt. Returns floor(sqrt(n)).
- *
- * Used by the water-filling distribution to invert the closed-form
- *   A_i(λ) = sqrt(R_i × D_i / λ) − D_i
- * at BigInt precision. Number's IEEE 754 sqrt would lose precision for
- * wei-scale inputs (typically 18+ decimal digits past the precision limit
- * of 53-bit mantissa); a converging BigInt sqrt keeps the equilibrium
- * exact to the last wei.
- *
- * Exported for direct unit testing (round-trip on perfect squares,
- * monotonicity).
+ * Scale factor for marginal comparisons in the iterative-greedy allocator.
+ * Marginal APR = R × D / (D + A)² is a fraction much smaller than 1 at
+ * wei scale; we multiply by 10^27 to carry ~84 bits of fractional
+ * precision through BigInt division. Two marginals computed at the same
+ * SCALE are directly comparable as integers, which is what the inner
+ * argmax loop needs.
  */
-export function bigIntSqrt(n: bigint): bigint {
-  if (n < 0n) throw new RangeError('bigIntSqrt: negative input');
-  if (n < 2n) return n;
-  // Newton's method. Seed with x = n (upper bound) and iterate
-  // y = (x + n/x) / 2 until y >= x — at which point x is floor(sqrt(n)).
-  let x = n;
-  let y = (x + 1n) / 2n;
-  while (y < x) {
-    x = y;
-    y = (x + n / x) / 2n;
+const MARGINAL_SCALE = 10n ** 27n;
+
+/**
+ * Sentinel marginal value used to give a candidate "claim me first"
+ * priority. Two cases:
+ *
+ *   - D=0 deployments: reward = R × A / (0 + A) = R is constant in A for
+ *     A > 0, so the true marginal at A=0 is undefined (R/0). We treat it
+ *     as +∞ so the candidate wins one chunk; on the next iteration its
+ *     marginal drops to 0 (R × 0 / A² = 0) and it never wins again. This
+ *     yields the desired "claim once, no more" behavior.
+ *   - Whitelisted candidates: operator policy forces them into the plan
+ *     for at least one chunk; thereafter they water-fill on their real
+ *     marginal alongside the rest.
+ *
+ * 2^200 is comfortably larger than any realistic R × D × MARGINAL_SCALE,
+ * which at wei scale (~10^29 for both R and D) tops out near 10^85 ≈ 2^283
+ * in the absolute worst case, but with the (D+A)² denominator the effective
+ * value stays well below 2^200 for any realistic state. If the sentinel
+ * ever collided with a real marginal it would still be a tie-break, not a
+ * correctness violation.
+ */
+const MAX_MARGINAL = 1n << 200n;
+
+/**
+ * Marginal-APR-times-MARGINAL_SCALE for a candidate at current allocation A.
+ *
+ * Total reward: reward(A) = R × A / (D + A)
+ * Marginal:     d reward / dA = R × D / (D + A)²
+ *
+ * Returns 0 if the candidate has no reward potential at A. Returns
+ * MAX_MARGINAL for the "claim me first" cases described above.
+ */
+function computeMarginal(R: bigint, D: bigint, A: bigint, whitelisted: boolean): bigint {
+  if (R === 0n) return 0n;
+  // Whitelist priority: guarantee at least one chunk by signaling MAX at A=0.
+  if (whitelisted && A === 0n) return MAX_MARGINAL;
+  if (D === 0n) {
+    // Constant total reward at A > 0; claim once, then stop.
+    return A === 0n ? MAX_MARGINAL : 0n;
   }
-  return x;
+  const denom = D + A;
+  return (R * D * MARGINAL_SCALE) / (denom * denom);
 }
 
 /** Convert a `bigint | string` to bigint, treating strings as decimal. */
@@ -841,31 +867,38 @@ export class AllocationOptimizer {
   // -------------------------------------------------------------------------
 
   /**
-   * Water-filling allocator with cap binding.
+   * Iterative-greedy water-filling allocator with cap binding.
    *
-   * Strategy:
-   *   1. Rank candidates by APR at the per-deployment cap (saturation-aware
-   *      — fresh D=0 deployments don't artificially top the list because
-   *      APR = R/cap is the realistic full-allocation yield, not R/probe).
-   *      Whitelisted candidates float to the top.
-   *   2. Pick top `maxAllocations - frozenSlots` candidates.
-   *   3. Bisection-solve for the Lagrange multiplier λ such that the summed
-   *      water-filled allocations equal `availableStake`. Each
-   *        A_i = max(0, sqrt(R_i × D_i / λ) − D_i)
-   *      clamped to [0, cap_i]. This is the canonical marginal-APR-equalizing
-   *      distribution that maximizes total annual rewards under the cap
-   *      constraint, since
-   *        reward_i(A_i) = R_i × A_i / (D_i + A_i)
-   *        marginal_i    = R_i × D_i / (D_i + A_i)²
-   *      and setting marginal_i = λ across all unbound picks gives the
-   *      closed form above.
-   *   4. Drop any allocation whose projected annual reward is less than
-   *      `2 * gasEstimateGrt`.
+   * Replaces the previous rank-by-cap-APR → pick top-K → bisection pipeline.
+   * The old pipeline burned slots on fresh D=0 deployments whose rank APR
+   * (R/cap) looked attractive but whose realized water-filled contribution
+   * was zero, crowding out the operator's saturated currents.
    *
-   * Fresh deployments (D=0) correctly receive zero water-filled allocation
-   * because indexer reward at D=0 is constant in A_i — the indexer already
-   * captures 100% of R, and adding stake doesn't increase rewards.
-   * Distributing budget to them is a pure loss.
+   * Algorithm:
+   *   1. Start with allocations = 0 for every candidate.
+   *   2. Repeatedly pick the candidate with the highest *marginal* APR at
+   *      its current allocation and add a chunk (= availableStake / 1000).
+   *      Marginal = d/dA [R × A / (D + A)] = R × D / (D + A)².
+   *   3. D=0 candidates have a sentinel marginal-at-zero ("MAX_MARGINAL") so
+   *      they win the first slot if free, claim one chunk, then drop to
+   *      marginal=0 and are never picked again. This costs one slot for one
+   *      chunk — vastly better than burning a slot for a zero-result pick.
+   *   4. Whitelisted candidates likewise receive MAX_MARGINAL at A=0 so they
+   *      are guaranteed at least one chunk; thereafter they water-fill on
+   *      their real marginal alongside everybody else.
+   *   5. Stop when budget is exhausted, slots are full, or no candidate has
+   *      positive marginal.
+   *   6. Gas floor: after the loop, drop allocations whose projected annual
+   *      reward < 2× gas. (Excess budget remains idle, consistent with old
+   *      behavior.)
+   *
+   * Cap binding: each candidate has a per-deployment cap; allocations stop
+   * growing past it. Slot binding: a candidate at A=0 cannot start unless
+   * there is a free slot (slotsUsed < maxAllocations - frozenSlots).
+   *
+   * Complexity: O(N × K) BigInt-marginal computations where N = candidates,
+   * K = number of chunks allocated (≤ CHUNKS = 1000). For typical mainnet
+   * workloads (~300 candidates) this is ~300k BigInt ops — sub-second.
    */
   private optimize(args: {
     candidates: OptimizationCandidate[];
@@ -910,124 +943,177 @@ export class AllocationOptimizer {
       return [];
     }
 
-    // -- 1. Rank by APR at min(cap, availableStake). --
-    //
-    // Cap-aware ranking is saturation-aware: a fresh D=0 deployment with
-    // S=100 ranks by R/cap (e.g. ~10.8% APR) instead of R/probe (~271%
-    // with probe=availableStake/100). A saturated D=117k S=2037 ranks by
-    // R/(D+cap) ≈ 39.5%, which is the actual yield if we filled the cap.
-    // This puts the user's real high-yield current allocations at the top
-    // instead of letting fresh-deployment artifacts crowd them out.
-    //
-    // When availableStake < cap, ranking at the full cap overstates a
-    // high-R/high-D candidate's realized yield: bisection will never get
-    // close to filling the cap, so a lower-D peer that we can actually
-    // saturate would deliver more reward per wei. Ranking at the smaller
-    // of (cap, availableStake) keeps the comparison honest under tight
-    // budgets (frozen-heavy state, single-slot left, etc).
-
-    interface Ranked {
-      candidate: OptimizationCandidate;
-      rankApr: number;
-      whitelisted: boolean;
-      otherIndexers: bigint;
-      /** Cached per-deployment cap so we don't recompute it during sizing. */
-      cap: bigint;
-    }
-
+    // Build pick state: per-candidate R, D, cap, whitelist flag. R=0 (no
+    // signal share — already caught upstream but defensive) candidates are
+    // dropped so the marginal-zero loop terminates cleanly.
     const whitelistSet = new Set(config.whitelist);
-    const ranked: Ranked[] = candidates.map((c) => {
-      const otherIndexers =
-        c.totalStakedTokens - c.currentAllocation > 0n
-          ? c.totalStakedTokens - c.currentAllocation
-          : 0n;
-      const cap = perDeploymentCap(totalStake, c.isRisky, config);
-      // Rank by realized APR at the SMALLER of (cap, availableStake). When
-      // availableStake < cap (frozen-heavy or single-slot scenarios), ranking
-      // at full cap can favor a high-R high-D deployment whose realized
-      // reward at our actual budget would be much worse than a lower-D peer.
-      // If both cap and availableStake collapse to 0 the ranking is
-      // degenerate; fall back to 1n so calculateApr's totalAlloc>0 guard
-      // doesn't return a flat 0 for every candidate.
-      let rankAllocation = cap < availableStake ? cap : availableStake;
-      if (rankAllocation <= 0n) rankAllocation = 1n;
-      const rankApr = calculateApr({
-        signal: c.signalledTokens,
-        totalSignal,
-        issuancePerYear,
-        proposedAllocation: rankAllocation,
-        otherIndexersAllocation: otherIndexers,
-      });
-      return {
-        candidate: c,
-        rankApr,
-        whitelisted: whitelistSet.has(c.deploymentId),
-        otherIndexers,
-        cap,
-      };
-    });
-
-    // Whitelisted first, then by descending cap-APR. Tie-break on query
-    // volume so we prefer deployments with proven gateway traffic.
-    ranked.sort((a, b) => {
-      if (a.whitelisted !== b.whitelisted) return a.whitelisted ? -1 : 1;
-      if (a.rankApr !== b.rankApr) return b.rankApr - a.rankApr;
-      const av = a.candidate.queryVolume30d ?? 0n;
-      const bv = b.candidate.queryVolume30d ?? 0n;
-      if (av !== bv) return av > bv ? -1 : 1;
-      return 0;
-    });
-
-    // -- 2. Pick the top `remainingSlots` (with whitelist priority already
-    // baked into the ordering). --
-    const picks = ranked.slice(0, remainingSlots);
-
-    // -- 3. Bisection water-filling distribution.
-    //
-    // For each pick precompute R_i = (S_i / T) × issuance, in wei. The
-    // water-filling closed form A_i(λ) = sqrt(R_i × D_i / λ) − D_i then
-    // gives the allocation that equalizes marginal APR at λ. We bisect λ
-    // until summed A_i (clamped to [0, cap_i]) hits availableStake.
-
     interface Pick {
-      ranked: Ranked;
+      candidate: OptimizationCandidate;
       /** R_i = (S_i × issuancePerYear) / T, in wei. */
       R: bigint;
       /** D_i = other indexers' stake on this deployment, in wei. */
       D: bigint;
       /** cap_i = per-deployment cap, in wei. */
       cap: bigint;
+      whitelisted: boolean;
+    }
+    const picks: Pick[] = [];
+    for (const c of candidates) {
+      const R = (c.signalledTokens * issuancePerYear) / totalSignal;
+      if (R === 0n) continue;
+      const D =
+        c.totalStakedTokens - c.currentAllocation > 0n
+          ? c.totalStakedTokens - c.currentAllocation
+          : 0n;
+      const cap = perDeploymentCap(totalStake, c.isRisky, config);
+      picks.push({
+        candidate: c,
+        R,
+        D,
+        cap,
+        whitelisted: whitelistSet.has(c.deploymentId),
+      });
+    }
+    if (picks.length === 0) {
+      return [];
     }
 
-    const pickInputs: Pick[] = picks.map((r) => ({
-      ranked: r,
-      // (S × issuancePerYear) / T. S and issuancePerYear are wei-scale; T
-      // is wei-scale too, so the division gives wei-scale R.
-      R: (r.candidate.signalledTokens * issuancePerYear) / totalSignal,
-      D: r.otherIndexers,
-      cap: r.cap,
-    }));
+    // Iterative-greedy water-filling.
+    //
+    // Slot accounting: each candidate already holding an on-chain
+    // allocation (currentAllocation > 0) is a pre-seating CANDIDATE — it
+    // consumes a slot up-front and does not face the slot guard when it
+    // claims its first chunk. Rationale: the indexer has already paid the
+    // gas cost to open this allocation; the optimizer's job is to size it
+    // correctly, not to evict it in favor of a fresh D=0 deployment
+    // whose only edge is the MAX_MARGINAL "claim me first" sentinel.
+    // Without this pre-seating, a tight maxAllocations (e.g. 15 fresh
+    // candidates competing with 1 saturated current for 15 slots) would
+    // let the fresh picks consume every slot and leave the current with
+    // nothing — exactly the regression the iterative-greedy rewrite is
+    // meant to fix.
+    //
+    // Slot cap enforcement: pre-seating is capped at `remainingSlots`.
+    // When the indexer has more current allocations than the cap allows,
+    // we rank currents by their marginal APR at their existing allocation
+    // level (i.e., what they're actually earning per unit of stake right
+    // now) and pre-seat only the top `remainingSlots`. The remaining
+    // currents (the slot-overflow) go through the loop with
+    // preSeated=false. They can still re-claim a slot if their
+    // marginal-at-zero beats the field, but if not they correctly fall
+    // out of the proposal and the diff emits unallocate actions — the
+    // RIGHT answer when current count exceeds maxAllocations. Without
+    // this cap, the optimizer would silently violate the operator's
+    // configured `maxAllocations` setting (e.g. 32 currents → 32
+    // positive proposals when maxAllocations=15).
+    const allocations = new Array<bigint>(picks.length).fill(0n);
 
-    const amounts = bisectLambda(pickInputs, availableStake);
+    // Score each current by its marginal APR at its existing allocation
+    // level. This is the realized economic case for keeping the
+    // allocation open as-is: high score = the indexer is currently
+    // earning a lot per unit of stake. Non-currents score 0n (they're
+    // not pre-seating candidates).
+    const marginalAtCurrent: bigint[] = picks.map((p) =>
+      p.candidate.currentAllocation > 0n
+        ? computeMarginal(p.R, p.D, p.candidate.currentAllocation, false)
+        : 0n,
+    );
 
+    // Sort currents by marginal-at-current descending; pre-seat top
+    // remainingSlots. Ties broken by stable insertion order (no
+    // additional tiebreak — the input order from `candidates` is
+    // already deterministic upstream).
+    const currentsByMarginal: { idx: number; score: bigint }[] = [];
+    for (let i = 0; i < picks.length; i++) {
+      if (picks[i]!.candidate.currentAllocation > 0n) {
+        currentsByMarginal.push({ idx: i, score: marginalAtCurrent[i]! });
+      }
+    }
+    currentsByMarginal.sort((a, b) => {
+      if (a.score > b.score) return -1;
+      if (a.score < b.score) return 1;
+      return a.idx - b.idx;
+    });
+
+    const preSeatCap = remainingSlots;
+    const preSeated = new Array<boolean>(picks.length).fill(false);
+    const preSeatLimit = Math.min(currentsByMarginal.length, preSeatCap);
+    for (let k = 0; k < preSeatLimit; k++) {
+      preSeated[currentsByMarginal[k]!.idx] = true;
+    }
+    let slotsUsed = preSeatLimit;
+
+    // Operator UX: warn when current count exceeds the slot cap. The
+    // overflow currents will be evaluated for closure, which is correct
+    // behavior but surprising if the operator doesn't realize their
+    // maxAllocations setting is below the actual current count.
+    if (currentsByMarginal.length > preSeatCap) {
+      const overflow = currentsByMarginal.length - preSeatCap;
+      warnings.push(
+        `indexer has ${currentsByMarginal.length} current allocations but maxAllocations=${config.maxAllocations}; ` +
+          `the ${overflow} lowest-marginal currents will be evaluated for closure. ` +
+          `Increase maxAllocations if you want to keep all of them.`,
+      );
+    }
+    let remaining = availableStake;
+
+    const CHUNKS = 1000n;
+    let chunkSize = remaining / CHUNKS;
+    if (chunkSize < 1n) chunkSize = 1n;
+
+    // Cap the loop iteration count defensively. With chunkSize ≥ 1 and
+    // remaining decreasing by at least chunkSize each iteration (when an
+    // allocation is made), this bounds at CHUNKS + |picks| (the +picks for
+    // capped iterations where allocAmount < chunkSize).
+    const MAX_ITERS = Number(CHUNKS) + picks.length + 1;
+
+    for (let iter = 0; iter < MAX_ITERS; iter++) {
+      if (remaining <= 0n) break;
+      let bestIdx = -1;
+      let bestMarginal = 0n;
+      for (let i = 0; i < picks.length; i++) {
+        const p = picks[i]!;
+        const A = allocations[i]!;
+        if (A >= p.cap) continue;
+        // Slot guard: a candidate at A=0 would open a new slot UNLESS
+        // it's already pre-seated (had a current allocation on-chain).
+        if (A === 0n && !preSeated[i] && slotsUsed >= remainingSlots) continue;
+        const m = computeMarginal(p.R, p.D, A, p.whitelisted);
+        if (m > bestMarginal) {
+          bestMarginal = m;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx < 0) break;
+
+      const p = picks[bestIdx]!;
+      const A = allocations[bestIdx]!;
+      const headroom = p.cap > A ? p.cap - A : 0n;
+      let allocAmount = chunkSize < headroom ? chunkSize : headroom;
+      if (allocAmount > remaining) allocAmount = remaining;
+      if (allocAmount === 0n) {
+        // Defensive: should not happen because the headroom and slot
+        // guards above would have skipped this pick. Break to avoid an
+        // infinite loop if it ever does.
+        break;
+      }
+      // Only brand-new (no current) candidates consume a slot on their
+      // first chunk. Pre-seated currents already counted upfront.
+      if (A === 0n && !preSeated[bestIdx]) slotsUsed++;
+      allocations[bestIdx] = A + allocAmount;
+      remaining -= allocAmount;
+    }
+
+    // Apply gas floor and build proposals.
     const gas = toBigInt(config.gasEstimateGrt);
     const proposals: ProposedAllocation[] = [];
-    for (let i = 0; i < pickInputs.length; i++) {
-      const p = pickInputs[i]!;
-      const amount = amounts[i]!;
-      if (amount === 0n) continue; // D=0 (fresh) or bisection assigned zero
-      const cand = p.ranked.candidate;
+    for (let i = 0; i < picks.length; i++) {
+      const p = picks[i]!;
+      const amount = allocations[i]!;
+      if (amount === 0n) continue;
+      const cand = p.candidate;
 
-      // Project APR at the actual chosen size.
-      const projectedAprFraction = calculateApr({
-        signal: cand.signalledTokens,
-        totalSignal,
-        issuancePerYear,
-        proposedAllocation: amount,
-        otherIndexersAllocation: p.D,
-      });
-
-      // Gas-floor check: skip if projected annual reward < 2× gas (Finding 3).
+      // Gas-floor check: skip if projected annual reward < 2× gas.
       // Reward_i(A_i) = R_i × A_i / (D_i + A_i). All BigInt wei.
       const totalAlloc = p.D + amount;
       const projectedRewardWei =
@@ -1039,13 +1125,21 @@ export class AllocationOptimizer {
         continue;
       }
 
+      const projectedAprFraction = calculateApr({
+        signal: cand.signalledTokens,
+        totalSignal,
+        issuancePerYear,
+        proposedAllocation: amount,
+        otherIndexersAllocation: p.D,
+      });
+
       const atCap = amount >= p.cap;
       const rationale = [
-        p.ranked.whitelisted ? 'whitelisted' : `ranked #${proposals.length + 1} by cap APR`,
+        p.whitelisted ? 'whitelisted' : `iterative-greedy pick #${proposals.length + 1}`,
         cand.isRisky ? 'risky cap applied' : null,
         atCap
           ? `cap-bound at ${shareLabel(p.cap, totalStake)} of total stake`
-          : 'water-filling equilibrium (marginal APR ≈ λ)',
+          : 'iterative-greedy equilibrium (marginal APR equalized)',
       ]
         .filter((s): s is string => Boolean(s))
         .join('; ');
@@ -1171,136 +1265,3 @@ function shareLabel(part: bigint, whole: bigint): string {
   return `${(ratio / 100).toFixed(2)}%`;
 }
 
-// ===========================================================================
-// Water-filling
-// ===========================================================================
-
-/**
- * A bisection input: per-pick R (reward coefficient = S/T × issuance),
- * D (other-indexers' stake on the deployment), and per-deployment cap.
- */
-export interface WaterFillPick {
-  R: bigint;
-  D: bigint;
-  cap: bigint;
-}
-
-/**
- * Scale factor used to carry λ at sub-wei precision during bisection.
- * λ has units of wei-rewards-per-wei-allocation, which is a dimensionless
- * decimal much smaller than 1. We multiply by 1e18 so bigint arithmetic
- * keeps ~18 fractional digits without underflow.
- */
-const LAMBDA_SCALE = 10n ** 18n;
-
-/**
- * Closed-form per-pick allocation for a given λ. For each pick:
- *   A_i(λ) = max(0, sqrt(R_i × D_i / λ) − D_i), clamped to [0, cap_i].
- *
- * Fresh deployments (D_i = 0) get zero by construction: indexer reward
- * R_i × A_i / (D_i + A_i) = R_i when D_i = 0, independent of A_i — adding
- * stake doesn't increase the reward, so water-filling correctly skips them.
- */
-function allocationAtLambda(picks: WaterFillPick[], lambdaScaled: bigint): bigint[] {
-  return picks.map(({ R, D, cap }) => {
-    if (D === 0n || R === 0n || lambdaScaled <= 0n) return 0n;
-    // A_i = sqrt(R × D × LAMBDA_SCALE / lambdaScaled) − D
-    const numer = R * D * LAMBDA_SCALE;
-    const radicand = numer / lambdaScaled;
-    const sqrtVal = bigIntSqrt(radicand);
-    const Ai = sqrtVal > D ? sqrtVal - D : 0n;
-    return Ai > cap ? cap : Ai;
-  });
-}
-
-function totalAllocatedAtLambda(picks: WaterFillPick[], lambdaScaled: bigint): bigint {
-  let sum = 0n;
-  for (const a of allocationAtLambda(picks, lambdaScaled)) sum += a;
-  return sum;
-}
-
-/**
- * Bisect λ until summed water-filled allocations equal availableStake.
- * Higher λ → tighter constraint → smaller allocations.
- * Lower  λ → looser constraint  → larger allocations.
- *
- * Bracket [1, hi] where hi is the max marginal-at-zero across picks
- * (R_i × LAMBDA_SCALE / D_i for picks with D_i > 0). At λ ≥ hi every
- * unclamped A_i is 0; at λ → 0 every A_i → cap. The total is monotonic
- * non-increasing in λ, so bisection converges.
- *
- * Returns the per-pick allocations at the final λ. If the picks' capped
- * sum is itself less than availableStake, the function returns the all-cap
- * vector (the caps are the binding constraint, not λ).
- */
-export function bisectLambda(picks: WaterFillPick[], availableStake: bigint): bigint[] {
-  if (picks.length === 0) return [];
-
-  // Zero-budget guard: with no stake to deploy every A_i must be 0. The
-  // bisection bracket below assumes availableStake > 0 (otherwise `hi`
-  // collapses to 1 and we'd return a tiny but non-zero allocation that's
-  // strictly over budget).
-  if (availableStake <= 0n) return picks.map(() => 0n);
-
-  // Edge: every pick has D=0 (all fresh) → every A_i = 0 regardless of λ.
-  // Return zeros directly; bisection would degenerate otherwise.
-  let anyD = false;
-  for (const p of picks) {
-    if (p.D > 0n && p.R > 0n) {
-      anyD = true;
-      break;
-    }
-  }
-  if (!anyD) return picks.map(() => 0n);
-
-  // If the all-cap total (over D>0 picks only) fits in availableStake, the
-  // caps are the binding constraint for those picks — λ → 0 and each D>0
-  // pick gets its cap. D=0 picks always stay at zero (water-filling math:
-  // their reward doesn't depend on A_i, so allocating to them is a pure
-  // loss versus any other use of the budget — including leaving it idle).
-  let effectiveCapsSum = 0n;
-  for (const p of picks) {
-    if (p.D > 0n && p.R > 0n) effectiveCapsSum += p.cap;
-  }
-  if (effectiveCapsSum <= availableStake) {
-    return picks.map((p) => (p.D > 0n && p.R > 0n ? p.cap : 0n));
-  }
-
-  // Upper bound for λ: at this value every (unclamped) A_i is exactly 0,
-  // because sqrt(R × D × LAMBDA_SCALE / hi) = D. Above this λ the sum is
-  // strictly 0, so the answer is bracketed at or below hi.
-  //
-  // We must use CEIL division here. Floor-div on (R × LAMBDA_SCALE) / D
-  // can return a value strictly below the true zero-allocation threshold:
-  // bisection then settles on a λ where unclamped sqrt(R × D × SCALE / λ)
-  // is still > D, producing a positive A_i that the loop reports as
-  // "within budget" even when availableStake is 1 wei. Ceil-div guarantees
-  // sqrt(R × D × SCALE / hi) ≤ D for every pick → total at hi is 0 →
-  // the bracket is honest.
-  let hi = 1n;
-  for (const { R, D } of picks) {
-    if (D > 0n && R > 0n) {
-      // Ceil-div: ceil((R × LAMBDA_SCALE) / D) = (R × LAMBDA_SCALE + D − 1) / D.
-      const marginalAtZeroScaled = (R * LAMBDA_SCALE + D - 1n) / D;
-      if (marginalAtZeroScaled > hi) hi = marginalAtZeroScaled;
-    }
-  }
-  let lo = 1n;
-
-  // 80 iterations of bisection over a ~10^36-wide bracket gives ~10^-24
-  // precision on the BigInt λ — far more than needed for wei-scale outputs.
-  for (let i = 0; i < 80; i++) {
-    if (hi - lo < 2n) break;
-    const mid = (lo + hi) / 2n;
-    const total = totalAllocatedAtLambda(picks, mid);
-    if (total > availableStake) {
-      // Allocations too large — need tighter λ.
-      lo = mid + 1n;
-    } else {
-      // Allocations fit — try a looser λ to see if we can give more.
-      hi = mid;
-    }
-  }
-
-  return allocationAtLambda(picks, hi);
-}
