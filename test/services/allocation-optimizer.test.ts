@@ -446,6 +446,237 @@ describe('AllocationOptimizer.run', () => {
     );
   });
 
+  it('falls back to per-deployment status fetch when bulk query is missing entries', async () => {
+    // Regression: user-reported that two of their current allocations
+    // (high R, healthy + synced per pre_epoch_health_check) were getting
+    // unallocate actions even though their marginal-APR analysis put them
+    // firmly at cap. Root cause: graph-node's bulk indexingStatuses query
+    // returned partial results for a ~297-deployment candidate list — the
+    // missing statuses were silently treated as unsynced/unhealthy and
+    // dropped from the candidate pool.
+    //
+    // Fix: per-deployment fallback via getDeploymentHealth recovers any
+    // candidate the bulk query left out, so high-R deployments stay in
+    // the optimization pool.
+    //
+    // Test shape: 3 signalled candidates. The bulk indexingStatuses
+    // returns statuses for only 2 of them. The third is reachable via
+    // per-deployment getDeploymentHealth. Without the fallback the third
+    // would be filtered out (candidatesAfterFilter === 2). With the
+    // fallback all three survive (candidatesAfterFilter === 3) and the
+    // fallback warning fires.
+    const depA = deployment({ id: Q.RUNNING, signal: GRT(50_000n), staked: GRT(1n) });
+    const depB = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const depC = deployment({ id: Q.LOW, signal: GRT(50_000n), staked: GRT(1n) });
+    const statusA = indexingStatus({ id: Q.RUNNING });
+    const statusB = indexingStatus({ id: Q.OK });
+    const statusC = indexingStatus({ id: Q.LOW });
+
+    // Track how the fakes were called so we can also assert the fallback
+    // was actually invoked (not just that the candidate happened to make
+    // it through some other path).
+    const bulkCallIds: string[][] = [];
+    const perDeploymentCalls: string[] = [];
+
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [depA, depB, depC],
+        networkParams: networkParams(),
+      }),
+      // Inline fake: bulk omits Q.LOW; per-deployment knows about it.
+      graphNodeClient: {
+        async getIndexingStatuses(ids) {
+          bulkCallIds.push((ids ?? []).slice());
+          // Drop Q.LOW from the bulk response to simulate graph-node's
+          // partial-results behavior under large candidate lists.
+          const all = [statusA, statusB, statusC];
+          return all.filter(
+            (s) =>
+              s.subgraph !== Q.LOW &&
+              (ids === undefined || ids.includes(s.subgraph)),
+          );
+        },
+        async getDeploymentHealth(id) {
+          perDeploymentCalls.push(id);
+          if (id === Q.RUNNING) return statusA;
+          if (id === Q.OK) return statusB;
+          if (id === Q.LOW) return statusC;
+          return null;
+        },
+        async getEntityCount() {
+          return null;
+        },
+      },
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // Without the fix: candidatesAfterFilter === 2 (Q.LOW dropped because
+    // its bulk status was missing and the sync/health gate treated
+    // undefined as unsynced/unhealthy).
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      3,
+      `expected all 3 candidates to survive the filter via per-deployment ` +
+        `fallback; if 2, the bulk-missing → silent-drop bug is back. ` +
+        `bulkCallIds=${JSON.stringify(bulkCallIds)} perDeploymentCalls=${JSON.stringify(
+          perDeploymentCalls,
+        )}`,
+    );
+
+    // The fallback must have actually been invoked for the missing id —
+    // not just an unrelated code path that happened to include the
+    // candidate.
+    assert.ok(
+      perDeploymentCalls.includes(Q.LOW),
+      `expected getDeploymentHealth to be called for the missing-status candidate; ` +
+        `got perDeploymentCalls=${JSON.stringify(perDeploymentCalls)}`,
+    );
+
+    // And the user-visible warning must fire so operators can correlate
+    // "bulk query incomplete" with the recovery in their logs.
+    assert.ok(
+      result.warnings.some((w) => w.includes('per-deployment fallback')),
+      `expected per-deployment fallback warning; got: ${JSON.stringify(result.warnings)}`,
+    );
+
+    // All three should appear in proposedAllocations (gas floor disabled).
+    const ids = result.proposedAllocations.map((p) => p.deploymentId);
+    assert.ok(
+      ids.includes(Q.LOW),
+      `expected recovered candidate in proposedAllocations; got ${JSON.stringify(ids)}`,
+    );
+  });
+
+  it('prioritizes current allocations over signalled-only candidates in fallback', async () => {
+    // Audit Medium regression: when graph-node's bulk indexingStatuses query
+    // returns nothing (severe partial response), the per-deployment fallback
+    // cap (50) used to be applied in candidateIdList order — signalled
+    // deployments first, then whitelist, then currents. With > 50 missing
+    // statuses the fallback budget would be consumed by signalled candidates
+    // while current allocations remained without status, failing the
+    // health/sync gate and emitting `unallocate` actions — exactly the bug
+    // the fallback was meant to prevent.
+    //
+    // Fix prioritizes missing IDs by source: currents → whitelist → other.
+    // The first 50 fallback calls always cover the operator's existing
+    // allocations before any signalled-only candidate.
+    //
+    // Test shape: 60 signalled-only deployments + 10 currents (also
+    // signalled, so they appear once). Bulk indexingStatuses returns
+    // nothing. Per-deployment getDeploymentHealth returns a healthy status
+    // for everyone. Without prioritization the cap would drop some currents;
+    // with prioritization all 10 currents get fetched and recovered.
+    const { toQmDeploymentId } = await import('../../src/utils/ipfs.js');
+    const hex = (n: number): string =>
+      `0x${n.toString(16).padStart(64, '0')}`;
+    // 60 signalled-only deployments (ids 0x…0100..0x…013b).
+    const signalledOnlyIds: string[] = [];
+    for (let i = 0; i < 60; i++) signalledOnlyIds.push(toQmDeploymentId(hex(0x100 + i)));
+    // 10 currents (ids 0x…0200..0x…0209). These are also signalled so they
+    // make it into the candidate pool via the signalled track too — same as
+    // real-world: a current allocation is almost always signalled.
+    const currentIds: string[] = [];
+    for (let i = 0; i < 10; i++) currentIds.push(toQmDeploymentId(hex(0x200 + i)));
+
+    const allCandidateIds = [...signalledOnlyIds, ...currentIds];
+
+    const signalledDeployments = allCandidateIds.map((id) =>
+      deployment({ id, signal: GRT(50_000n), staked: GRT(1n) }),
+    );
+    const activeAllocations = currentIds.map((id, i) =>
+      allocation({
+        id: `0x${(i + 1).toString(16).padStart(40, '0')}`,
+        deploymentId: id,
+        allocatedTokens: GRT(10_000n),
+      }),
+    );
+
+    const perDeploymentCalls: string[] = [];
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(10_000_000n).toString() }),
+        signalledDeployments,
+        activeAllocations,
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: {
+        // Bulk returns nothing — simulate the worst case where graph-node's
+        // response was truncated to zero. Every candidate misses bulk.
+        async getIndexingStatuses() {
+          return [];
+        },
+        async getDeploymentHealth(id) {
+          perDeploymentCalls.push(id);
+          // Pretend every deployment is healthy/synced when queried
+          // individually.
+          return indexingStatus({ id });
+        },
+        async getEntityCount() {
+          return null;
+        },
+      },
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // Exactly 50 per-deployment calls — the cap fires.
+    assert.equal(
+      perDeploymentCalls.length,
+      50,
+      `expected exactly 50 per-deployment fallback calls (cap); got ${perDeploymentCalls.length}`,
+    );
+
+    // CORE INVARIANT: every current allocation must have been fallback-fetched.
+    // Without the priority sort this assertion fails: some currents land
+    // past the cap and never get a status, then get silently filtered.
+    for (const id of currentIds) {
+      assert.ok(
+        perDeploymentCalls.includes(id),
+        `expected current allocation ${id} to be fallback-fetched (priority); ` +
+          `got perDeploymentCalls (length ${perDeploymentCalls.length})=${JSON.stringify(
+            perDeploymentCalls,
+          )}`,
+      );
+    }
+
+    // The cap warning must name the skipped count honestly: 70 total
+    // missing - 50 cap = 20 skipped signalled.
+    const capWarning = result.warnings.find((w) =>
+      w.includes('capping per-deployment fallback'),
+    );
+    assert.ok(
+      capWarning,
+      `expected cap-exceeded warning; got: ${JSON.stringify(result.warnings)}`,
+    );
+    assert.ok(
+      capWarning!.includes('70 statuses') &&
+        capWarning!.includes('20 signalled candidates skipped') &&
+        capWarning!.includes('10 current allocations'),
+      `cap warning should report 70 missing / 20 skipped / 10 currents; got: ${capWarning}`,
+    );
+
+    // The summary warning likewise reports the original missing count and
+    // the skipped-by-cap count, not the post-cap truncated number.
+    const summaryWarning = result.warnings.find((w) =>
+      w.includes('per-deployment fallback recovered'),
+    );
+    assert.ok(
+      summaryWarning,
+      `expected summary fallback warning; got: ${JSON.stringify(result.warnings)}`,
+    );
+    assert.ok(
+      summaryWarning!.includes('70') &&
+        summaryWarning!.includes('20 skipped by cap'),
+      `summary should report 70 missing total and 20 skipped; got: ${summaryWarning}`,
+    );
+  });
+
   it('skips a candidate when projected annual reward < 2x gas budget', async () => {
     // Build a deployment that passes minSignal but has tiny signal share so
     // projected rewards are dwarfed by an artificially huge gas budget.

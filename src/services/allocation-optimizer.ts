@@ -583,11 +583,106 @@ export class AllocationOptimizer {
       );
     }
 
+    // Identify candidates that the bulk query didn't return a status for.
+    // graph-node's bulk indexingStatuses may return partial results when the
+    // candidate list is large (response-size / query-complexity limits at the
+    // gateway or graph-node side). The filter below treats a missing status
+    // as "unhealthy + unsynced" and silently drops the candidate — which has
+    // bitten operators on real deployments at cap with healthy + synced state
+    // confirmed via per-deployment health checks. Per-deployment fallbacks
+    // are reliable: each call is a single-element query so size limits don't
+    // come into play.
+    //
+    // Build missing list, prioritized by source. Current allocations and
+    // whitelist entries are the most operator-critical — fall back on them
+    // before generic signalled candidates so a partial bulk response doesn't
+    // silently drop the operator's existing allocations. A current that's
+    // also whitelisted lands in `missingCurrent` (first hit wins); that's
+    // fine — currents are at least as critical as whitelist.
+    const missingCurrent: string[] = [];
+    const missingWhitelist: string[] = [];
+    const missingOther: string[] = [];
+    for (const id of candidateIdList) {
+      if (statusById.has(id)) continue;
+      if (currentByDeployment.has(id)) missingCurrent.push(id);
+      else if (whitelist.has(id)) missingWhitelist.push(id);
+      else missingOther.push(id);
+    }
+    const missingStatusIdsAll = [
+      ...missingCurrent,
+      ...missingWhitelist,
+      ...missingOther,
+    ];
+
+    if (missingStatusIdsAll.length > 0) {
+      // Cap fallback fetches to avoid hammering graph-node when the bulk
+      // query is severely truncated. The cap is well above the expected
+      // worst case (a handful of missing statuses) so it should almost
+      // never fire; when it does, the warning steers the operator toward
+      // shrinking the candidate pool or upgrading graph-node.
+      const FALLBACK_LIMIT = 50;
+      const originalMissing = missingStatusIdsAll.length;
+      let missingStatusIds = missingStatusIdsAll;
+      let skippedFallback = 0;
+      if (missingStatusIds.length > FALLBACK_LIMIT) {
+        skippedFallback = missingStatusIds.length - FALLBACK_LIMIT;
+        missingStatusIds = missingStatusIds.slice(0, FALLBACK_LIMIT);
+      }
+
+      if (skippedFallback > 0) {
+        warnings.push(
+          `graph-node bulk query was missing ${originalMissing} statuses; ` +
+            `capping per-deployment fallback at ${FALLBACK_LIMIT} (prioritizing ` +
+            `${missingCurrent.length} current allocations + ${missingWhitelist.length} whitelist; ` +
+            `${skippedFallback} signalled candidates skipped and will be silently filtered). ` +
+            `Reduce minSignal or lower MAX_ALLOCATIONS to shrink the candidate pool, ` +
+            `or upgrade graph-node to a version with higher response limits.`,
+        );
+      }
+
+      const fallbackResults = await Promise.allSettled(
+        missingStatusIds.map((id) =>
+          this.deps.graphNodeClient.getDeploymentHealth(id, sigOpt),
+        ),
+      );
+      let fallbackHits = 0;
+      let fallbackMisses = 0;
+      for (let i = 0; i < missingStatusIds.length; i++) {
+        const id = missingStatusIds[i]!;
+        const res = fallbackResults[i]!;
+        if (res.status === 'fulfilled' && res.value) {
+          try {
+            const key = normalizeToQm(res.value.subgraph);
+            statusById.set(key, res.value);
+            fallbackHits++;
+          } catch {
+            errors.push(
+              `per-deployment status fallback for ${originalOf(id)} returned ` +
+                `malformed subgraph id ${JSON.stringify(res.value.subgraph)}; skipping.`,
+            );
+          }
+        } else {
+          fallbackMisses++;
+        }
+      }
+      if (fallbackHits > 0 || fallbackMisses > 0 || skippedFallback > 0) {
+        warnings.push(
+          `graph-node bulk indexingStatuses query was missing ${originalMissing} ` +
+            `candidate statuses; per-deployment fallback recovered ${fallbackHits} ` +
+            `(${fallbackMisses} have no graph-node status${skippedFallback > 0 ? `, ${skippedFallback} skipped by cap` : ''}). ` +
+            `Large candidate lists may hit graph-node response limits — recovered ` +
+            `candidates are included in the optimization.`,
+        );
+      }
+    }
+
     // Build pauseById directly from the indexing-status fetch above —
     // single source of truth, no graphman call. When the status fetch
     // failed entirely, every candidate falls back to `paused = false` so
     // the rest of the run still produces a plan instead of incorrectly
-    // excluding everything (the failure is already in `errors`).
+    // excluding everything (the failure is already in `errors`). This
+    // runs *after* the per-deployment fallback above so recovered
+    // statuses contribute the correct `paused` state.
     const pauseById = new Map<string, boolean>();
     for (const id of candidateIdList) {
       pauseById.set(id, isPausedAt(statusById.get(id)));
