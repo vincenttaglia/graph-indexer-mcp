@@ -46,7 +46,12 @@ import type { Config } from '../config.js';
 import type {
   NetworkSubgraphClient,
 } from '../clients/network-subgraph.js';
+import type {
+  Allocation,
+  SubgraphDeployment,
+} from '../types/network.js';
 import { BLOCKS_PER_YEAR } from '../utils/constants.js';
+import { toQmDeploymentId } from '../utils/ipfs.js';
 
 export interface NetworkToolDeps {
   client: NetworkSubgraphClient;
@@ -68,6 +73,43 @@ function asText(payload: unknown) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
   };
+}
+
+/**
+ * Normalize a deployment ID to the Qm (IPFS CIDv0) canonical form for
+ * output. The network subgraph stores deployment IDs as bytes32 (Solidity
+ * storage form); graph-node + graphman + indexer-agent all use the Qm
+ * form natively. Emitting Qm consistently on every MCP tool surface
+ * means clients see one encoding regardless of which upstream produced
+ * the data.
+ *
+ * For network-subgraph responses the input is always canonical bytes32
+ * and the conversion never throws. Falls back to the raw input on any
+ * unexpected shape so the response still includes a correlatable id
+ * (defensive — should never fire in production).
+ */
+function toQmIdOrRaw(id: string): string {
+  try {
+    return toQmDeploymentId(id);
+  } catch {
+    return id;
+  }
+}
+
+/** Convert an allocation's nested deployment id to Qm canonical form. */
+function allocationToQm(a: Allocation): Allocation {
+  return {
+    ...a,
+    subgraphDeployment: {
+      ...a.subgraphDeployment,
+      id: toQmIdOrRaw(a.subgraphDeployment.id),
+    },
+  };
+}
+
+/** Convert a deployment's id to Qm canonical form. */
+function deploymentToQm(d: SubgraphDeployment): SubgraphDeployment {
+  return { ...d, id: toQmIdOrRaw(d.id) };
 }
 
 /**
@@ -125,7 +167,9 @@ export function registerNetworkTools(
         status_filter,
         count: items.length,
         truncated,
-        allocations: items,
+        // Convert each nested deployment id to Qm canonical form before
+        // emitting — see `toQmIdOrRaw` for rationale.
+        allocations: items.map(allocationToQm),
       });
     },
   });
@@ -149,7 +193,15 @@ export function registerNetworkTools(
       if (!deployment) {
         return asText({ deployment_id, found: false });
       }
-      return asText({ deployment_id, found: true, deployment });
+      // Emit the deployment id in Qm canonical form regardless of which
+      // encoding the caller passed in. The echoed `deployment_id` field
+      // is the OPERATOR's input (left untouched); `deployment.id` is the
+      // canonical output.
+      return asText({
+        deployment_id,
+        found: true,
+        deployment: deploymentToQm(deployment),
+      });
     },
   });
 
@@ -175,7 +227,8 @@ export function registerNetworkTools(
         min_signal,
         count: items.length,
         truncated,
-        deployments: items,
+        // Convert each deployment id to Qm canonical form before emitting.
+        deployments: items.map(deploymentToQm),
       });
     },
   });
@@ -215,7 +268,9 @@ export function registerNetworkTools(
         deployment_id,
         count: items.length,
         truncated,
-        allocations: items,
+        // Convert each nested deployment id to Qm canonical form before
+        // emitting.
+        allocations: items.map(allocationToQm),
       });
     },
   });

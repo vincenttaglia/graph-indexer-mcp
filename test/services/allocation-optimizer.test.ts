@@ -435,12 +435,15 @@ describe('AllocationOptimizer.run', () => {
         `if 0, the Qm vs bytes32 key mismatch is back`,
     );
 
-    // The proposal preserves the operator's original ID format (bytes32),
-    // so consumers downstream (indexer-agent action queue, action UI) see
-    // the same shape they configured rather than a denormalized Qm.
+    // Output is always Qm canonical form regardless of which encoding the
+    // operator passed in. Consumers downstream (indexer-agent action queue,
+    // action UI, graph-node + graphman) all use Qm natively, so the MCP
+    // surface emits a single consistent encoding rather than echoing the
+    // operator's input. The id-format conversion is purely an output-side
+    // normalization — tool INPUTS still accept either form.
     assert.ok(
-      result.proposedAllocations.some((p) => p.deploymentId === bytes32Id),
-      `expected candidate proposed with original bytes32 id; got: ${JSON.stringify(
+      result.proposedAllocations.some((p) => p.deploymentId === qmId),
+      `expected candidate proposed with Qm canonical id; got: ${JSON.stringify(
         result.proposedAllocations.map((p) => p.deploymentId),
       )}`,
     );
@@ -1457,6 +1460,81 @@ describe('AllocationOptimizer.run', () => {
       unallocates.length >= 2,
       `expected ≥2 unallocate actions for slot-overflow currents; ` +
         `got ${unallocates.length}`,
+    );
+  });
+
+  it('always emits deployment IDs in Qm form on output, regardless of input encoding (regression: MCP surface consistency)', async () => {
+    // The network subgraph returns deployment IDs in bytes32 form
+    // (Solidity storage); graph-node + graphman + indexer-agent all use
+    // Qm IPFS form natively. To give MCP clients a single consistent
+    // encoding, the optimizer always emits Qm on every output field —
+    // proposedAllocations[].deploymentId AND actions[].deploymentId —
+    // even when the underlying network subgraph emitted bytes32 and the
+    // operator passed bytes32 in their whitelist/frozenlist.
+    //
+    // This test wires the network-subgraph fake to return a bytes32
+    // deployment id (matching real subgraph behavior) and the graph-node
+    // fake to return the matching Qm-form status. It then asserts that
+    // every emitted deploymentId on the optimizer's output starts with
+    // "Qm" — the canonical IPFS CIDv0 prefix.
+    const bytes32Id =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const qmId = 'QmeDLbKHYypURMRigRxSspUm8w5zrDfXc3Skw2PiDxqCFu';
+
+    // Pair a current allocation on the bytes32 id with a fresh signalled
+    // deployment so the diff produces both allocate AND reallocate /
+    // unallocate paths — covering every action emission site.
+    const currentAlloc = allocation({
+      id: '0xliveOne',
+      deploymentId: bytes32Id,
+      allocatedTokens: GRT(50_000n),
+    });
+    const dep = deployment({
+      id: bytes32Id,
+      signal: 1_000n * 10n ** 18n,
+      staked: GRT(1n),
+    });
+
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+        activeAllocations: [currentAlloc],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        // graph-node returns Qm natively — matching real behavior.
+        statuses: [indexingStatus({ id: qmId })],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // Every proposedAllocation must emit Qm on its deploymentId.
+    for (const p of result.proposedAllocations) {
+      assert.ok(
+        p.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on proposedAllocation, got ${p.deploymentId}`,
+      );
+    }
+    // Every action must emit Qm on its deploymentId — covers allocate,
+    // reallocate, and unallocate code paths in diffActions.
+    for (const a of result.actions) {
+      assert.ok(
+        a.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on action (${a.type}), got ${a.deploymentId}`,
+      );
+    }
+    // Sanity: the specific Qm id we computed for the bytes32 input must
+    // appear in the proposal — proves the conversion is the canonical
+    // one, not just any Qm-shaped string.
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === qmId),
+      `expected canonical Qm id ${qmId} in proposedAllocations; got: ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
     );
   });
 

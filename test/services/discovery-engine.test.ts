@@ -449,6 +449,106 @@ describe('DiscoveryEngine scoring', () => {
     );
   });
 
+  it('always emits deployment IDs in Qm form on every output field (regression: MCP surface consistency)', async () => {
+    // The network subgraph returns deployment IDs in bytes32 form;
+    // graph-node + graphman + indexer-agent all use Qm IPFS form
+    // natively. DiscoveryEngine must emit Qm on every user-facing
+    // output — stale[], cleanup[], opportunities[], ruleRecommendations[]
+    // — so MCP clients consistently see one encoding regardless of the
+    // upstream source.
+    //
+    // This test exercises BOTH halves:
+    //   - cleanup half: a stale allocated deployment (graph-node returns
+    //     Qm on `status.subgraph` — already Qm canonical).
+    //   - discovery half: a signalled deployment without allocation
+    //     (network subgraph returns bytes32 on `dep.id` — must be
+    //     normalized at the emission point).
+    const bytes32Cleanup =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const qmCleanup = 'QmeDLbKHYypURMRigRxSspUm8w5zrDfXc3Skw2PiDxqCFu';
+    // A SECOND distinct bytes32 / Qm pair for the discovery side so the
+    // cleanup ↔ discovery assertions don't accidentally key off the same id.
+    const bytes32Discovery =
+      '0x0000000000000000000000000000000000000000000000000000000000000001';
+    // Computed via the project's `toQmDeploymentId` helper.
+    const { toQmDeploymentId } = await import('../../src/utils/ipfs.js');
+    const qmDiscovery = toQmDeploymentId(bytes32Discovery);
+
+    const cleanupAlloc = allocation({
+      id: '0xstale',
+      deploymentId: bytes32Cleanup,
+      allocatedTokens: GRT(10_000n),
+    });
+    const discoveryDep = deployment({
+      id: bytes32Discovery,
+      signal: GRT(50_000n),
+    });
+
+    const engine = new DiscoveryEngine({
+      networkClient: fakeNetworkClient({
+        // discovery half candidate: signalled but not allocated.
+        signalledDeployments: [discoveryDep],
+        // cleanup half: an active allocation on a different (un-signalled)
+        // deployment so it's classified `no_signal` stale.
+        activeAllocations: [cleanupAlloc],
+        networkParams: networkParams(),
+      }),
+      qosClient: fakeQosClient(),
+      graphNodeClient: fakeGraphNodeClient({
+        // graph-node returns Qm natively for cleanup's local status; the
+        // discovery candidate isn't synced locally so no status row.
+        statuses: [indexingStatus({ id: qmCleanup, synced: true })],
+      }),
+      postgresClient: fakePostgresClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await engine.run(baseConfig());
+
+    // Every stale entry's deploymentId must be Qm.
+    for (const s of result.stale) {
+      assert.ok(
+        s.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on stale entry, got ${s.deploymentId}`,
+      );
+    }
+    // Every cleanup action's deploymentId must be Qm.
+    for (const c of result.cleanup) {
+      assert.ok(
+        c.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on cleanup action, got ${c.deploymentId}`,
+      );
+    }
+    // Every opportunity's deploymentId must be Qm.
+    for (const o of result.opportunities) {
+      assert.ok(
+        o.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on opportunity, got ${o.deploymentId}`,
+      );
+    }
+    // Every ruleRecommendation's deploymentId must be Qm.
+    for (const r of result.ruleRecommendations) {
+      assert.ok(
+        r.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on ruleRecommendation, got ${r.deploymentId}`,
+      );
+    }
+
+    // Sanity: the canonical Qm conversions match what we computed
+    // upfront — proves the normalization isn't just any Qm-shaped string.
+    assert.ok(
+      result.stale.some((s) => s.deploymentId === qmCleanup),
+      `expected canonical Qm id ${qmCleanup} in stale; got: ${JSON.stringify(
+        result.stale.map((s) => s.deploymentId),
+      )}`,
+    );
+    assert.ok(
+      result.opportunities.some((o) => o.deploymentId === qmDiscovery),
+      `expected canonical Qm id ${qmDiscovery} in opportunities; got: ${JSON.stringify(
+        result.opportunities.map((o) => o.deploymentId),
+      )}`,
+    );
+  });
+
   it('with identical signal/volume/cost, candidate with higher APR wins the top slot', async () => {
     // Two candidates with identical signal/volume/entityCount. APR depends on
     // the existing total stake (lower existing stake → higher per-unit APR).
