@@ -448,6 +448,126 @@ describe('HealthMonitor recovery heuristics', () => {
   });
 });
 
+describe('HealthMonitor aboveEpochStart derivation', () => {
+  it('populates aboveEpochStart from latestBlock vs epochStartBlock', async () => {
+    // Three allocations on the same chain so they share one epochStartBlock:
+    //   A: latestBlock=EPOCH_START_BLOCK+100 → aboveEpochStart=true
+    //   B: latestBlock=EPOCH_START_BLOCK-100 → aboveEpochStart=false
+    //   C: no latestBlock reported          → aboveEpochStart=null
+    const allocA = mkAlloc('aes-a');
+    const allocB = mkAlloc('aes-b');
+    const allocC = mkAlloc('aes-c');
+
+    const statusA = mkStatus('aes-a', {
+      health: 'healthy',
+      latestBlock: EPOCH_START_BLOCK + 100,
+    });
+    const statusB = mkStatus('aes-b', {
+      health: 'healthy',
+      latestBlock: EPOCH_START_BLOCK - 100,
+    });
+    // C: build a status with NO latestBlock at all (omit the field on the
+    // single chain row). indexingStatus() leaves latestBlock undefined when
+    // its input is undefined, which is exactly what we want — null latestBlock
+    // on the AllocationHealth must propagate to aboveEpochStart: null.
+    const statusC = indexingStatus({
+      id: 'dep_aes-c',
+      health: 'healthy',
+      chain: CHAIN,
+      // latestBlock intentionally omitted
+    });
+
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [allocA, allocB, allocC],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statusById: {
+          dep_aes_a: statusA,
+          [statusA.subgraph]: statusA,
+          [statusB.subgraph]: statusB,
+          [statusC.subgraph]: statusC,
+        },
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({ indexerAddress: INDEXER, urgencyThresholdHours: 6 });
+
+    const byId = new Map(res.allocations.map((ah) => [ah.allocationId, ah]));
+    const a = byId.get('aes-a');
+    const b = byId.get('aes-b');
+    const c = byId.get('aes-c');
+    assert.ok(a && b && c, 'expected health entries for all three allocations');
+    assert.equal(a!.aboveEpochStart, true, 'A: latest > epoch start → true');
+    assert.equal(b!.aboveEpochStart, false, 'B: latest < epoch start → false');
+    assert.equal(c!.aboveEpochStart, null, 'C: latestBlock null → null');
+    // Sanity: latestBlock on C truly is null (the input we constructed).
+    assert.equal(c!.latestBlock, null);
+  });
+
+  it('sets aboveEpochStart=null on sentinel paths (statusMissing)', async () => {
+    // graph-node returns no row → sentinel return path in classifyAllocation.
+    // aboveEpochStart must be null (unknown), not false.
+    const alloc = mkAlloc('aes-missing');
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [alloc],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      graphNodeClient: fakeGraphNodeClient({ statusById: {} }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({ indexerAddress: INDEXER, urgencyThresholdHours: 6 });
+    const ah = res.allocations[0]!;
+    assert.equal(ah.statusMissing, true);
+    assert.equal(ah.aboveEpochStart, null);
+  });
+
+  it('does not gate classify() on synced (synced:false + above epoch start still closable)', async () => {
+    // Construct a healthy allocation with synced=false but latestBlock above
+    // epoch start. Per the documented semantic, `synced` is informational —
+    // classification depends only on health + latestBlock vs epochStartBlock.
+    // Expectation: closability='A' (Path A — rebalance), NOT 'none'.
+    const alloc = mkAlloc('ns-1');
+    const status = indexingStatus({
+      id: 'dep_ns-1',
+      health: 'healthy',
+      synced: false, // intentionally false — must not affect closability
+      chain: CHAIN,
+      latestBlock: EPOCH_START_BLOCK + 100,
+    });
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [alloc],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      graphNodeClient: fakeGraphNodeClient({ statusById: { [status.subgraph]: status } }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({ indexerAddress: INDEXER, urgencyThresholdHours: 6 });
+    const ah = res.allocations[0]!;
+    assert.equal(ah.synced, false, 'sanity: synced flag preserved as informational mirror');
+    assert.equal(ah.aboveEpochStart, true);
+    assert.equal(ah.closability, 'A', 'closability must NOT be gated on synced');
+  });
+});
+
 describe('HealthMonitor missing-status distinction (Option B: statusMissing flag)', () => {
   it('sets statusMissing=true when graph-node returns no row for the deployment', async () => {
     // Build a monitor where the fake graph-node client knows about NO
