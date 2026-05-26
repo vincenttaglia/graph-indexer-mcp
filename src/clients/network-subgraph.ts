@@ -17,6 +17,7 @@
 
 import { createGraphqlClient, type TypedGraphqlClient } from '../utils/graphql-client.js';
 import { TtlCache } from '../utils/cache.js';
+import { toBytes32DeploymentId } from '../utils/ipfs.js';
 import type {
   Allocation,
   AllocationStatus,
@@ -358,18 +359,23 @@ export function createNetworkSubgraphClient(
     deploymentId: string,
     callOpts?: NetworkSubgraphCallOpts,
   ): Promise<SubgraphDeployment | null> {
-    const key = deploymentId.toLowerCase();
+    // Network subgraph stores SubgraphDeployment.id as bytes32. Normalize
+    // here so callers can pass either bytes32 or Qm form — passing a Qm
+    // straight through silently returns null.
+    const bytes32Id = toBytes32DeploymentId(deploymentId);
     return deploymentCache.getOrFetch(
-      key,
+      bytes32Id,
       async (fetchOpts) => {
         const data = await gql.request<DeploymentResponse>(
           GET_DEPLOYMENT_QUERY,
-          { id: deploymentId },
+          { id: bytes32Id },
           fetchOpts.signal ? { signal: fetchOpts.signal } : undefined,
         );
         return data.subgraphDeployment ?? null;
       },
-      callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
+      callOpts?.signal
+        ? { signal: callOpts.signal, keyLabel: bytes32Id }
+        : { keyLabel: bytes32Id },
     );
   }
 
@@ -429,11 +435,15 @@ export function createNetworkSubgraphClient(
     deploymentId: string,
     callOpts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<Allocation>> {
-    const key = deploymentId.toLowerCase();
+    // Network subgraph stores `Allocation.subgraphDeployment.id` as bytes32
+    // (the `where.subgraphDeployment` filter — see buildAllocationFilter).
+    // Normalize here so callers can pass either bytes32 or Qm form —
+    // passing a Qm straight through silently returns 0 allocations.
+    const bytes32Id = toBytes32DeploymentId(deploymentId);
     return deploymentAllocationsCache.getOrFetch(
-      key,
+      bytes32Id,
       async (fetchOpts) => {
-        const where = buildAllocationFilter({ deployment: deploymentId, status: 'Active' });
+        const where = buildAllocationFilter({ deployment: bytes32Id, status: 'Active' });
         return paginate<Allocation>(async (skip) => {
           const data = await gql.request<AllocationsResponse>(
             GET_ALLOCATIONS_QUERY,
@@ -443,7 +453,9 @@ export function createNetworkSubgraphClient(
           return data.allocations;
         }, fetchOpts.signal);
       },
-      callOpts?.signal ? { signal: callOpts.signal, keyLabel: key } : { keyLabel: key },
+      callOpts?.signal
+        ? { signal: callOpts.signal, keyLabel: bytes32Id }
+        : { keyLabel: bytes32Id },
     );
   }
 

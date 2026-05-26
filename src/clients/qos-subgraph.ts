@@ -26,6 +26,7 @@
  */
 
 import { createGraphqlClient, type TypedGraphqlClient } from '../utils/graphql-client.js';
+import { toQmDeploymentId } from '../utils/ipfs.js';
 import type {
   DeploymentVolumeRow,
   IndexerQoSRow,
@@ -578,11 +579,16 @@ export function createQosSubgraphClient(
       // so skip-pagination is fine. Broad (no deploymentId) path can blow
       // past the gateway's skip cap — use cursor pagination so we don't
       // silently drop deployments from the network-wide volume scan.
+      // QoS Oracle stores `SubgraphDeployment.id` as the IPFS hash
+      // (Qm/CIDv0 form). Normalize so a bytes32 caller — symmetric to the
+      // network-subgraph case — doesn't silently match zero rows.
+      const qmDeploymentId =
+        deploymentId !== undefined ? toQmDeploymentId(deploymentId) : undefined;
       const { rows: raw, truncated } =
-        deploymentId !== undefined
+        qmDeploymentId !== undefined
           ? await paginate<RawQueryVolumePoint>(
               QUERY_VOLUME_BY_DEPLOYMENT,
-              { earliestDay, deploymentId },
+              { earliestDay, deploymentId: qmDeploymentId },
               'queryDailyDataPoints',
               callOpts?.signal,
             )
@@ -616,11 +622,16 @@ export function createQosSubgraphClient(
       // (indexer, deployment, day)); network-wide QoS draws from
       // IndexerDailyDataPoint (one row per (indexer, day)). Both share the
       // same metric field names so the aggregator is shared.
+      // Same normalization as getQueryVolume above — QoS Oracle expects
+      // the Qm form for `subgraphDeployment`. Symmetric to the
+      // network-subgraph bytes32 normalization.
+      const qmDeploymentId =
+        deploymentId !== undefined ? toQmDeploymentId(deploymentId) : undefined;
       const { rows: raw, truncated } =
-        deploymentId !== undefined
+        qmDeploymentId !== undefined
           ? await paginate<RawIndexerOrAllocationPoint>(
               ALLOCATION_QOS_QUERY,
-              { earliestDay, indexer, deploymentId },
+              { earliestDay, indexer, deploymentId: qmDeploymentId },
               'allocationDailyDataPoints',
               callOpts?.signal,
             )
