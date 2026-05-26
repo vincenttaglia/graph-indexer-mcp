@@ -21,6 +21,24 @@ import {
 const INDEXER = '0x0000000000000000000000000000000000000001';
 const GRT = (n: bigint): bigint => n * 10n ** 18n;
 
+// Real Qm deployment IDs (CIDv0 of bytes32 0x000...01, 0x000...02, …). The
+// optimizer's `normalizeToQm` helper is strict — it throws on anything that
+// isn't valid bytes32 or Qm — so test fixtures must use real Qm IDs rather
+// than synthetic `Qm_xxx` strings. Each constant maps 1:1 to a previously
+// synthetic fixture id so test semantics are unchanged.
+const Q = {
+  RUNNING: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh52',   // 0x…01
+  PAUSED: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh53',    // 0x…02
+  LOW: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh54',       // 0x…03
+  OK: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh55',        // 0x…04
+  WL_LOW: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh56',    // 0x…05
+  BOTH: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh57',      // 0x…06
+  NOW_LOW: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh58',   // 0x…07
+  FROZEN: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh59',    // 0x…08
+  RISK: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh5A',      // 0x…09
+  DUST: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh5B',      // 0x…0a
+} as const;
+
 function baseConfig(over: Partial<OptimizerConfig> = {}): OptimizerConfig {
   return {
     indexerAddress: INDEXER,
@@ -131,8 +149,8 @@ describe('AllocationOptimizer.run', () => {
     // comes from graph-node's indexingStatuses.paused. Prove the new path
     // by wiring graphmanClient: undefined and asserting the paused
     // deployment is filtered out and never proposed for allocation.
-    const okDep = deployment({ id: 'Qm_running', signal: GRT(50_000n), staked: GRT(1n) });
-    const pausedDep = deployment({ id: 'Qm_paused', signal: GRT(50_000n), staked: GRT(1n) });
+    const okDep = deployment({ id: Q.RUNNING, signal: GRT(50_000n), staked: GRT(1n) });
+    const pausedDep = deployment({ id: Q.PAUSED, signal: GRT(50_000n), staked: GRT(1n) });
     const opt = new AllocationOptimizer({
       networkClient: fakeNetworkClient({
         indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
@@ -140,8 +158,8 @@ describe('AllocationOptimizer.run', () => {
       }),
       graphNodeClient: fakeGraphNodeClient({
         statuses: [
-          indexingStatus({ id: 'Qm_running' }),
-          indexingStatus({ id: 'Qm_paused', paused: true }),
+          indexingStatus({ id: Q.RUNNING }),
+          indexingStatus({ id: Q.PAUSED, paused: true }),
         ],
       }),
       // No graphmanClient — proves the optimizer runs end-to-end without
@@ -152,11 +170,11 @@ describe('AllocationOptimizer.run', () => {
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
     const ids = result.proposedAllocations.map((p) => p.deploymentId);
     assert.ok(
-      ids.includes('Qm_running'),
+      ids.includes(Q.RUNNING),
       `expected Qm_running in plan; got ${JSON.stringify(ids)}`,
     );
     assert.ok(
-      !ids.includes('Qm_paused'),
+      !ids.includes(Q.PAUSED),
       `paused deployment must be excluded; got ${JSON.stringify(ids)}`,
     );
     // Sanity: no graphman-related errors should appear in the result —
@@ -170,12 +188,12 @@ describe('AllocationOptimizer.run', () => {
   });
 
   it('drops candidates below minSignal unless whitelisted', async () => {
-    const lowSig = deployment({ id: 'Qm_low', signal: GRT(10n), staked: GRT(1n) });
-    const okSig = deployment({ id: 'Qm_ok', signal: GRT(10_000n), staked: GRT(1n) });
-    const wlLow = deployment({ id: 'Qm_wl_low', signal: GRT(10n), staked: GRT(1n) });
+    const lowSig = deployment({ id: Q.LOW, signal: GRT(10n), staked: GRT(1n) });
+    const okSig = deployment({ id: Q.OK, signal: GRT(10_000n), staked: GRT(1n) });
+    const wlLow = deployment({ id: Q.WL_LOW, signal: GRT(10n), staked: GRT(1n) });
     const cfg = baseConfig({
       minSignal: GRT(5_000n),
-      whitelist: ['Qm_wl_low'],
+      whitelist: [Q.WL_LOW],
       gasEstimateGrt: GRT(0n), // disable gas floor so we test the candidate filter in isolation
     });
     const opt = new AllocationOptimizer({
@@ -184,12 +202,12 @@ describe('AllocationOptimizer.run', () => {
         // signalledDeployments query is filtered server-side by minSignal, so
         // the low-signal one wouldn't normally arrive. We include the
         // whitelisted one via deploymentsById for hydration.
-        deploymentsById: { Qm_wl_low: wlLow },
+        deploymentsById: { [Q.WL_LOW]: wlLow },
       }),
       graphNodeClient: fakeGraphNodeClient({
         statuses: [
-          indexingStatus({ id: 'Qm_ok' }),
-          indexingStatus({ id: 'Qm_wl_low' }),
+          indexingStatus({ id: Q.OK }),
+          indexingStatus({ id: Q.WL_LOW }),
         ],
       }),
       graphmanClient: fakeGraphmanClient(),
@@ -199,24 +217,24 @@ describe('AllocationOptimizer.run', () => {
     const result = await opt.run(cfg);
     const ids = result.proposedAllocations.map((p) => p.deploymentId).sort();
     // wl_low survives (whitelist exempt), ok_sig survives. low (no whitelist) dropped.
-    assert.deepEqual(ids, ['Qm_ok', 'Qm_wl_low']);
+    assert.deepEqual(ids, [Q.OK, Q.WL_LOW]);
   });
 
   it('blacklist beats whitelist when both set', async () => {
-    const dep = deployment({ id: 'Qm_both', signal: GRT(100_000n) });
+    const dep = deployment({ id: Q.BOTH, signal: GRT(100_000n) });
     const opt = new AllocationOptimizer({
       networkClient: fakeNetworkClient({
         signalledDeployments: [dep],
       }),
       graphNodeClient: fakeGraphNodeClient({
-        statuses: [indexingStatus({ id: 'Qm_both' })],
+        statuses: [indexingStatus({ id: Q.BOTH })],
       }),
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await opt.run(
-      baseConfig({ whitelist: ['Qm_both'], blacklist: ['Qm_both'] }),
+      baseConfig({ whitelist: [Q.BOTH], blacklist: [Q.BOTH] }),
     );
     assert.equal(result.proposedAllocations.length, 0);
   });
@@ -227,10 +245,10 @@ describe('AllocationOptimizer.run', () => {
     // filter when the indexer already has an allocation on it. The candidate
     // must survive filtering AND land in `proposedAllocations`, AND must NOT
     // produce an `unallocate` action.
-    const lowDep = deployment({ id: 'Qm_now_low', signal: GRT(10n), staked: GRT(50n) });
+    const lowDep = deployment({ id: Q.NOW_LOW, signal: GRT(10n), staked: GRT(50n) });
     const alloc = allocation({
       id: '0xalloc1',
-      deploymentId: 'Qm_now_low',
+      deploymentId: Q.NOW_LOW,
       allocatedTokens: GRT(50n),
     });
     const opt = new AllocationOptimizer({
@@ -239,10 +257,10 @@ describe('AllocationOptimizer.run', () => {
         // signalledDeployments. Hydration via deploymentsById fills it in.
         signalledDeployments: [],
         activeAllocations: [alloc],
-        deploymentsById: { Qm_now_low: lowDep },
+        deploymentsById: { [Q.NOW_LOW]: lowDep },
       }),
       graphNodeClient: fakeGraphNodeClient({
-        statuses: [indexingStatus({ id: 'Qm_now_low' })],
+        statuses: [indexingStatus({ id: Q.NOW_LOW })],
       }),
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
@@ -261,7 +279,7 @@ describe('AllocationOptimizer.run', () => {
     assert.equal(result.state.candidatesAfterFilter, 1);
     // Preservation: deployment must appear in proposedAllocations.
     assert.ok(
-      result.proposedAllocations.some((p) => p.deploymentId === 'Qm_now_low'),
+      result.proposedAllocations.some((p) => p.deploymentId === Q.NOW_LOW),
       `expected Qm_now_low in proposedAllocations, got: ${JSON.stringify(
         result.proposedAllocations.map((p) => p.deploymentId),
       )}`,
@@ -270,7 +288,7 @@ describe('AllocationOptimizer.run', () => {
     // filter regressed and the candidate dropped pre-plan, the diff would
     // emit unallocate (current ∋ id, proposed ∌ id).
     const unallocatesForLow = result.actions
-      .filter((a) => a.deploymentId === 'Qm_now_low' && a.type === 'unallocate')
+      .filter((a) => a.deploymentId === Q.NOW_LOW && a.type === 'unallocate')
       .map((a) => ({
         type: a.type,
         deploymentId: a.deploymentId,
@@ -286,37 +304,37 @@ describe('AllocationOptimizer.run', () => {
   });
 
   it('frozen deployment is preserved at current size and reserves a slot', async () => {
-    const dep = deployment({ id: 'Qm_frozen', signal: GRT(50_000n) });
+    const dep = deployment({ id: Q.FROZEN, signal: GRT(50_000n) });
     const alloc = allocation({
       id: '0xfrozen',
-      deploymentId: 'Qm_frozen',
+      deploymentId: Q.FROZEN,
       allocatedTokens: GRT(123_456n),
     });
     const opt = new AllocationOptimizer({
       networkClient: fakeNetworkClient({
         signalledDeployments: [dep],
         activeAllocations: [alloc],
-        deploymentsById: { Qm_frozen: dep },
+        deploymentsById: { [Q.FROZEN]: dep },
       }),
       graphNodeClient: fakeGraphNodeClient({
-        statuses: [indexingStatus({ id: 'Qm_frozen' })],
+        statuses: [indexingStatus({ id: Q.FROZEN })],
       }),
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await opt.run(
-      baseConfig({ frozenlist: ['Qm_frozen'], maxAllocations: 1 }),
+      baseConfig({ frozenlist: [Q.FROZEN], maxAllocations: 1 }),
     );
     // Frozen entry appears in proposal at exact current size.
     const frozenProp = result.proposedAllocations.find(
-      (p) => p.deploymentId === 'Qm_frozen',
+      (p) => p.deploymentId === Q.FROZEN,
     );
     assert.ok(frozenProp);
     assert.equal(frozenProp!.allocatedTokens, GRT(123_456n));
     // No diff actions for frozen.
     assert.equal(
-      result.actions.filter((a) => a.deploymentId === 'Qm_frozen').length,
+      result.actions.filter((a) => a.deploymentId === Q.FROZEN).length,
       0,
     );
   });
@@ -324,14 +342,14 @@ describe('AllocationOptimizer.run', () => {
   it('risky deployment is sized by riskyDeploymentCapPct, not maxAllocationPct', async () => {
     // Pick a single candidate so the signal-share branch lands on the same
     // amount = availableStake, which then gets capped.
-    const dep = deployment({ id: 'Qm_risk', signal: GRT(100_000n), staked: GRT(1n) });
+    const dep = deployment({ id: Q.RISK, signal: GRT(100_000n), staked: GRT(1n) });
     const opt = new AllocationOptimizer({
       networkClient: fakeNetworkClient({
         indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
         signalledDeployments: [dep],
       }),
       graphNodeClient: fakeGraphNodeClient({
-        statuses: [indexingStatus({ id: 'Qm_risk' })],
+        statuses: [indexingStatus({ id: Q.RISK })],
       }),
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
@@ -340,7 +358,7 @@ describe('AllocationOptimizer.run', () => {
     const cfg = baseConfig({
       maxAllocationPct: 0.5,
       riskyDeploymentCapPct: 0.05,
-      riskyDeployments: ['Qm_risk'],
+      riskyDeployments: [Q.RISK],
       gasEstimateGrt: GRT(0n), // skip the gas floor for the assertion
     });
     const result = await opt.run(cfg);
@@ -351,11 +369,78 @@ describe('AllocationOptimizer.run', () => {
     assert.ok(/risky/i.test(prop!.rationale));
   });
 
+  it('handles bytes32-form candidate IDs against Qm-form status responses (regression: §4.1 step 2.1 dropped every candidate)', async () => {
+    // Live reproducer for the deployment-id encoding mismatch.
+    //
+    // The network subgraph stores `SubgraphDeployment.id` as bytes32
+    // (`0x…`), but graph-node's `indexingStatuses.subgraph` field comes
+    // back in Qm (IPFS CIDv0) form. Before the fix, AllocationOptimizer
+    // built `statusById` keyed by the Qm response value, then looked it up
+    // via the bytes32 candidate id — every lookup missed, every candidate
+    // appeared to have "no status available", the §4.1 step 2.1 sync /
+    // health gate filtered them all out, candidatesAfterFilter dropped to
+    // 0, and the optimizer recommended closing every existing allocation
+    // as "no longer worth keeping".
+    //
+    // The id pair below (0xebdb…459c ↔ Qm…CFu) is a real bytes32/Qm pair
+    // computed via the project's `toQmDeploymentId` helper. If the bug
+    // regresses, candidatesAfterFilter falls to 0 and the assertion below
+    // catches it.
+    const bytes32Id =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const qmId = 'QmeDLbKHYypURMRigRxSspUm8w5zrDfXc3Skw2PiDxqCFu';
+
+    const dep = deployment({
+      id: bytes32Id,
+      signal: 100_000n * 10n ** 18n,
+      staked: GRT(1n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        // signalled deployment carries the bytes32 id, matching what the
+        // network subgraph really returns.
+        signalledDeployments: [dep],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        // Fake returns the status with the Qm id, matching real graph-node
+        // behavior. Before the fix, statusById would be keyed by qmId and
+        // miss every lookup against the bytes32 candidate.
+        statuses: [indexingStatus({ id: qmId })],
+      }),
+      qosClient: fakeQosClient(),
+      // graphmanClient omitted — services should work without it.
+      agentClient: fakeAgentClient(),
+    });
+
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // Without the fix: candidatesAfterFilter === 0 (status missing → §4.1
+    // step 2.1 sync/health gate drops the candidate).
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      1,
+      `expected the bytes32 candidate to survive the filter via Qm-normalized status lookup; ` +
+        `if 0, the Qm vs bytes32 key mismatch is back`,
+    );
+
+    // The proposal preserves the operator's original ID format (bytes32),
+    // so consumers downstream (indexer-agent action queue, action UI) see
+    // the same shape they configured rather than a denormalized Qm.
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === bytes32Id),
+      `expected candidate proposed with original bytes32 id; got: ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
+    );
+  });
+
   it('skips a candidate when projected annual reward < 2x gas budget', async () => {
     // Build a deployment that passes minSignal but has tiny signal share so
     // projected rewards are dwarfed by an artificially huge gas budget.
     const dep = deployment({
-      id: 'Qm_dust',
+      id: Q.DUST,
       signal: GRT(5_000n), // > minSignal of 1k GRT, but tiny vs totalSignal below
       staked: GRT(1_000_000n),
     });
@@ -369,7 +454,7 @@ describe('AllocationOptimizer.run', () => {
         }),
       }),
       graphNodeClient: fakeGraphNodeClient({
-        statuses: [indexingStatus({ id: 'Qm_dust' })],
+        statuses: [indexingStatus({ id: Q.DUST })],
       }),
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
@@ -382,6 +467,78 @@ describe('AllocationOptimizer.run', () => {
     assert.ok(
       result.warnings.some((w) => /2× gas budget/.test(w)),
       `expected gas-floor warning, got: ${JSON.stringify(result.warnings)}`,
+    );
+  });
+
+  it('skips malformed config IDs with a warning instead of poisoning the graph-node batch (regression: lenient normalizeToQm fell back to raw, tainting candidateIdList)', async () => {
+    // Audit High: before the fix, `normalizeToQm` caught conversion
+    // failures and silently fell back to the raw, case-preserved input.
+    // That raw value entered `candidateIdList` and was passed to
+    // `graphNodeClient.getIndexingStatuses(...)`. The graph-node client
+    // rejects the entire batch on a single invalid ID — so any typo in
+    // `whitelist`, `frozenlist`, `riskyDeployments`, or any malformed
+    // upstream deployment ID would cause `statusesRes` to reject,
+    // `statusById` to stay empty, the §4.1 health/sync gate to drop
+    // every candidate, and the optimizer to recommend closing every
+    // allocation (the "close everything" failure).
+    //
+    // Strict behavior under test:
+    //   - A `GARBAGE` whitelist entry produces a per-entry warning naming
+    //     the bad input and is dropped from the whitelist.
+    //   - A valid sibling deployment in the same run still surfaces in
+    //     `proposedAllocations` (proving the bad entry did not poison the
+    //     batch).
+    const goodDep = deployment({
+      id: Q.OK,
+      signal: GRT(50_000n),
+      staked: GRT(1n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [goodDep],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: Q.OK })],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        whitelist: ['GARBAGE', Q.OK],
+        frozenlist: ['ALSO_BAD'],
+        gasEstimateGrt: GRT(0n),
+      }),
+    );
+
+    // Per-source warning naming the bad whitelist entry.
+    assert.ok(
+      result.warnings.some(
+        (w) => /Whitelist/i.test(w) && /GARBAGE/.test(w),
+      ),
+      `expected a Whitelist warning naming GARBAGE, got: ${JSON.stringify(result.warnings)}`,
+    );
+    // Per-source warning naming the bad frozenlist entry.
+    assert.ok(
+      result.warnings.some(
+        (w) => /Frozenlist/i.test(w) && /ALSO_BAD/.test(w),
+      ),
+      `expected a Frozenlist warning naming ALSO_BAD, got: ${JSON.stringify(result.warnings)}`,
+    );
+    // The good candidate still flows through end-to-end despite the bad
+    // siblings — proving the batch wasn't poisoned.
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      1,
+      `good candidate should still be processed despite bad whitelist/frozenlist entries`,
+    );
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === Q.OK),
+      `expected the valid candidate to land in proposedAllocations; got: ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
     );
   });
 });

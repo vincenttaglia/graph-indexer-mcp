@@ -20,6 +20,25 @@ import {
 const INDEXER = '0x0000000000000000000000000000000000000001';
 const GRT = (n: bigint): bigint => n * 10n ** 18n;
 
+// Real Qm deployment IDs (CIDv0 of bytes32 0x000...01, 0x000...02, …).
+// `normalizeDeploymentId` is strict — it throws on anything that isn't valid
+// bytes32 or Qm — so test fixtures must use real Qm IDs rather than the
+// synthetic `Qm_xxx` placeholders the pre-audit fixtures used.
+const Q = {
+  STALE: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh52',           // 0x…01
+  DROP_TEST: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh53',       // 0x…02
+  NODE_NULL: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh54',       // 0x…03
+  FROZEN: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh55',          // 0x…04
+  OK: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh56',              // 0x…05
+  DENIED: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh57',          // 0x…06
+  BOTH: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh58',            // 0x…07
+  A: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh59',               // 0x…08
+  B: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh5A',               // 0x…09
+  C: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh5B',               // 0x…0a
+  HI_APR: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh5C',          // 0x…0b
+  LO_APR: 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh5D',          // 0x…0c
+} as const;
+
 function baseConfig(over: Partial<DiscoveryConfig> = {}): DiscoveryConfig {
   return {
     indexerAddress: INDEXER,
@@ -37,7 +56,7 @@ describe('DiscoveryEngine cleanup', () => {
   it('emits steps in the canonical order for a stale allocated deployment', async () => {
     // unallocated reason needs hasSignal=false. Use a synced, unsignalled
     // deployment that the indexer DOES have an allocation on.
-    const depId = 'Qm_stale';
+    const depId = Q.STALE;
     const alloc = allocation({
       id: '0xstale',
       deploymentId: depId,
@@ -70,7 +89,7 @@ describe('DiscoveryEngine cleanup', () => {
   });
 
   it('never includes drop in cleanup steps', async () => {
-    const depId = 'Qm_drop_test';
+    const depId = Q.DROP_TEST;
     const alloc = allocation({
       id: '0xd',
       deploymentId: depId,
@@ -113,7 +132,7 @@ describe('DiscoveryEngine cleanup', () => {
     // graph-node returning null for `node` on a still-allocated deployment.
     // Expectation: no orphaned classification, no cleanup action, no
     // graphman dependency.
-    const depId = 'Qm_node_null_not_orphaned';
+    const depId = Q.NODE_NULL;
     const alloc = allocation({
       id: '0xalloc',
       deploymentId: depId,
@@ -167,7 +186,7 @@ describe('DiscoveryEngine cleanup', () => {
   });
 
   it('frozen deployment appears in stale[] but produces NO cleanup action; warning emitted', async () => {
-    const depId = 'Qm_frozen';
+    const depId = Q.FROZEN;
     const alloc = allocation({
       id: '0xf',
       deploymentId: depId,
@@ -205,9 +224,9 @@ describe('DiscoveryEngine cleanup', () => {
 
 describe('DiscoveryEngine discovery filter', () => {
   it('drops deployments with deniedAt !== 0 and emits aggregate warning', async () => {
-    const ok = deployment({ id: 'Qm_ok', signal: GRT(50_000n) });
+    const ok = deployment({ id: Q.OK, signal: GRT(50_000n) });
     const denied = deployment({
-      id: 'Qm_denied',
+      id: Q.DENIED,
       signal: GRT(50_000n),
       deniedAt: 1234567,
     });
@@ -224,13 +243,13 @@ describe('DiscoveryEngine discovery filter', () => {
     });
     const result = await engine.run(baseConfig());
     const ids = result.opportunities.map((o) => o.deploymentId);
-    assert.ok(!ids.includes('Qm_denied'));
-    assert.ok(ids.includes('Qm_ok'));
+    assert.ok(!ids.includes(Q.DENIED));
+    assert.ok(ids.includes(Q.OK));
     assert.ok(result.warnings.some((w) => /rewards are denied/.test(w)));
   });
 
   it('blacklist wins over whitelist', async () => {
-    const dep = deployment({ id: 'Qm_both', signal: GRT(50_000n) });
+    const dep = deployment({ id: Q.BOTH, signal: GRT(50_000n) });
     const engine = new DiscoveryEngine({
       networkClient: fakeNetworkClient({
         signalledDeployments: [dep],
@@ -243,11 +262,74 @@ describe('DiscoveryEngine discovery filter', () => {
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(
-      baseConfig({ whitelist: ['Qm_both'], blacklist: ['Qm_both'] }),
+      baseConfig({ whitelist: [Q.BOTH], blacklist: [Q.BOTH] }),
     );
     assert.equal(
-      result.opportunities.filter((o) => o.deploymentId === 'Qm_both').length,
+      result.opportunities.filter((o) => o.deploymentId === Q.BOTH).length,
       0,
+    );
+  });
+
+  it('skips malformed config IDs with a warning instead of poisoning the lookup maps (regression: lenient normalizeDeploymentId fell back to lowercase)', async () => {
+    // Audit Medium: before the fix, `normalizeDeploymentId` caught
+    // conversion failures and fell back to `raw.toLowerCase()`. That
+    // unique-keyed string then entered whitelist / blacklist / frozenlist
+    // / syncingIds / sizesById lookup maps and never matched anything
+    // downstream — silently poisoning the lookups while looking
+    // successful from the outside.
+    //
+    // Strict behavior under test:
+    //   - A `GARBAGE` whitelist entry produces a per-entry warning naming
+    //     the bad input and is dropped from the whitelist.
+    //   - A malformed blacklist + frozenlist entry produces the same
+    //     per-source warning.
+    //   - The valid sibling candidate still survives discovery filtering
+    //     and surfaces in `opportunities` — proving the bad entries did
+    //     not block the rest of the run.
+    const good = deployment({ id: Q.OK, signal: GRT(50_000n) });
+    const engine = new DiscoveryEngine({
+      networkClient: fakeNetworkClient({
+        signalledDeployments: [good],
+        networkParams: networkParams(),
+      }),
+      qosClient: fakeQosClient(),
+      graphNodeClient: fakeGraphNodeClient(),
+      postgresClient: null,
+      agentClient: fakeAgentClient(),
+    });
+    const result = await engine.run(
+      baseConfig({
+        whitelist: ['GARBAGE', Q.OK],
+        blacklist: ['ALSO_BAD'],
+        frozenlist: ['STILL_BAD'],
+      }),
+    );
+
+    // Per-source warnings naming each bad input.
+    assert.ok(
+      result.warnings.some(
+        (w) => /Whitelist/i.test(w) && /GARBAGE/.test(w),
+      ),
+      `expected a Whitelist warning naming GARBAGE, got: ${JSON.stringify(result.warnings)}`,
+    );
+    assert.ok(
+      result.warnings.some(
+        (w) => /Blacklist/i.test(w) && /ALSO_BAD/.test(w),
+      ),
+      `expected a Blacklist warning naming ALSO_BAD, got: ${JSON.stringify(result.warnings)}`,
+    );
+    assert.ok(
+      result.warnings.some(
+        (w) => /Frozenlist/i.test(w) && /STILL_BAD/.test(w),
+      ),
+      `expected a Frozenlist warning naming STILL_BAD, got: ${JSON.stringify(result.warnings)}`,
+    );
+    // The valid candidate still flows through end-to-end.
+    assert.ok(
+      result.opportunities.some((o) => o.deploymentId === Q.OK),
+      `expected the valid candidate in opportunities; got: ${JSON.stringify(
+        result.opportunities.map((o) => o.deploymentId),
+      )}`,
     );
   });
 });
@@ -255,9 +337,9 @@ describe('DiscoveryEngine discovery filter', () => {
 describe('DiscoveryEngine scoring', () => {
   it('uses median entityCount as cost proxy when some candidates report null', async () => {
     const deps = [
-      deployment({ id: 'Qm_a', signal: GRT(50_000n) }),
-      deployment({ id: 'Qm_b', signal: GRT(50_000n) }),
-      deployment({ id: 'Qm_c', signal: GRT(50_000n) }),
+      deployment({ id: Q.A, signal: GRT(50_000n) }),
+      deployment({ id: Q.B, signal: GRT(50_000n) }),
+      deployment({ id: Q.C, signal: GRT(50_000n) }),
     ];
     const engine = new DiscoveryEngine({
       networkClient: fakeNetworkClient({
@@ -267,12 +349,12 @@ describe('DiscoveryEngine scoring', () => {
       qosClient: fakeQosClient(),
       graphNodeClient: fakeGraphNodeClient({
         entityCountById: {
-          Qm_a: '100',
-          Qm_b: '200',
-          // Qm_c omitted → null → fallback to median(=200 — median of 2 sorted
+          [Q.A]: '100',
+          [Q.B]: '200',
+          // Q.C omitted → null → fallback to median(=200 — median of 2 sorted
           // values is the upper-middle since floor((n)/2) on sorted [100,200]
           // returns index 1 = 200. We just assert behavior is exactly that.
-          Qm_c: null,
+          [Q.C]: null,
         },
       }),
       postgresClient: null,
@@ -286,7 +368,7 @@ describe('DiscoveryEngine scoring', () => {
     );
     // All three should be scored (none dropped for missing entityCount).
     const ids = result.opportunities.map((o) => o.deploymentId).sort();
-    assert.deepEqual(ids, ['Qm_a', 'Qm_b', 'Qm_c']);
+    assert.deepEqual(ids, [Q.A, Q.B, Q.C]);
 
     // Assert the median fallback produces the *expected* value, not just a
     // warning. With known entityCounts [100, 200], the engine takes the
@@ -297,9 +379,9 @@ describe('DiscoveryEngine scoring', () => {
     // If the fallback regressed to `signalledTokens` (~5e22) → costMax would
     // be dominated by it and Qm_a/Qm_b.costScore would collapse to ~0.
     const byId = new Map(result.opportunities.map((o) => [o.deploymentId, o]));
-    const a = byId.get('Qm_a')!;
-    const b = byId.get('Qm_b')!;
-    const c = byId.get('Qm_c')!;
+    const a = byId.get(Q.A)!;
+    const b = byId.get(Q.B)!;
+    const c = byId.get(Q.C)!;
     assert.equal(
       c.components.costScore,
       b.components.costScore,
@@ -314,16 +396,69 @@ describe('DiscoveryEngine scoring', () => {
     assert.ok(c.components.costScore >= a.components.costScore);
   });
 
+  it('does not re-pick an already-syncing deployment when the network subgraph returns bytes32 and graph-node returns Qm (regression: syncingIds key mismatch)', async () => {
+    // Live reproducer for the syncingIds key mismatch in DiscoveryEngine.
+    //
+    // Before the fix, `syncingIds` was built from `indexingStatuses.subgraph`
+    // (Qm form, native to graph-node) and then compared against the
+    // network-subgraph deployment id `dep.id` (bytes32 form). Across
+    // encodings the comparison always missed, so a deployment that the
+    // indexer was already syncing got re-classified as an opportunity and
+    // an indexing-rule recommendation was emitted to "start syncing
+    // offchain" — exactly the action the indexer had already taken.
+    //
+    // The bytes32/Qm pair below is a real one computed via the project's
+    // `toQmDeploymentId` helper.
+    const bytes32Id =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const qmId = 'QmeDLbKHYypURMRigRxSspUm8w5zrDfXc3Skw2PiDxqCFu';
+
+    const dep = deployment({ id: bytes32Id, signal: GRT(50_000n) });
+    const engine = new DiscoveryEngine({
+      networkClient: fakeNetworkClient({
+        // signalled deployment carries the bytes32 id from the network
+        // subgraph.
+        signalledDeployments: [dep],
+        networkParams: networkParams(),
+      }),
+      qosClient: fakeQosClient(),
+      graphNodeClient: fakeGraphNodeClient({
+        // graph-node returns the indexing status with the Qm id, matching
+        // real behavior. Before the fix, syncingIds = {qmId} would not
+        // contain bytes32Id and the deployment would be re-recommended.
+        statuses: [indexingStatus({ id: qmId, synced: false })],
+      }),
+      postgresClient: null,
+      agentClient: fakeAgentClient(),
+    });
+    const result = await engine.run(baseConfig());
+
+    // Without the fix: dep appears as an opportunity AND in
+    // ruleRecommendations because syncingIds.has(bytes32Id) returned false
+    // despite the deployment being actively syncing.
+    assert.equal(
+      result.opportunities.filter((o) => o.deploymentId === bytes32Id).length,
+      0,
+      `expected the already-syncing deployment to be filtered out; if it ` +
+        `appears, the syncingIds bytes32 vs Qm mismatch is back`,
+    );
+    assert.equal(
+      result.ruleRecommendations.filter((r) => r.deploymentId === bytes32Id).length,
+      0,
+      `expected no offchain rule recommendation for an already-syncing deployment`,
+    );
+  });
+
   it('with identical signal/volume/cost, candidate with higher APR wins the top slot', async () => {
     // Two candidates with identical signal/volume/entityCount. APR depends on
     // the existing total stake (lower existing stake → higher per-unit APR).
     const depHigh = deployment({
-      id: 'Qm_hi_apr',
+      id: Q.HI_APR,
       signal: GRT(50_000n),
       staked: GRT(1n), // tiny existing alloc → big share for our typical alloc
     });
     const depLow = deployment({
-      id: 'Qm_lo_apr',
+      id: Q.LO_APR,
       signal: GRT(50_000n),
       staked: GRT(1_000_000n), // huge existing alloc → tiny share
     });
@@ -332,18 +467,18 @@ describe('DiscoveryEngine scoring', () => {
         signalledDeployments: [depHigh, depLow],
         networkParams: networkParams(),
         deploymentAllocations: {
-          Qm_hi_apr: [
+          [Q.HI_APR]: [
             allocation({
               id: 'a1',
-              deploymentId: 'Qm_hi_apr',
+              deploymentId: Q.HI_APR,
               allocatedTokens: GRT(1n),
               indexerId: '0xother',
             }),
           ],
-          Qm_lo_apr: [
+          [Q.LO_APR]: [
             allocation({
               id: 'a2',
-              deploymentId: 'Qm_lo_apr',
+              deploymentId: Q.LO_APR,
               allocatedTokens: GRT(1_000_000n),
               indexerId: '0xother',
             }),
@@ -352,13 +487,13 @@ describe('DiscoveryEngine scoring', () => {
       }),
       qosClient: fakeQosClient(),
       graphNodeClient: fakeGraphNodeClient({
-        entityCountById: { Qm_hi_apr: '100', Qm_lo_apr: '100' },
+        entityCountById: { [Q.HI_APR]: '100', [Q.LO_APR]: '100' },
       }),
       postgresClient: null,
       graphmanClient: fakeGraphmanClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(baseConfig());
-    assert.equal(result.opportunities[0]!.deploymentId, 'Qm_hi_apr');
+    assert.equal(result.opportunities[0]!.deploymentId, Q.HI_APR);
   });
 });
