@@ -480,6 +480,162 @@ describe('AllocationOptimizer.run', () => {
     );
   });
 
+  it('reflows gas-floor-rejected stake to surviving candidates instead of leaving it idle', async () => {
+    // Regression: when the iterative-greedy loop allocates stake to a
+    // candidate whose projected reward falls below 2× gas, the previous
+    // implementation dropped that allocation entirely and let the stake
+    // sit idle. Fix: a reflow pass identifies the gas-floor rejects,
+    // recovers their stake, and re-runs iterative-greedy on the survivors
+    // so the operator's budget is fully deployed.
+    //
+    // Scenario: three signalled deployments competing for a fixed budget.
+    //   A (LARGE): big signal share, gets a meaningful allocation.
+    //   C (MID):   medium signal share, also gets a meaningful allocation
+    //              with headroom.
+    //   B (DUST):  tiny signal share, water-fills a small slice that
+    //              ends up under the 2× gas floor and triggers reflow.
+    //
+    // Without reflow: B is dropped and its stake goes idle.
+    // With reflow:    B is dropped, its stake is redistributed to A and C
+    //                 by their marginals.
+    const LARGE = Q.OK;
+    const MID = Q.RUNNING;
+    const DUST = Q.DUST;
+    // Caps (maxAllocationPct=0.5) leave A and C headroom; whitelisting B
+    // forces it into the baseline plan (claim-me-first sentinel ⇒ B
+    // wins at least one chunk in the baseline). With a small chunk-size
+    // and a big D, B's projected reward stays small enough to fail the
+    // 2× gas check in the second run.
+    const A = deployment({
+      id: LARGE,
+      signal: GRT(200_000n),
+      staked: GRT(20_000_000n),
+    });
+    const C = deployment({
+      id: MID,
+      signal: GRT(200_000n),
+      staked: GRT(20_000_000n),
+    });
+    const B = deployment({
+      id: DUST,
+      // Just above minSignal but tiny vs total signal; combined with a
+      // huge D it water-fills a slice that fails the 2× gas check.
+      signal: GRT(1_100n),
+      staked: GRT(100_000_000n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [A, C, B],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: LARGE }),
+          indexingStatus({ id: MID }),
+          indexingStatus({ id: DUST }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    // Run twice: once with gas=0 (baseline, no reflow path) and once
+    // with a gas budget large enough to knock B below 2× gas.
+    const baseline = await opt.run(
+      baseConfig({
+        maxAllocations: 3,
+        maxAllocationPct: 0.5, // leave A and C headroom to absorb reflow
+        minSignal: GRT(1_000n),
+        gasEstimateGrt: GRT(0n),
+        whitelist: [DUST], // force B into the plan via claim-me-first
+      }),
+    );
+    const baselineB = baseline.proposedAllocations.find(
+      (p) => p.deploymentId === DUST,
+    );
+    assert.ok(
+      baselineB && baselineB.allocatedTokens > 0n,
+      `baseline must allocate to B so the reflow test exercises the drop path; ` +
+        `got ${JSON.stringify(baseline.proposedAllocations.map((p) => p.deploymentId))}`,
+    );
+
+    // Gas budget chosen to knock out B's tiny projected reward but leave
+    // A and C above the 2× floor.
+    const result = await opt.run(
+      baseConfig({
+        maxAllocations: 3,
+        maxAllocationPct: 0.5,
+        minSignal: GRT(1_000n),
+        gasEstimateGrt: GRT(100n),
+        whitelist: [DUST], // B is whitelisted but its reward fails 2× gas
+      }),
+    );
+
+    const aOut = result.proposedAllocations.find(
+      (p) => p.deploymentId === LARGE,
+    );
+    const cOut = result.proposedAllocations.find(
+      (p) => p.deploymentId === MID,
+    );
+    const bOut = result.proposedAllocations.find(
+      (p) => p.deploymentId === DUST,
+    );
+
+    // B must be dropped — it's the gas-floor reject.
+    assert.equal(
+      bOut,
+      undefined,
+      `B (dust) should be dropped by gas floor; got ${JSON.stringify(bOut)}`,
+    );
+    // A and C must survive.
+    assert.ok(aOut, 'A (large) should survive reflow');
+    assert.ok(cOut, 'C (mid) should survive reflow');
+
+    // Reflow assertion: A+C combined allocation after reflow must exceed
+    // their pre-reflow combined allocation in the baseline run. This is
+    // the core invariant — the dropped stake flowed to the survivors
+    // instead of going idle.
+    const baselineA =
+      baseline.proposedAllocations.find((p) => p.deploymentId === LARGE)
+        ?.allocatedTokens ?? 0n;
+    const baselineC =
+      baseline.proposedAllocations.find((p) => p.deploymentId === MID)
+        ?.allocatedTokens ?? 0n;
+    const reflowedSurvivors = aOut!.allocatedTokens + cOut!.allocatedTokens;
+    const baselineSurvivors = baselineA + baselineC;
+    assert.ok(
+      reflowedSurvivors > baselineSurvivors,
+      `survivors must receive more stake post-reflow than they had before; ` +
+        `reflowed=${reflowedSurvivors}, baseline=${baselineSurvivors}. ` +
+        `If equal, the dropped stake went idle — the bug regressed.`,
+    );
+
+    // The reflowed sum should approach (within chunk-rounding slack) the
+    // baseline budget that was actually deployed before the gas floor.
+    // Each chunk = availableStake / 1000; allow a chunk per survivor +
+    // a small safety margin.
+    const baselineDeployed = baselineA + baselineC + baselineB.allocatedTokens;
+    const oneChunk = GRT(1_000_000n) / 1000n; // availableStake / 1000
+    assert.ok(
+      reflowedSurvivors >= baselineDeployed - oneChunk * 4n,
+      `reflowed budget should approximately recover the dropped stake; ` +
+        `reflowedSurvivors=${reflowedSurvivors}, baselineDeployed=${baselineDeployed}, ` +
+        `chunk≈${oneChunk}.`,
+    );
+
+    // Operator-facing warning must surface the reflow.
+    assert.ok(
+      result.warnings.some(
+        (w) => /reflow/i.test(w) && /gas/i.test(w) && /2× gas budget/.test(w),
+      ),
+      `expected a gas-floor reflow warning; got: ${JSON.stringify(result.warnings)}`,
+    );
+    assert.ok(
+      result.warnings.some((w) => /reflow summary/i.test(w)),
+      `expected a reflow summary warning; got: ${JSON.stringify(result.warnings)}`,
+    );
+  });
+
   it('skips malformed config IDs with a warning instead of poisoning the graph-node batch (regression: lenient normalizeToQm fell back to raw, tainting candidateIdList)', async () => {
     // Audit High: before the fix, `normalizeToQm` caught conversion
     // failures and silently fell back to the raw, case-preserved input.
