@@ -155,9 +155,15 @@ These supply defaults for `run_allocation_optimization` / `run_discovery` / `run
 ### `GAS_ESTIMATE_GRT`
 
 - **Type:** number (coerced), non-negative
-- **Default:** `50`
+- **Default:** `0.5`
 - **Unit:** GRT (decimal; converted to wei internally).
 - **Purpose:** Gas budget per allocation lifecycle (open + close), used by the optimizer to suppress churn whose APR uplift can't cover gas.
+- **Rationale:** The Graph network runs on Arbitrum One; observed real-world gas costs are ~1 cent USD per single allocate/close action (~0.1 GRT at GRT≈$0.10), or ~2 cents for a batch of 100 (~0.004 GRT per lifecycle). The 0.5 GRT default covers the single-action worst case with safety headroom.
+- **Optimizer behavior:** The gas-floor filter applies a 2× safety multiplier — deployments are skipped when `projectedAnnualReward < 2 × GAS_ESTIMATE_GRT`. At the default, this means deployments earning less than 1 GRT/year are dropped.
+- **Tuning:**
+  - Operators using **batched action queues** (the default indexer-agent flow) see ~0.004 GRT per lifecycle on Arbitrum — set `0.1` or lower.
+  - Operators allocating one-at-a-time on Arbitrum: leave at default `0.5`, or lower to `0.1` if gas prices are consistently calm.
+  - **Mainnet** operators (rare now) should override significantly higher — typical mainnet allocate/close ran ~10–50 GRT.
 
 ---
 
