@@ -541,4 +541,111 @@ describe('AllocationOptimizer.run', () => {
       )}`,
     );
   });
+
+  it('distributes stake by signal/stake ratio not raw signal', async () => {
+    // Two candidates with equal signal but very different saturation:
+    //   A: S=10k, other_stake=15M (saturated, low marginal APR)
+    //   B: S=10k, other_stake=100k (underallocated, high marginal APR)
+    // With raw-signal weighting both would get equal stake; with signal/
+    // stake weighting B should get materially more (the cap typically
+    // bounds the absolute ratio in tests, but B > 5×A is a strong signal
+    // that the marginal-APR weighting is in effect).
+    const A = deployment({
+      id: Q.OK,
+      signal: GRT(10_000n),
+      staked: GRT(15_000_000n),
+    });
+    const B = deployment({
+      id: Q.RUNNING,
+      signal: GRT(10_000n),
+      staked: GRT(100_000n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [A, B],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: Q.OK }),
+          indexingStatus({ id: Q.RUNNING }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({ maxAllocations: 2, gasEstimateGrt: GRT(0n) }),
+    );
+    const aAmount =
+      result.proposedAllocations.find((p) => p.deploymentId === Q.OK)
+        ?.allocatedTokens ?? 0n;
+    const bAmount =
+      result.proposedAllocations.find((p) => p.deploymentId === Q.RUNNING)
+        ?.allocatedTokens ?? 0n;
+    assert.ok(
+      aAmount > 0n,
+      `expected saturated A to still receive some stake; got A=${aAmount}`,
+    );
+    assert.ok(
+      bAmount > 5n * aAmount,
+      `expected B (low other-stake) to get >5× more stake than A (saturated); ` +
+        `got A=${aAmount}, B=${bAmount}`,
+    );
+  });
+
+  it('handles fresh deployments with zero other_indexers_stake (floor weight, no Infinity)', async () => {
+    // Fresh deployment (no other indexers) gets the floor in the denominator
+    // so its weight is large-but-finite. Compare against a saturated peer.
+    // The fresh one should outrank the saturated one and stay bounded by
+    // the per-deployment cap.
+    const fresh = deployment({
+      id: Q.OK,
+      signal: GRT(1_000n),
+      staked: 0n,
+    });
+    const saturated = deployment({
+      id: Q.RUNNING,
+      signal: GRT(1_000n),
+      staked: GRT(1_000_000n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [fresh, saturated],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: Q.OK }),
+          indexingStatus({ id: Q.RUNNING }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const cfg = baseConfig({
+      maxAllocations: 2,
+      maxAllocationPct: 0.2,
+      gasEstimateGrt: GRT(0n),
+    });
+    const result = await opt.run(cfg);
+    const freshAmount =
+      result.proposedAllocations.find((p) => p.deploymentId === Q.OK)
+        ?.allocatedTokens ?? 0n;
+    // Fresh deployment must still receive an allocation (no Infinity / NaN
+    // crash, no divide-by-zero) and be bounded by the per-deployment cap.
+    // Cap = 0.2 × 1,000,000 GRT = 200,000 GRT.
+    const cap = GRT(200_000n);
+    assert.ok(
+      freshAmount > 0n,
+      `expected fresh deployment to receive an allocation; got ${freshAmount}`,
+    );
+    assert.ok(
+      freshAmount <= cap,
+      `expected fresh deployment to be bounded by per-deployment cap; ` +
+        `got ${freshAmount} > cap ${cap}`,
+    );
+  });
 });
