@@ -592,25 +592,52 @@ export class AllocationOptimizer {
     // confirmed via per-deployment health checks. Per-deployment fallbacks
     // are reliable: each call is a single-element query so size limits don't
     // come into play.
-    const missingStatusIds = candidateIdList.filter(
-      (id) => !statusById.has(id),
-    );
+    //
+    // Build missing list, prioritized by source. Current allocations and
+    // whitelist entries are the most operator-critical — fall back on them
+    // before generic signalled candidates so a partial bulk response doesn't
+    // silently drop the operator's existing allocations. A current that's
+    // also whitelisted lands in `missingCurrent` (first hit wins); that's
+    // fine — currents are at least as critical as whitelist.
+    const missingCurrent: string[] = [];
+    const missingWhitelist: string[] = [];
+    const missingOther: string[] = [];
+    for (const id of candidateIdList) {
+      if (statusById.has(id)) continue;
+      if (currentByDeployment.has(id)) missingCurrent.push(id);
+      else if (whitelist.has(id)) missingWhitelist.push(id);
+      else missingOther.push(id);
+    }
+    const missingStatusIdsAll = [
+      ...missingCurrent,
+      ...missingWhitelist,
+      ...missingOther,
+    ];
 
-    if (missingStatusIds.length > 0) {
+    if (missingStatusIdsAll.length > 0) {
       // Cap fallback fetches to avoid hammering graph-node when the bulk
       // query is severely truncated. The cap is well above the expected
       // worst case (a handful of missing statuses) so it should almost
       // never fire; when it does, the warning steers the operator toward
       // shrinking the candidate pool or upgrading graph-node.
       const FALLBACK_LIMIT = 50;
+      const originalMissing = missingStatusIdsAll.length;
+      let missingStatusIds = missingStatusIdsAll;
+      let skippedFallback = 0;
       if (missingStatusIds.length > FALLBACK_LIMIT) {
+        skippedFallback = missingStatusIds.length - FALLBACK_LIMIT;
+        missingStatusIds = missingStatusIds.slice(0, FALLBACK_LIMIT);
+      }
+
+      if (skippedFallback > 0) {
         warnings.push(
-          `graph-node bulk query was missing ${missingStatusIds.length} statuses; ` +
-            `capping per-deployment fallback at ${FALLBACK_LIMIT}. Reduce minSignal or ` +
-            `increase MAX_ALLOCATIONS to shrink the candidate pool, or upgrade graph-node ` +
-            `to a version with higher response limits.`,
+          `graph-node bulk query was missing ${originalMissing} statuses; ` +
+            `capping per-deployment fallback at ${FALLBACK_LIMIT} (prioritizing ` +
+            `${missingCurrent.length} current allocations + ${missingWhitelist.length} whitelist; ` +
+            `${skippedFallback} signalled candidates skipped and will be silently filtered). ` +
+            `Reduce minSignal or lower MAX_ALLOCATIONS to shrink the candidate pool, ` +
+            `or upgrade graph-node to a version with higher response limits.`,
         );
-        missingStatusIds.length = FALLBACK_LIMIT;
       }
 
       const fallbackResults = await Promise.allSettled(
@@ -638,13 +665,13 @@ export class AllocationOptimizer {
           fallbackMisses++;
         }
       }
-      if (fallbackHits > 0 || fallbackMisses > 0) {
+      if (fallbackHits > 0 || fallbackMisses > 0 || skippedFallback > 0) {
         warnings.push(
-          `graph-node bulk indexingStatuses query was missing ${missingStatusIds.length} ` +
+          `graph-node bulk indexingStatuses query was missing ${originalMissing} ` +
             `candidate statuses; per-deployment fallback recovered ${fallbackHits} ` +
-            `(remaining ${fallbackMisses} have no graph-node status). Large candidate ` +
-            `lists may hit graph-node response limits — recovered candidates are ` +
-            `included in the optimization.`,
+            `(${fallbackMisses} have no graph-node status${skippedFallback > 0 ? `, ${skippedFallback} skipped by cap` : ''}). ` +
+            `Large candidate lists may hit graph-node response limits — recovered ` +
+            `candidates are included in the optimization.`,
         );
       }
     }
