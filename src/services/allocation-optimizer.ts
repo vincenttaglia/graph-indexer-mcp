@@ -84,6 +84,12 @@ export interface OptimizationCandidate {
   currentAllocation: bigint;
   isHealthy: boolean;
   isSynced: boolean;
+  /**
+   * Pause state as reported by graph-node's `indexingStatuses.paused`. The
+   * optimizer previously fetched this via graphman's `deployment.info`;
+   * graph-node now surfaces it natively in the same query we already make
+   * for sync/health, so the read path no longer needs graphman.
+   */
   isPaused: boolean;
   isRisky: boolean;
   isFrozen: boolean;
@@ -138,7 +144,16 @@ export interface OptimizationResult {
 export interface AllocationOptimizerDeps {
   networkClient: NetworkSubgraphClient;
   graphNodeClient: GraphNodeClient;
-  graphmanClient: GraphmanClient;
+  /**
+   * Optional — kept on the deps surface for forward compatibility / existing
+   * wiring, but the optimizer's read path no longer touches graphman.
+   * Pause state now comes from graph-node's `indexingStatuses.paused`,
+   * which is part of the same fetch we already make for sync/health.
+   * Graphman remains required to *execute* the mutation plan (pause /
+   * unassign / unused_remove / etc.) but is not a dependency of the
+   * optimization analysis.
+   */
+  graphmanClient?: GraphmanClient;
   qosClient: QosSubgraphClient;
   agentClient: IndexerAgentClient;
 }
@@ -223,30 +238,13 @@ function isHealthyAt(status: SubgraphIndexingStatus | undefined): boolean {
   return status?.health === 'healthy';
 }
 
-/**
- * Resolve graphman pause state for one deployment, swallowing per-deployment
- * errors so a single failed lookup doesn't kill the whole run.
- */
-async function fetchPauseState(
-  graphmanClient: GraphmanClient,
-  deploymentId: string,
-  errors: string[],
-  signal?: AbortSignal,
-): Promise<boolean> {
-  try {
-    const info = await graphmanClient.getDeploymentInfo(
-      deploymentId,
-      signal ? { signal } : undefined,
-    );
-    return Boolean(info.paused);
-  } catch (err) {
-    errors.push(
-      `graphman.getDeploymentInfo("${deploymentId}") failed: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return false;
-  }
+function isPausedAt(status: SubgraphIndexingStatus | undefined): boolean {
+  // graph-node surfaces `paused` natively on `indexingStatuses`. When a
+  // status entry is missing (the deployment isn't tracked locally) we
+  // conservatively report "not paused" — the surrounding sync/health gate
+  // already excludes those candidates, so this only matters for
+  // not-yet-synced deployments the operator forced via whitelist.
+  return Boolean(status?.paused);
 }
 
 export class AllocationOptimizer {
@@ -270,8 +268,7 @@ export class AllocationOptimizer {
     // ---------------------------------------------------------------------
     // 1. Gather state in parallel — degrade per-source.
     // ---------------------------------------------------------------------
-    const signal = opts?.signal;
-    const sigOpt = signal ? { signal } : undefined;
+    const sigOpt = opts?.signal ? { signal: opts.signal } : undefined;
 
     const [
       indexerRes,
@@ -392,8 +389,14 @@ export class AllocationOptimizer {
     const candidatesConsidered = candidateIds.size;
 
     // ---------------------------------------------------------------------
-    // Per-deployment data: graph-node indexing status, graphman pause, QoS.
-    // Run all three in parallel; degrade per-source.
+    // Per-deployment data: graph-node indexing status (pause + sync + health
+    // in one shot) and QoS volume. Run in parallel; degrade per-source.
+    //
+    // The optimizer used to call graphman.getDeploymentInfo once per
+    // candidate just to read `paused`. graph-node now exposes that field on
+    // its `indexingStatuses` query (and we select it explicitly), so the
+    // read path no longer touches graphman at all. Graphman remains
+    // required only for executing the resulting mutation plan.
     // ---------------------------------------------------------------------
     const candidateIdList = Array.from(candidateIds);
 
@@ -421,6 +424,16 @@ export class AllocationOptimizer {
       );
     }
 
+    // Build pauseById directly from the indexing-status fetch above —
+    // single source of truth, no graphman call. When the status fetch
+    // failed entirely, every candidate falls back to `paused = false` so
+    // the rest of the run still produces a plan instead of incorrectly
+    // excluding everything (the failure is already in `errors`).
+    const pauseById = new Map<string, boolean>();
+    for (const id of candidateIdList) {
+      pauseById.set(id, isPausedAt(statusById.get(id)));
+    }
+
     const qosVolumeById = new Map<string, bigint>();
     if (qosRes.status === 'fulfilled') {
       for (const row of qosRes.value) {
@@ -440,22 +453,6 @@ export class AllocationOptimizer {
     } else {
       errors.push(`qos.getTopQueriedDeployments failed: ${errString(qosRes.reason)}`);
     }
-
-    // Graphman per-deployment pause — sequential mapping but cheap calls and
-    // we want per-call error isolation. Use Promise.all with a wrapper that
-    // catches per-id.
-    const pauseEntries = await Promise.all(
-      candidateIdList.map(async (id) => {
-        const paused = await fetchPauseState(
-          this.deps.graphmanClient,
-          id,
-          errors,
-          signal,
-        );
-        return [id, paused] as const;
-      }),
-    );
-    const pauseById = new Map<string, boolean>(pauseEntries);
 
     // ---------------------------------------------------------------------
     // 2. Filter candidates.

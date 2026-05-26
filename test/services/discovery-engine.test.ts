@@ -54,9 +54,7 @@ describe('DiscoveryEngine cleanup', () => {
         statuses: [indexingStatus({ id: depId, synced: true })],
       }),
       postgresClient: fakePostgresClient(),
-      graphmanClient: fakeGraphmanClient({
-        defaultInfo: { id: depId, paused: false, node: 'index-node-0' },
-      }),
+      graphmanClient: fakeGraphmanClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(baseConfig());
@@ -89,9 +87,7 @@ describe('DiscoveryEngine cleanup', () => {
         statuses: [indexingStatus({ id: depId, synced: true })],
       }),
       postgresClient: fakePostgresClient(),
-      graphmanClient: fakeGraphmanClient({
-        defaultInfo: { id: depId, paused: false, node: 'index-node-0' },
-      }),
+      graphmanClient: fakeGraphmanClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(baseConfig());
@@ -99,6 +95,45 @@ describe('DiscoveryEngine cleanup', () => {
       assert.ok(
         !action.steps.includes('drop' as never),
         'drop must never appear in cleanup steps',
+      );
+    }
+  });
+
+  it('classifies an unassigned deployment (node: null from graph-node) as orphaned, without a graphman client wired', async () => {
+    // Pre-refactor: "unassigned" came from graphman's DeploymentInfo.node.
+    // Post-refactor: it comes from graph-node's indexingStatuses.node. This
+    // test proves the new path works end-to-end WITHOUT a graphmanClient in
+    // the deps — i.e. discovery's read path no longer depends on graphman.
+    const depId = 'Qm_orphan';
+    const engine = new DiscoveryEngine({
+      networkClient: fakeNetworkClient({
+        // No signal, no allocation, but a synced indexing status with
+        // node: null → orphaned via the new unassigned signal.
+        signalledDeployments: [],
+        activeAllocations: [],
+        networkParams: networkParams(),
+      }),
+      qosClient: fakeQosClient(),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          indexingStatus({ id: depId, synced: true, node: null }),
+        ],
+      }),
+      postgresClient: fakePostgresClient(),
+      // graphmanClient intentionally omitted — proves discovery works
+      // without graphman wired.
+      agentClient: fakeAgentClient(),
+    });
+    const result = await engine.run(baseConfig());
+    const staleEntry = result.stale.find((s) => s.deploymentId === depId);
+    assert.ok(staleEntry, `expected stale entry for orphaned deployment; got ${JSON.stringify(result.stale)}`);
+    assert.equal(staleEntry!.reason, 'orphaned');
+    // Sanity: no graphman-related warnings should appear because we never
+    // called graphman.
+    for (const w of result.warnings) {
+      assert.ok(
+        !/graphman/i.test(w),
+        `expected no graphman warnings; got: ${w}`,
       );
     }
   });
@@ -121,9 +156,7 @@ describe('DiscoveryEngine cleanup', () => {
         statuses: [indexingStatus({ id: depId, synced: true })],
       }),
       postgresClient: fakePostgresClient(),
-      graphmanClient: fakeGraphmanClient({
-        defaultInfo: { id: depId, paused: false, node: 'index-node-0' },
-      }),
+      graphmanClient: fakeGraphmanClient(),
       agentClient: fakeAgentClient(),
     });
     const result = await engine.run(baseConfig({ frozenlist: [depId] }));

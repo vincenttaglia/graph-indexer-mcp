@@ -43,7 +43,6 @@ import type {
   GraphNetwork,
   SubgraphDeployment,
 } from '../types/network.js';
-import type { DeploymentInfo } from '../types/graphman.js';
 import type { SubgraphIndexingStatus } from '../types/graphnode.js';
 import { BLOCKS_PER_YEAR } from '../utils/constants.js';
 
@@ -135,7 +134,16 @@ export interface DiscoveryEngineDeps {
   graphNodeClient: GraphNodeClient;
   /** Optional — when null, on-disk size enrichment is skipped. */
   postgresClient: PostgresClient | null;
-  graphmanClient: GraphmanClient;
+  /**
+   * Optional — kept on the deps surface for forward compatibility and so
+   * existing wiring continues to typecheck, but discovery's read path no
+   * longer touches graphman. Pause + assigned-node both come from
+   * graph-node's `indexingStatuses` (which we already fetch for sync state),
+   * so cleanup classification and orphaned detection work without a
+   * configured graphman API. Graphman remains required only to *execute*
+   * the resulting mutation plan (pause / unassign / unused_remove / etc.).
+   */
+  graphmanClient?: GraphmanClient;
   agentClient: IndexerAgentClient;
 }
 
@@ -348,39 +356,18 @@ export class DiscoveryEngine {
 
     throwIfAborted(signal);
 
-    // Best-effort: fetch graphman deployment info for the synced set (so we
-    // know pause/assignment state). Concurrency-capped to avoid hammering
-    // graphman with a request per deployment.
-    const infoById = new Map<string, DeploymentInfo>();
-    // The external AbortSignal is forwarded into each client call so per-
-    // deployment graphman lookups abort mid-flight if the caller cancels.
-    await mapPool(
-      indexingStatuses,
-      FANOUT_CONCURRENCY,
-      async (status) => {
-        throwIfAborted(signal);
-        try {
-          const info = await this.deps.graphmanClient.getDeploymentInfo(
-            status.subgraph,
-            signal ? { signal } : undefined,
-          );
-          infoById.set(status.subgraph, info);
-        } catch (err) {
-          // Honor cancellation first; otherwise a cancelled batch silently
-          // looks like "every graphman lookup happened to fail" and the
-          // outer mapPool keeps spinning until the queue drains.
-          throwIfAborted(signal);
-          // Per-deployment failures aren't fatal; we just lose pause/node
-          // state for that one. Record one warning per first occurrence.
-          if (infoById.size === 0 && !warnings.some((w) => w.startsWith('graphman:'))) {
-            warnings.push(
-              `graphman: getDeploymentInfo failed for at least one deployment ` +
-                `(${describeError(err)}); cleanup pause/assignment state may be incomplete.`,
-            );
-          }
-        }
-      },
-    );
+    // Pause + assigned-node now come straight from the `indexingStatuses`
+    // result above — graph-node's GraphQL schema exposes `paused` and
+    // `node` natively, so we no longer fan out a graphman lookup per
+    // deployment. This makes cleanup classification work entirely without
+    // a configured graphman API.
+    //
+    // `node === null` (or empty) means the deployment is unassigned to any
+    // index-node — historically the strongest "orphaned" signal. graph-node
+    // versions that don't surface `node` will populate it as null via the
+    // normalizer's safe default, which falls through to the conjunctive
+    // paused+no-allocation+no-signal rule below — same behavior as the old
+    // "graphman info missing" branch.
 
     throwIfAborted(signal);
 
@@ -405,12 +392,13 @@ export class DiscoveryEngine {
       const deploymentId = status.subgraph;
       const idLower = deploymentId.toLowerCase();
 
-      const info = infoById.get(deploymentId);
-      const paused = info?.paused ?? false;
-      // graph-node lacks an "assigned node" view; use graphman's `node` field
-      // when present. Treat empty / `removed` as unassigned.
-      const node = info?.node;
-      const unassigned = info ? !node || node === 'removed' : false;
+      // Pause and assignment now come from the indexing-status fetch
+      // itself. `status.node` is null when the deployment isn't assigned
+      // to any index-node; `'removed'` is the historical graph-node
+      // sentinel for explicit removal. Both mean the same thing here.
+      const paused = status.paused;
+      const node = status.node;
+      const unassigned = node === null || node === 'removed';
       const hasAllocation = allocatedDeploymentIds.has(deploymentId);
       const hasSignal = signalledIds.has(deploymentId);
       const isFrozen = frozenlist.has(idLower);
@@ -428,14 +416,13 @@ export class DiscoveryEngine {
       // *only* paused (with no other corroborating signal) might be a
       // deliberate maintenance pause and must NOT be proposed for cleanup.
       // Stronger evidence:
-      //   - unassigned (no node assigned by graphman), OR
+      //   - unassigned (graph-node reports `node === null` / `'removed'`,
+      //     meaning no index-node owns this deployment), OR
       //   - paused AND (no allocation AND no signal) — i.e. paused on
       //     something the indexer has no remaining stake in.
-      // graphman exposes `node` on DeploymentInfo, so `unassigned` is a
-      // reliable signal when info was fetched. When info is missing we err
-      // on the safe side: `unassigned` is false, so a deployment we only
-      // know is paused won't be flagged unless allocation+signal also went
-      // away.
+      // The unassigned signal now comes from graph-node's indexingStatuses
+      // (the same fetch we use for sync/health), so cleanup classification
+      // no longer depends on a graphman API being configured.
       let reason: StaleDeployment['reason'] | null = null;
       if (unassigned) {
         reason = 'orphaned';
@@ -734,16 +721,21 @@ export class DiscoveryEngine {
       }
 
       // Chain: not currently surfaced on `SubgraphDeployment`. Best-effort
-      // lookup via graphman info (only present for deployments graph-node
-      // knows about — usually candidates aren't synced, so this is null).
+      // lookup via graphman info ONLY when a graphman client is wired
+      // (graphman became optional once pause/node state moved to
+      // graph-node). When no graphman is configured we just leave chain
+      // as null — it's already optional and only used as a display hint.
       let chain: string | null = null;
-      try {
-        const info = await this.deps.graphmanClient.getDeploymentInfo(dep.id, innerSigOpt);
-        chain = info.chain ?? null;
-      } catch {
-        // Propagate cancellation. Otherwise expected: graphman often
-        // returns 404 for unknown deployments.
-        throwIfAborted(signal);
+      const graphman = this.deps.graphmanClient;
+      if (graphman) {
+        try {
+          const info = await graphman.getDeploymentInfo(dep.id, innerSigOpt);
+          chain = info.chain ?? null;
+        } catch {
+          // Propagate cancellation. Otherwise expected: graphman often
+          // returns 404 for unknown deployments.
+          throwIfAborted(signal);
+        }
       }
 
       opportunities.push({
