@@ -97,8 +97,8 @@ This MCP server provides Claude (or any MCP client) with the ability to manage a
 | Action | Input | Effect |
 |--------|-------|--------|
 | `allocate` | deploymentID, amount | Opens new allocation |
-| `unallocate` | allocationID, poi | Closes allocation, submits POI, collects rewards |
-| `reallocate` | allocationID, poi, amount | Atomically closes and reopens (multicall) |
+| `unallocate` | allocationID, poi? | Closes allocation. `poi` is optional on the wire — when omitted, the agent computes one at close time and claims rewards; when set to all-zero, the allocation closes without claiming rewards. |
+| `reallocate` | allocationID, poi?, amount | Atomically closes (same `poi` semantics as `unallocate`) and reopens (multicall). |
 
 **Important operational note:** The agent can run in three modes:
 - **`auto`** — agent makes all allocation decisions autonomously via rules.
@@ -579,8 +579,8 @@ The following tools should be exposed by the MCP server. They are organized by t
 | Tool Name | Description | Parameters |
 |-----------|-------------|------------|
 | `queue_allocate` | Queue an allocate action | `deployment_id`, `amount` |
-| `queue_unallocate` | Queue a close-allocation action | `allocation_id`, `poi` |
-| `queue_reallocate` | Queue an atomic close+open action | `allocation_id`, `poi`, `new_amount` |
+| `queue_unallocate` | Queue a close-allocation action | `deployment_id`, `allocation_id`, `force_zero_poi?` (default false → agent computes POI and claims rewards; true → submits zero POI and forfeits rewards) |
+| `queue_reallocate` | Queue an atomic close+open action | `deployment_id`, `allocation_id`, `new_amount`, `force_zero_poi?` (same semantics as `queue_unallocate`) |
 | `get_action_queue` | List actions by status | `status_filter` |
 | `approve_actions` | Approve queued actions for execution | `action_ids[]` |
 | `cancel_actions` | Cancel pending actions | `action_ids[]` |

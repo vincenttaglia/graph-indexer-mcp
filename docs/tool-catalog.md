@@ -196,22 +196,22 @@ Source: `src/tools/agent-tools.ts`. Backed by the indexer-agent Management API. 
 ### `queue_unallocate`
 
 - **Permission:** `agent_queue`
-- **Description:** Queue an `unallocate` (close) action with the provided POI. POI must be valid at the closing block.
+- **Description:** Queue an `unallocate` (close) action. POI is NOT a tool input — POI generation is a graph-node concern. The default path (`force_zero_poi=false`) lets the indexer-agent compute a real POI at close time and claim indexing rewards; setting `force_zero_poi=true` submits the all-zero POI sentinel (`0x00…00`) which closes the allocation but forfeits rewards.
 - **Args:**
   - `deployment_id` (string, required).
   - `allocation_id` (string, required) — 0x-prefixed 40-char hex.
-  - `poi` (string, required) — 32-byte hex POI (0x + 64 hex).
+  - `force_zero_poi` (boolean, optional, default `false`) — `true` to submit the zero-POI sentinel and forfeit rewards (use only when graph-node cannot produce a valid POI for the closing block).
 - **Returns:** JSON agent response.
 
 ### `queue_reallocate`
 
 - **Permission:** `agent_queue`
-- **Description:** Atomic close + reopen on the same deployment; executed as a multicall on-chain.
+- **Description:** Atomic close + reopen on the same deployment; executed as a multicall on-chain. Same POI semantics as `queue_unallocate` — `force_zero_poi` is the only POI knob.
 - **Args:**
   - `deployment_id` (string, required).
   - `allocation_id` (string, required) — hex.
-  - `poi` (string, required) — hex.
-  - `new_amount` (string, required) — wei.
+  - `new_amount` (string, required) — wei for the new allocation.
+  - `force_zero_poi` (boolean, optional, default `false`) — `true` to submit the zero-POI sentinel for the closing leg and forfeit rewards.
 - **Returns:** JSON agent response.
 
 ### `get_action_queue`

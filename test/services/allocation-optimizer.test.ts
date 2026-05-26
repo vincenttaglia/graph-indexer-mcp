@@ -1061,6 +1061,99 @@ describe('AllocationOptimizer.run', () => {
     );
   });
 
+  it('preserves an OVERFLOW existing allocation (preSeated=false but currentAllocation>0) from the 28d reward floor', async () => {
+    // Audit High: the threshold previously keyed off `preSeated[i]`,
+    // which is only true for the top-N currents after slot-cap sorting.
+    // If activeAllocations.length > maxAllocations, the lowest-marginal
+    // overflow currents get preSeated=false. Pre-fix they'd be
+    // classified as "new" picks and could be dropped solely because of
+    // the 28d reward floor — silently closing existing allocations the
+    // floor was never meant to touch.
+    //
+    // Fix: use `picks[i].candidate.currentAllocation > 0n` (the canonical
+    // "is existing" predicate elsewhere in the optimizer) instead of
+    // `preSeated[i]`. Overflow currents may still be closed by the
+    // SLOT cap (that's a separate mechanism), but never by the new
+    // 28d reward floor.
+    //
+    // Scenario: 2 existing allocations on small-signal deployments,
+    // maxAllocations=1, so one is the pre-seated top current and the
+    // other is overflow (preSeated=false). gas=0 disables the gas
+    // floor; minRewards28dGrt is set high enough that both deployments
+    // project well below it.
+    const { toQmDeploymentId } = await import('../../src/utils/ipfs.js');
+    const TOP = toQmDeploymentId('0x' + '00'.repeat(31) + 'd1');
+    const OVERFLOW = toQmDeploymentId('0x' + '00'.repeat(31) + 'd2');
+
+    const CURR = GRT(1_000n);
+    const depTop = deployment({
+      id: TOP,
+      signal: GRT(10_000n),
+      // D + currentAlloc — small D so TOP has the higher
+      // marginal-at-current and gets pre-seated.
+      staked: GRT(10_000n) + CURR,
+    });
+    const depOverflow = deployment({
+      id: OVERFLOW,
+      signal: GRT(10_000n),
+      // Large D so OVERFLOW has lower marginal and falls outside the
+      // top-1 pre-seated set.
+      staked: GRT(1_000_000n) + CURR,
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(100_000n).toString() }),
+        signalledDeployments: [depTop, depOverflow],
+        activeAllocations: [
+          allocation({
+            id: '0xtop_current',
+            deploymentId: TOP,
+            allocatedTokens: CURR,
+          }),
+          allocation({
+            id: '0xoverflow_current',
+            deploymentId: OVERFLOW,
+            allocatedTokens: CURR,
+          }),
+        ],
+        deploymentsById: { [TOP]: depTop, [OVERFLOW]: depOverflow },
+        networkParams: networkParams({
+          // Huge total signal so per-deployment projected reward is
+          // well below the 28d floor.
+          totalTokensSignalled: (10n ** 30n).toString(),
+        }),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: TOP }), indexingStatus({ id: OVERFLOW })],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        maxAllocations: 1,
+        gasEstimateGrt: GRT(0n),
+        minRewards28dGrt: GRT(10n),
+      }),
+    );
+
+    // The 28d reward floor must NOT attribute any drop to the
+    // new-allocation reward floor — both currents are existing
+    // allocations, so the floor is bypassed. (The slot cap may still
+    // close the overflow, that's fine — but the reason in the warning
+    // text must not be the 28d floor.)
+    const rewardFloorWarnings = result.warnings.filter((w) =>
+      /new-allocation 28d reward floor/.test(w),
+    );
+    assert.equal(
+      rewardFloorWarnings.length,
+      0,
+      `existing allocations (incl. preSeated=false overflow) must be exempt ` +
+        `from the 28d reward floor; got warnings:\n  ${rewardFloorWarnings.join('\n  ')}`,
+    );
+  });
+
   it('preserves an EXISTING allocation below the 28d reward floor (floor applies to new picks only)', async () => {
     // User-stated requirement: the 28d reward floor is for opening NEW
     // allocations, not closing existing ones. Existing allocations may

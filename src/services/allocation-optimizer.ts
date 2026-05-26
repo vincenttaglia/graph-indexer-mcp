@@ -1525,9 +1525,15 @@ export class AllocationOptimizer {
           const totalAlloc = p.D + amount;
           const projectedRewardWei =
             totalAlloc === 0n ? 0n : (p.R * amount) / totalAlloc;
-          // Per-pick threshold: new (non-pre-seated) picks must clear both
-          // floors; pre-seated existing allocations only need to clear gas.
-          const threshold = preSeated[i]
+          // Per-pick threshold: NEW picks (no existing allocation) must
+          // clear both floors; existing allocations only need to clear gas.
+          // The "existing" predicate is `currentAllocation > 0n`, NOT
+          // `preSeated[i]` — `preSeated` is a slot-cap artifact that's
+          // false for overflow currents when activeAllocations.length >
+          // maxAllocations, and using it here would mis-close overflow
+          // currents that reclaim a slot in the greedy loop.
+          const isExisting = p.candidate.currentAllocation > 0n;
+          const threshold = isExisting
             ? gasFloorAnnualWei
             : gasFloorAnnualWei > minRewardsAnnualWei
               ? gasFloorAnnualWei
@@ -1537,7 +1543,7 @@ export class AllocationOptimizer {
             // honest about the reason. A new-pick drop where the reward
             // floor strictly exceeds the gas floor wouldn't have happened
             // under the old gas-only filter.
-            if (!preSeated[i] && projectedRewardWei >= gasFloorAnnualWei) {
+            if (!isExisting && projectedRewardWei >= gasFloorAnnualWei) {
               droppedForRewardFloor++;
             }
             reflowBudget += amount;
