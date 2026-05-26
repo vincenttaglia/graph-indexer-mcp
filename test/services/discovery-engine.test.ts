@@ -314,6 +314,59 @@ describe('DiscoveryEngine scoring', () => {
     assert.ok(c.components.costScore >= a.components.costScore);
   });
 
+  it('does not re-pick an already-syncing deployment when the network subgraph returns bytes32 and graph-node returns Qm (regression: syncingIds key mismatch)', async () => {
+    // Live reproducer for the syncingIds key mismatch in DiscoveryEngine.
+    //
+    // Before the fix, `syncingIds` was built from `indexingStatuses.subgraph`
+    // (Qm form, native to graph-node) and then compared against the
+    // network-subgraph deployment id `dep.id` (bytes32 form). Across
+    // encodings the comparison always missed, so a deployment that the
+    // indexer was already syncing got re-classified as an opportunity and
+    // an indexing-rule recommendation was emitted to "start syncing
+    // offchain" — exactly the action the indexer had already taken.
+    //
+    // The bytes32/Qm pair below is a real one computed via the project's
+    // `toQmDeploymentId` helper.
+    const bytes32Id =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const qmId = 'QmeDLbKHYypURMRigRxSspUm8w5zrDfXc3Skw2PiDxqCFu';
+
+    const dep = deployment({ id: bytes32Id, signal: GRT(50_000n) });
+    const engine = new DiscoveryEngine({
+      networkClient: fakeNetworkClient({
+        // signalled deployment carries the bytes32 id from the network
+        // subgraph.
+        signalledDeployments: [dep],
+        networkParams: networkParams(),
+      }),
+      qosClient: fakeQosClient(),
+      graphNodeClient: fakeGraphNodeClient({
+        // graph-node returns the indexing status with the Qm id, matching
+        // real behavior. Before the fix, syncingIds = {qmId} would not
+        // contain bytes32Id and the deployment would be re-recommended.
+        statuses: [indexingStatus({ id: qmId, synced: false })],
+      }),
+      postgresClient: null,
+      agentClient: fakeAgentClient(),
+    });
+    const result = await engine.run(baseConfig());
+
+    // Without the fix: dep appears as an opportunity AND in
+    // ruleRecommendations because syncingIds.has(bytes32Id) returned false
+    // despite the deployment being actively syncing.
+    assert.equal(
+      result.opportunities.filter((o) => o.deploymentId === bytes32Id).length,
+      0,
+      `expected the already-syncing deployment to be filtered out; if it ` +
+        `appears, the syncingIds bytes32 vs Qm mismatch is back`,
+    );
+    assert.equal(
+      result.ruleRecommendations.filter((r) => r.deploymentId === bytes32Id).length,
+      0,
+      `expected no offchain rule recommendation for an already-syncing deployment`,
+    );
+  });
+
   it('with identical signal/volume/cost, candidate with higher APR wins the top slot', async () => {
     // Two candidates with identical signal/volume/entityCount. APR depends on
     // the existing total stake (lower existing stake → higher per-unit APR).

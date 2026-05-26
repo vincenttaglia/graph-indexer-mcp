@@ -45,6 +45,7 @@ import type {
 } from '../types/network.js';
 import type { SubgraphIndexingStatus } from '../types/graphnode.js';
 import { BLOCKS_PER_YEAR } from '../utils/constants.js';
+import { toQmDeploymentId } from '../utils/ipfs.js';
 
 // =============================================================================
 // Public types
@@ -156,6 +157,26 @@ const DEFAULT_MAX_CANDIDATES = 10;
 /** Concurrency cap for per-deployment fan-outs (graphman info, allocations, etc.). */
 const FANOUT_CONCURRENCY = 8;
 
+/**
+ * Normalize a deployment id to the canonical Qm form used by every
+ * internal map / set in this service. Accepts either bytes32 (`0x…`) or
+ * Qm (`Qm…`) encodings via `toQmDeploymentId`. Anything else (opaque
+ * test-fixture ids, unrecognized encodings) falls back to lowercase so
+ * the same input always produces the same output across call sites.
+ *
+ * Lenient by design — discovery's read paths must not crash on a single
+ * malformed id from any one client. The trade-off is that an unknown
+ * encoding only unifies with itself (not across producers), which
+ * matches the prior pre-Qm behavior.
+ */
+function normalizeDeploymentId(raw: string): string {
+  try {
+    return toQmDeploymentId(raw);
+  } catch {
+    return raw.toLowerCase();
+  }
+}
+
 // =============================================================================
 // Implementation
 // =============================================================================
@@ -171,9 +192,15 @@ export class DiscoveryEngine {
     const errors: string[] = [];
 
     const lowerAddr = config.indexerAddress.toLowerCase();
-    const whitelist = new Set(config.whitelist.map((s) => s.toLowerCase()));
-    const blacklist = new Set(config.blacklist.map((s) => s.toLowerCase()));
-    const frozenlist = new Set(config.frozenlist.map((s) => s.toLowerCase()));
+    // Normalize operator-supplied deployment lists to Qm canonical form so
+    // they unify with internal Qm-keyed sets regardless of whether the
+    // operator gave us bytes32 (`0x…`) or Qm (`Qm…`) ids. Lowercasing the
+    // raw input was insufficient because the two encodings never compare
+    // equal — a bytes32 entry in `frozenlist` would silently fail to match
+    // a Qm-form `status.subgraph` during cleanup.
+    const whitelist = new Set(config.whitelist.map(normalizeDeploymentId));
+    const blacklist = new Set(config.blacklist.map(normalizeDeploymentId));
+    const frozenlist = new Set(config.frozenlist.map(normalizeDeploymentId));
 
     throwIfAborted(opts?.signal);
 
@@ -251,14 +278,27 @@ export class DiscoveryEngine {
 
     throwIfAborted(opts?.signal);
 
-    const signalledIds = new Set(signalledPage.items.map((d) => d.id));
+    // Internal canonical form is Qm (IPFS CIDv0).
+    //
+    // The network subgraph returns deployment ids in bytes32 (`0x…`) form;
+    // graph-node's `indexingStatuses` returns them in Qm form. Without
+    // unifying both sides every set membership check
+    // (`syncingIds.has(dep.id)`, `allocatedDeploymentIds.has(status.subgraph)`)
+    // silently misses across encodings — discovery would either re-pick
+    // already-syncing deployments as opportunities or fail to classify
+    // genuinely stale ones during cleanup.
+    const signalledIds = new Set(
+      signalledPage.items.map((d) => normalizeDeploymentId(d.id)),
+    );
     const signalledById = new Map<string, SubgraphDeployment>(
-      signalledPage.items.map((d) => [d.id, d]),
+      signalledPage.items.map((d) => [normalizeDeploymentId(d.id), d]),
     );
     const allocatedDeploymentIds = new Set(
-      activeAllocations.map((a) => a.subgraphDeployment.id),
+      activeAllocations.map((a) => normalizeDeploymentId(a.subgraphDeployment.id)),
     );
-    const syncingIds = new Set(indexingStatuses.map((s) => s.subgraph));
+    const syncingIds = new Set(
+      indexingStatuses.map((s) => normalizeDeploymentId(s.subgraph)),
+    );
 
     // ------------------------------------------------------------------------
     // CLEANUP HALF
@@ -333,7 +373,9 @@ export class DiscoveryEngine {
     }
 
     // Best-effort: fetch the full deployment size catalog up-front so we don't
-    // hit postgres once per stale deployment. Postgres is optional.
+    // hit postgres once per stale deployment. Postgres is optional. Keys are
+    // normalized to Qm to unify with the cleanup loop's `status.subgraph`
+    // (graph-node returns Qm natively).
     const sizesById = new Map<string, bigint>();
     if (this.deps.postgresClient) {
       try {
@@ -341,7 +383,7 @@ export class DiscoveryEngine {
           signal ? { signal } : undefined,
         );
         for (const s of sizes) {
-          sizesById.set(s.deploymentId, BigInt(s.sizeBytes));
+          sizesById.set(normalizeDeploymentId(s.deploymentId), BigInt(s.sizeBytes));
         }
       } catch (err) {
         // Abort propagation precedes degradation: a cancelled postgres call
@@ -397,14 +439,19 @@ export class DiscoveryEngine {
 
     for (const status of indexingStatuses) {
       const deploymentId = status.subgraph;
-      const idLower = deploymentId.toLowerCase();
+      // Normalize for membership checks: indexingStatuses come from
+      // graph-node in Qm form; allocated/signalled/frozenlist/whitelist
+      // sets are normalized to Qm at the gather boundary. Using the raw
+      // `deploymentId` directly works only when both sides happen to be
+      // Qm — `normalizeDeploymentId` makes that explicit and idempotent.
+      const idKey = normalizeDeploymentId(deploymentId);
 
       // Pause comes from the indexing-status fetch itself.
       const paused = status.paused;
-      const hasAllocation = allocatedDeploymentIds.has(deploymentId);
-      const hasSignal = signalledIds.has(deploymentId);
-      const isFrozen = frozenlist.has(idLower);
-      const isWhitelisted = whitelist.has(idLower);
+      const hasAllocation = allocatedDeploymentIds.has(idKey);
+      const hasSignal = signalledIds.has(idKey);
+      const isFrozen = frozenlist.has(idKey);
+      const isWhitelisted = whitelist.has(idKey);
 
       // Skip the whole sync state — graph-node is still pulling a fresh
       // deployment and we shouldn't propose tearing it down mid-flight.
@@ -449,7 +496,7 @@ export class DiscoveryEngine {
 
       if (!reason) continue;
 
-      const sizeBytes = sizesById.get(deploymentId) ?? null;
+      const sizeBytes = sizesById.get(idKey) ?? null;
       stale.push({
         deploymentId,
         reason,
@@ -596,11 +643,16 @@ export class DiscoveryEngine {
     // ------------------------------------------------------------------------
     const candidates: SubgraphDeployment[] = [];
     let deniedDropped = 0;
+    // `signalled` items come from the network subgraph in bytes32 form;
+    // every lookup set (allocated / syncing / blacklist) is in the Qm
+    // canonical form. Normalize dep.id per iteration so set membership
+    // works across encodings — the previous bytes32-vs-Qm mismatch was
+    // silently re-picking already-syncing deployments as opportunities.
     for (const dep of signalled) {
-      if (allocatedDeploymentIds.has(dep.id)) continue;
-      if (syncingIds.has(dep.id)) continue;
-      const idLower = dep.id.toLowerCase();
-      if (blacklist.has(idLower)) continue;
+      const key = normalizeDeploymentId(dep.id);
+      if (allocatedDeploymentIds.has(key)) continue;
+      if (syncingIds.has(key)) continue;
+      if (blacklist.has(key)) continue;
       // `deniedAt` is typed `number` per the network-subgraph schema but the
       // GraphQL endpoint occasionally returns it as a string. Normalize via
       // `Number(...)` so `'0'` is treated identically to `0`.
@@ -649,7 +701,16 @@ export class DiscoveryEngine {
           // so parse it directly via BigInt. Truncate any decimal part
           // defensively and guard against negative or malformed strings —
           // a bad row should not poison the whole map.
-          queryVolumeById.set(v.deployment_id, parseQueryCount(v.query_count));
+          //
+          // Normalize the key to Qm canonical form. The Gateway QoS Oracle
+          // subgraph stores `SubgraphDeployment.id` as the IPFS hash, so
+          // this is usually idempotent — but candidate lookups below use
+          // bytes32-form `dep.id`, so we ALSO normalize via the same path
+          // when reading so encodings unify.
+          queryVolumeById.set(
+            normalizeDeploymentId(v.deployment_id),
+            parseQueryCount(v.query_count),
+          );
         }
       }
       if (qosVolumeTruncated) {
@@ -708,8 +769,11 @@ export class DiscoveryEngine {
         );
       }
 
-      const queryVolume30d = queryVolumeById.has(dep.id)
-        ? (queryVolumeById.get(dep.id) ?? null)
+      // Normalize the lookup key — queryVolumeById is keyed by Qm and
+      // dep.id comes from the network subgraph in bytes32 form.
+      const volKey = normalizeDeploymentId(dep.id);
+      const queryVolume30d = queryVolumeById.has(volKey)
+        ? (queryVolumeById.get(volKey) ?? null)
         : null;
 
       // entityCount: best-effort. graph-node returns null when the

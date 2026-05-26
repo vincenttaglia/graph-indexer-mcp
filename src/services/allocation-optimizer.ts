@@ -37,6 +37,7 @@ import type {
 } from '../types/network.js';
 import type { SubgraphIndexingStatus } from '../types/graphnode.js';
 import { BLOCKS_PER_YEAR } from '../utils/constants.js';
+import { toQmDeploymentId } from '../utils/ipfs.js';
 
 // ===========================================================================
 // Public types
@@ -357,22 +358,58 @@ export class AllocationOptimizer {
     // ---------------------------------------------------------------------
     // Build the candidate universe BEFORE the per-deployment queries we
     // need so we can fetch graph-node + graphman + qos by id-set.
+    //
+    // Internal canonical form is Qm (IPFS CIDv0). Network-subgraph IDs
+    // arrive in bytes32 form (`0x…`); graph-node's `indexingStatuses`
+    // response is in Qm form. Normalizing every internal key/set to Qm at
+    // the gather boundary makes every downstream lookup
+    // (`statusById.get(id)`, set membership, etc.) consistent — the prior
+    // bug was a bytes32 candidate id missing every Qm-keyed status entry,
+    // dropping every candidate and recommending all-allocations-closed.
+    //
+    // `qmToOriginalId` preserves the operator's original ID format so
+    // user-facing output (proposedAllocations[].deploymentId,
+    // actions[].deploymentId) round-trips back to the form they gave us.
     // ---------------------------------------------------------------------
-    const whitelist = new Set(config.whitelist);
-    const blacklist = new Set(config.blacklist);
-    const frozenSet = new Set(config.frozenlist);
-    const riskySet = new Set(config.riskyDeployments);
+    const qmToOriginalId = new Map<string, string>();
+    /**
+     * Normalize a deployment id to Qm canonical form for internal lookups.
+     *
+     * Accepts either bytes32 (`0x…`) or Qm (`Qm…`) encodings via
+     * `toQmDeploymentId`. Anything else (e.g. an opaque test fixture id, or
+     * a future encoding we don't yet recognize) falls through unchanged
+     * rather than throwing — the optimizer's gather phase must not crash on
+     * a malformed id from any single client. Such ids simply don't unify
+     * across encodings, which is the prior behavior.
+     */
+    const normalizeToQm = (raw: string): string => {
+      let qm: string;
+      try {
+        qm = toQmDeploymentId(raw);
+      } catch {
+        qm = raw;
+      }
+      if (!qmToOriginalId.has(qm)) qmToOriginalId.set(qm, raw);
+      return qm;
+    };
+    const originalOf = (qm: string): string => qmToOriginalId.get(qm) ?? qm;
+
+    const whitelist = new Set(config.whitelist.map(normalizeToQm));
+    const blacklist = new Set(config.blacklist.map(normalizeToQm));
+    const frozenSet = new Set(config.frozenlist.map(normalizeToQm));
+    const riskySet = new Set(config.riskyDeployments.map(normalizeToQm));
 
     const currentByDeployment = new Map<string, Allocation>();
     for (const alloc of activeAllocations) {
+      const qm = normalizeToQm(alloc.subgraphDeployment.id);
       // Keep the largest active allocation per deployment if there are
       // multiple (shouldn't happen, but the schema doesn't forbid it).
-      const existing = currentByDeployment.get(alloc.subgraphDeployment.id);
+      const existing = currentByDeployment.get(qm);
       if (
         !existing ||
         toBigInt(alloc.allocatedTokens) > toBigInt(existing.allocatedTokens)
       ) {
-        currentByDeployment.set(alloc.subgraphDeployment.id, alloc);
+        currentByDeployment.set(qm, alloc);
       }
     }
 
@@ -381,7 +418,7 @@ export class AllocationOptimizer {
     // a deployment just because it dipped under minSignal between runs.
     const candidateIds = new Set<string>();
     for (const dep of signalledDeployments) {
-      candidateIds.add(dep.id);
+      candidateIds.add(normalizeToQm(dep.id));
     }
     for (const id of whitelist) candidateIds.add(id);
     for (const id of currentByDeployment.keys()) candidateIds.add(id);
@@ -398,6 +435,8 @@ export class AllocationOptimizer {
     // read path no longer touches graphman at all. Graphman remains
     // required only for executing the resulting mutation plan.
     // ---------------------------------------------------------------------
+    // All Qm-form. The graph-node client also normalizes its inputs, but
+    // passing Qm here keeps cache keys consistent with the response form.
     const candidateIdList = Array.from(candidateIds);
 
     const [statusesRes, qosRes] = await Promise.allSettled([
@@ -448,7 +487,21 @@ export class AllocationOptimizer {
         } catch {
           v = 0n;
         }
-        qosVolumeById.set(row.deployment_id, v < 0n ? 0n : v);
+        // Normalize QoS deployment IDs to the same Qm canonical form used
+        // for every other internal lookup. The Gateway QoS Oracle subgraph
+        // schema defines `SubgraphDeployment.id` as the IPFS hash (CIDv0),
+        // so this is usually a no-op — `toQmDeploymentId` is idempotent on
+        // Qm input — but guards against a future schema change emitting
+        // bytes32 and silently dropping every volume hint.
+        let key: string;
+        try {
+          key = toQmDeploymentId(row.deployment_id);
+        } catch {
+          // Malformed id from the QoS surface — skip the row rather than
+          // poisoning the map.
+          continue;
+        }
+        qosVolumeById.set(key, v < 0n ? 0n : v);
       }
     } else {
       errors.push(`qos.getTopQueriedDeployments failed: ${errString(qosRes.reason)}`);
@@ -463,34 +516,42 @@ export class AllocationOptimizer {
     // and APR / A_total inputs would be garbage.
     const signalledById = new Map<string, SubgraphDeployment>();
     for (const dep of signalledDeployments) {
-      signalledById.set(dep.id, dep);
+      signalledById.set(normalizeToQm(dep.id), dep);
     }
 
     // Hydrate whitelist/current-only candidates missing from the signalled
     // query (Finding 1). Run in parallel via allSettled so a single failed
     // lookup doesn't poison the batch — errors are logged best-effort.
+    //
+    // Internal candidateIdList is Qm-form; the network-subgraph
+    // `getDeployment` query accepts either form (and our network-subgraph
+    // client passes through), but we pass the operator's original form
+    // when possible so the hit/miss diagnostics match what they configured.
     const missingIds = candidateIdList.filter(
       (id) => !signalledById.has(id) && !blacklist.has(id),
     );
     if (missingIds.length > 0) {
       const hydrateResults = await Promise.allSettled(
-        missingIds.map((id) => this.deps.networkClient.getDeployment(id, sigOpt)),
+        missingIds.map((id) =>
+          this.deps.networkClient.getDeployment(originalOf(id), sigOpt),
+        ),
       );
       for (let i = 0; i < missingIds.length; i++) {
         const id = missingIds[i]!;
         const res = hydrateResults[i]!;
+        const displayId = originalOf(id);
         if (res.status === 'fulfilled') {
           if (res.value) {
             signalledById.set(id, res.value);
           } else {
             warnings.push(
-              `network.getDeployment("${id}") returned null — candidate has ` +
+              `network.getDeployment("${displayId}") returned null — candidate has ` +
                 'no signal/stake data; skipping APR contribution',
             );
           }
         } else {
           errors.push(
-            `network.getDeployment("${id}") failed: ${errString(res.reason)}`,
+            `network.getDeployment("${displayId}") failed: ${errString(res.reason)}`,
           );
         }
       }
@@ -538,7 +599,11 @@ export class AllocationOptimizer {
       const currentAllocation = current ? toBigInt(current.allocatedTokens) : 0n;
 
       const candidate: OptimizationCandidate = {
-        deploymentId: id,
+        // User-facing field: keep the operator's original ID format so
+        // downstream consumers (proposedAllocations, actions, indexer-agent
+        // queue) see the same shape the operator gave us. Internal lookups
+        // happen against `id` (Qm); only the output is denormalized.
+        deploymentId: originalOf(id),
         signalledTokens,
         totalStakedTokens,
         currentAllocation,
@@ -582,16 +647,20 @@ export class AllocationOptimizer {
 
     // Frozen allocations: keep them as-is, count their stake against
     // available, and surface them in the proposal so operators see the full
-    // intended end state.
+    // intended end state. `id` here is the Qm canonical form
+    // (currentByDeployment is keyed by Qm); candidate.deploymentId is the
+    // operator's original form, so we look the candidate up via the
+    // original-id reverse map rather than equality on `id`.
     const frozenProposals: ProposedAllocation[] = [];
     let frozenStakeUsed = 0n;
     for (const [id, alloc] of currentByDeployment) {
       if (!frozenSet.has(id)) continue;
       const amount = toBigInt(alloc.allocatedTokens);
       frozenStakeUsed += amount;
+      const original = originalOf(id);
       // Use the candidate snapshot if we have one — otherwise build a minimal
       // fall-back so the projected APR still reflects the chain state.
-      const cand = candidates.find((c) => c.deploymentId === id);
+      const cand = candidates.find((c) => c.deploymentId === original);
       const projectedAprFraction = cand
         ? calculateApr({
             signal: cand.signalledTokens,
@@ -605,7 +674,7 @@ export class AllocationOptimizer {
           })
         : 0;
       frozenProposals.push({
-        deploymentId: id,
+        deploymentId: original,
         allocatedTokens: amount,
         projectedAprFraction,
         rationale: 'frozen — preserved per operator configuration',
@@ -648,11 +717,19 @@ export class AllocationOptimizer {
 
     // ---------------------------------------------------------------------
     // 5. Generate diff actions.
+    //
+    // `currentByDeployment` and `frozenSet` are keyed by Qm; the proposal
+    // emits `deploymentId` in the operator's original form. Pass the
+    // reverse map so diffActions can join on Qm internally while still
+    // emitting actions with the original-form id (matching what consumers
+    // — indexer-agent queue, action UI — receive elsewhere).
     // ---------------------------------------------------------------------
     const actions = this.diffActions({
       currentByDeployment,
       proposedAllocations,
       frozenSet,
+      toQm: normalizeToQm,
+      originalOf,
     });
 
     return {
@@ -874,17 +951,32 @@ export class AllocationOptimizer {
     currentByDeployment: Map<string, Allocation>;
     proposedAllocations: ProposedAllocation[];
     frozenSet: Set<string>;
+    /**
+     * Convert a deploymentId (in either canonical encoding) to Qm form for
+     * map/set lookups. Internal keys are Qm throughout (see gatherState).
+     */
+    toQm: (s: string) => string;
+    /**
+     * Recover the operator's original deployment-id encoding for a given Qm
+     * key. Used so emitted actions match the form callers passed in.
+     */
+    originalOf: (qm: string) => string;
   }): AgentActionPlan[] {
-    const { currentByDeployment, proposedAllocations, frozenSet } = args;
+    const { currentByDeployment, proposedAllocations, frozenSet, toQm, originalOf } = args;
+
+    // proposedById is keyed by Qm so the "in current, not in proposed"
+    // sweep below can use the Qm key from currentByDeployment without
+    // having to denormalize each entry first.
     const proposedById = new Map<string, ProposedAllocation>();
-    for (const p of proposedAllocations) proposedById.set(p.deploymentId, p);
+    for (const p of proposedAllocations) proposedById.set(toQm(p.deploymentId), p);
 
     const actions: AgentActionPlan[] = [];
 
     // New / changed allocations.
     for (const p of proposedAllocations) {
-      if (frozenSet.has(p.deploymentId)) continue;
-      const current = currentByDeployment.get(p.deploymentId);
+      const qm = toQm(p.deploymentId);
+      if (frozenSet.has(qm)) continue;
+      const current = currentByDeployment.get(qm);
       if (!current) {
         if (p.allocatedTokens > 0n) {
           actions.push({
@@ -916,13 +1008,15 @@ export class AllocationOptimizer {
       }
     }
 
-    // Allocations to close (not in proposal at all).
+    // Allocations to close (not in proposal at all). `id` here is the Qm
+    // canonical key; we emit the original-form id so the action matches
+    // what the operator sees in the rest of the report.
     for (const [id, current] of currentByDeployment) {
       if (frozenSet.has(id)) continue;
       if (proposedById.has(id)) continue;
       actions.push({
         type: 'unallocate',
-        deploymentId: id,
+        deploymentId: originalOf(id),
         allocationId: current.id,
         reason: 'optimizer dropped deployment from plan',
       });

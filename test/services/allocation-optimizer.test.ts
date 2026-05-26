@@ -351,6 +351,73 @@ describe('AllocationOptimizer.run', () => {
     assert.ok(/risky/i.test(prop!.rationale));
   });
 
+  it('handles bytes32-form candidate IDs against Qm-form status responses (regression: §4.1 step 2.1 dropped every candidate)', async () => {
+    // Live reproducer for the deployment-id encoding mismatch.
+    //
+    // The network subgraph stores `SubgraphDeployment.id` as bytes32
+    // (`0x…`), but graph-node's `indexingStatuses.subgraph` field comes
+    // back in Qm (IPFS CIDv0) form. Before the fix, AllocationOptimizer
+    // built `statusById` keyed by the Qm response value, then looked it up
+    // via the bytes32 candidate id — every lookup missed, every candidate
+    // appeared to have "no status available", the §4.1 step 2.1 sync /
+    // health gate filtered them all out, candidatesAfterFilter dropped to
+    // 0, and the optimizer recommended closing every existing allocation
+    // as "no longer worth keeping".
+    //
+    // The id pair below (0xebdb…459c ↔ Qm…CFu) is a real bytes32/Qm pair
+    // computed via the project's `toQmDeploymentId` helper. If the bug
+    // regresses, candidatesAfterFilter falls to 0 and the assertion below
+    // catches it.
+    const bytes32Id =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const qmId = 'QmeDLbKHYypURMRigRxSspUm8w5zrDfXc3Skw2PiDxqCFu';
+
+    const dep = deployment({
+      id: bytes32Id,
+      signal: 100_000n * 10n ** 18n,
+      staked: GRT(1n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        // signalled deployment carries the bytes32 id, matching what the
+        // network subgraph really returns.
+        signalledDeployments: [dep],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        // Fake returns the status with the Qm id, matching real graph-node
+        // behavior. Before the fix, statusById would be keyed by qmId and
+        // miss every lookup against the bytes32 candidate.
+        statuses: [indexingStatus({ id: qmId })],
+      }),
+      qosClient: fakeQosClient(),
+      // graphmanClient omitted — services should work without it.
+      agentClient: fakeAgentClient(),
+    });
+
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // Without the fix: candidatesAfterFilter === 0 (status missing → §4.1
+    // step 2.1 sync/health gate drops the candidate).
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      1,
+      `expected the bytes32 candidate to survive the filter via Qm-normalized status lookup; ` +
+        `if 0, the Qm vs bytes32 key mismatch is back`,
+    );
+
+    // The proposal preserves the operator's original ID format (bytes32),
+    // so consumers downstream (indexer-agent action queue, action UI) see
+    // the same shape they configured rather than a denormalized Qm.
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === bytes32Id),
+      `expected candidate proposed with original bytes32 id; got: ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
+    );
+  });
+
   it('skips a candidate when projected annual reward < 2x gas budget', async () => {
     // Build a deployment that passes minSignal but has tiny signal share so
     // projected rewards are dwarfed by an artificially huge gas budget.
