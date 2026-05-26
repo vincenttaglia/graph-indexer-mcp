@@ -356,18 +356,25 @@ export class DiscoveryEngine {
 
     throwIfAborted(signal);
 
-    // Pause + assigned-node now come straight from the `indexingStatuses`
-    // result above — graph-node's GraphQL schema exposes `paused` and
-    // `node` natively, so we no longer fan out a graphman lookup per
-    // deployment. This makes cleanup classification work entirely without
-    // a configured graphman API.
+    // Pause now comes straight from the `indexingStatuses` result above —
+    // graph-node's GraphQL schema exposes `paused` natively, so we no
+    // longer fan out a graphman lookup per deployment. This makes cleanup
+    // classification work entirely without a configured graphman API.
     //
-    // `node === null` (or empty) means the deployment is unassigned to any
-    // index-node — historically the strongest "orphaned" signal. graph-node
-    // versions that don't surface `node` will populate it as null via the
-    // normalizer's safe default, which falls through to the conjunctive
-    // paused+no-allocation+no-signal rule below — same behavior as the old
-    // "graphman info missing" branch.
+    // Note on `status.node`: we deliberately do NOT drive cleanup off the
+    // `node` field alone. It's exposed on the type for operator-facing
+    // visibility (and surfaced in raw indexing-status output for manual
+    // investigation), but as the sole trigger for `orphaned` it produces
+    // false positives we can't tolerate:
+    //   - Older graph-node versions omit the field; the client normalizer
+    //     defaults it to `null` on a successful response, which would
+    //     reclassify every synced deployment as orphaned overnight after
+    //     such a server.
+    //   - Transient unassignment during graph-node restarts / rebalances
+    //     can briefly null the field for healthy deployments.
+    // The conjunctive rule (paused + no-allocation + no-signal) is the
+    // only one that emits cleanup actions; it requires corroborating
+    // evidence the deployment is genuinely abandoned.
 
     throwIfAborted(signal);
 
@@ -392,13 +399,8 @@ export class DiscoveryEngine {
       const deploymentId = status.subgraph;
       const idLower = deploymentId.toLowerCase();
 
-      // Pause and assignment now come from the indexing-status fetch
-      // itself. `status.node` is null when the deployment isn't assigned
-      // to any index-node; `'removed'` is the historical graph-node
-      // sentinel for explicit removal. Both mean the same thing here.
+      // Pause comes from the indexing-status fetch itself.
       const paused = status.paused;
-      const node = status.node;
-      const unassigned = node === null || node === 'removed';
       const hasAllocation = allocatedDeploymentIds.has(deploymentId);
       const hasSignal = signalledIds.has(deploymentId);
       const isFrozen = frozenlist.has(idLower);
@@ -412,21 +414,21 @@ export class DiscoveryEngine {
       // the most actionable; orphaned trumps unallocated since it's
       // infrastructure-level).
       //
-      // `orphaned` requires conjunctive evidence — a deployment that is
-      // *only* paused (with no other corroborating signal) might be a
+      // `orphaned` requires conjunctive evidence: paused AND no allocation
+      // AND no signal — i.e. paused on something the indexer has no
+      // remaining stake in. A deployment that is *only* paused might be a
       // deliberate maintenance pause and must NOT be proposed for cleanup.
-      // Stronger evidence:
-      //   - unassigned (graph-node reports `node === null` / `'removed'`,
-      //     meaning no index-node owns this deployment), OR
-      //   - paused AND (no allocation AND no signal) — i.e. paused on
-      //     something the indexer has no remaining stake in.
-      // The unassigned signal now comes from graph-node's indexingStatuses
-      // (the same fetch we use for sync/health), so cleanup classification
-      // no longer depends on a graphman API being configured.
+      //
+      // `status.node === null` on its own is intentionally NOT enough —
+      // older graph-node versions omit the field (the client normalizer
+      // defaults it to `null`), and transient unassignment during node
+      // restarts is common. False-positive orphaned classification would
+      // generate spurious cleanup steps for every synced deployment. The
+      // field is still exposed on the type for operator-facing visibility;
+      // operators investigating directly can see node:null in raw
+      // indexing-status output.
       let reason: StaleDeployment['reason'] | null = null;
-      if (unassigned) {
-        reason = 'orphaned';
-      } else if (paused && !hasAllocation && !hasSignal) {
+      if (paused && !hasAllocation && !hasSignal) {
         reason = 'orphaned';
       } else if (paused) {
         // Paused alone is not enough. Surface a warning so operators can
@@ -531,9 +533,13 @@ export class DiscoveryEngine {
         case 'superseded':
           return 'a newer version of this subgraph is deployed';
         case 'orphaned':
+          // Only emitted via the conjunctive rule (paused + no allocation +
+          // no signal). The `paused` guard is therefore always true at this
+          // point — keep the ternary defensive in case the rule widens
+          // later, but lead with the paused phrasing.
           return opts.paused
-            ? 'deployment is paused and not generating rewards'
-            : 'deployment is unassigned from any indexing node';
+            ? 'deployment is paused with no allocation and no signal — abandoned'
+            : 'deployment classified orphaned via cleanup rules';
       }
     })();
     const closeNote = opts.hasAllocation
