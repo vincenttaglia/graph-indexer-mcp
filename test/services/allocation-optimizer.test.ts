@@ -2,11 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AllocationOptimizer,
-  bigIntSqrt,
-  bisectLambda,
   calculateApr,
   type OptimizerConfig,
-  type WaterFillPick,
 } from '../../src/services/allocation-optimizer.js';
 import {
   allocation,
@@ -630,20 +627,19 @@ describe('AllocationOptimizer.run', () => {
     );
   });
 
-  it('fresh deployment (D=0) receives zero water-filled allocation when a saturated peer exists', async () => {
-    // Water-filling math: A_i = max(0, sqrt(R_i × D_i / λ) − D_i). For
-    // D_i = 0 this collapses to sqrt(0) − 0 = 0. The economic intuition:
-    // indexer reward on a deployment is R_i × A_i / (D_i + A_i), which at
-    // D_i = 0 equals R_i for any A_i > 0. Adding stake to a fresh
-    // deployment doesn't increase reward; spending the budget on a
-    // saturated peer (where marginal reward > 0) strictly dominates.
+  it('fresh deployment (D=0) gets at most one chunk; saturated peer absorbs the rest', async () => {
+    // Iterative-greedy: a fresh D=0 deployment has total reward
+    // R × A / (0 + A) = R, constant in A for A > 0. So its TRUE marginal at
+    // A=0 is undefined (infinite) and at any A>0 is exactly zero. The
+    // algorithm models this by giving D=0 a MAX_MARGINAL sentinel at A=0,
+    // which wins one chunk; after that its marginal drops to 0 and it
+    // never wins again. Net effect: D=0 consumes ONE slot for ONE chunk
+    // (~availableStake/1000) — vastly less than a saturated peer.
     //
-    // This previously failed in the most user-impacting way: the linear
-    // S/D weighting assigned the lion's share of the budget to fresh
-    // D=0 deployments (denominator was floored at 1 GRT → weight blew
-    // up), only to realize APR ≈ 0 once allocated. Now the saturated
-    // peer correctly absorbs all the budget, and the fresh one is
-    // skipped (no entry in proposedAllocations).
+    // Why claim the chunk at all rather than skip the candidate entirely?
+    // For A > 0 the indexer still earns R per epoch on the deployment; the
+    // chunk is the minimum stake to make that claim. The remaining budget
+    // is then water-filled to saturated peers where marginal > 0.
     const fresh = deployment({
       id: Q.OK,
       signal: GRT(1_000n),
@@ -679,14 +675,6 @@ describe('AllocationOptimizer.run', () => {
     const saturatedProp = result.proposedAllocations.find(
       (p) => p.deploymentId === Q.RUNNING,
     );
-    // Fresh deployment is not proposed (water-filling assigns it zero).
-    assert.equal(
-      freshProp,
-      undefined,
-      `expected fresh D=0 deployment to be skipped from proposals; got ${
-        freshProp ? `amount=${freshProp.allocatedTokens.toString()}` : 'undefined'
-      }`,
-    );
     // Saturated peer absorbs budget (bounded by per-deployment cap).
     assert.ok(saturatedProp, 'saturated peer must be in proposals');
     assert.ok(
@@ -700,34 +688,36 @@ describe('AllocationOptimizer.run', () => {
       `saturated peer should be bounded by per-deployment cap; ` +
         `got ${saturatedProp!.allocatedTokens} > cap ${cap}`,
     );
+    // Fresh deployment: gets at most one chunk (~availableStake/1000 with
+    // CHUNKS=1000). Saturated peer must dominate by >100×.
+    const freshAmount = freshProp?.allocatedTokens ?? 0n;
+    const oneChunk = GRT(1_000_000n) / 1000n + 1n; // chunk ≤ avail/1000
+    assert.ok(
+      freshAmount <= oneChunk,
+      `fresh D=0 deployment must not exceed one chunk; got ${freshAmount}, chunk ≤ ${oneChunk}`,
+    );
+    assert.ok(
+      saturatedProp!.allocatedTokens > freshAmount * 100n,
+      `saturated peer must dominate fresh by >100×; saturated=${saturatedProp!.allocatedTokens}, fresh=${freshAmount}`,
+    );
   });
 
-  it('allocates meaningful budget to a saturated high-S peer and zero to a fresh D=0 peer', async () => {
-    // Regression test for the user's reported bug. The fix had two parts:
-    //   (a) probe-APR ranking previously inflated fresh D=0 deployments'
-    //       rank by dividing by probeAmount ≈ 1k GRT instead of the
-    //       realistic full-allocation denominator, crowding out the
-    //       user's current saturated-but-healthy allocations. Cap-aware
-    //       ranking now uses the realistic denominator.
-    //   (b) S/D linear weighting then assigned most of the budget to
-    //       those fresh deployments (D=0 → weight ≈ ∞), where realized
-    //       APR collapsed. Water-filling correctly assigns 0 to D=0.
+  it('allocates meaningful budget to a saturated high-S peer; fresh D=0 peer is capped at one chunk', async () => {
+    // Regression test for the user's reported bug. Under iterative-greedy
+    // water-filling, a saturated current with high R/D dominates a fresh
+    // D=0 peer of equal signal:
+    //   - Fresh D=0: claims one chunk (~availableStake/1000) via the
+    //     "claim me first" sentinel, then its marginal collapses to zero.
+    //   - Saturated: water-fills from the remaining budget up to its cap.
     //
-    // This test does NOT compute the status-quo APR or compare against a
-    // numeric baseline. It verifies the two behavioral invariants that
-    // make the regression impossible:
-    //   1. The saturated, currently-allocated, high-signal deployment
-    //      receives a meaningful allocation (> noise threshold).
-    //   2. The fresh D=0 deployment receives exactly zero (water-filling
-    //      math: its reward is independent of A_i).
-    // For an actual APR comparison see the "weighted APR exceeds ..."
-    // suite (if/when added); duplicating that scaffolding here is not
-    // worth the noise.
-    //
-    // Scenario: one high-signal saturated current allocation + one fresh
-    // zero-D deployment with the same signal. Cap-aware ranking puts
-    // the saturated one first; water-filling allocates a meaningful
-    // amount to the saturated pick and ZERO to the fresh one.
+    // The previous picks+bisection approach broke in two ways:
+    //   (a) Rank-by-cap-APR put the fresh D=0 above the saturated peer
+    //       (its cap-APR ≈ R/cap dominated R/(D+cap)).
+    //   (b) Bisection correctly gave the fresh peer zero, but the slot
+    //       was already consumed — wasting maxAllocations capacity on a
+    //       zero-result pick.
+    // Iterative-greedy spends ONE slot for ONE chunk on D=0, then frees
+    // the rest of the budget for the saturated current.
     const saturated = deployment({
       id: Q.OK,
       signal: GRT(2_037n),
@@ -779,108 +769,178 @@ describe('AllocationOptimizer.run', () => {
       saturatedAmount > GRT(5_000n),
       `expected saturated high-S deployment to get >5k GRT; got ${saturatedAmount}`,
     );
-    // The fresh D=0 deployment must get zero — water-filling correctly
-    // refuses to waste budget on a deployment where indexer reward is
-    // independent of A_i.
-    assert.equal(
-      freshAmount,
-      0n,
-      `fresh D=0 deployment must get zero water-filled allocation; got ${freshAmount}`,
-    );
-  });
-});
-
-describe('bigIntSqrt', () => {
-  it('returns 0 for 0', () => {
-    assert.equal(bigIntSqrt(0n), 0n);
-  });
-
-  it('returns 1 for 1', () => {
-    assert.equal(bigIntSqrt(1n), 1n);
-  });
-
-  it('round-trips on perfect squares', () => {
-    for (const x of [2n, 3n, 7n, 10n, 100n, 12345n, 10n ** 18n, 10n ** 36n]) {
-      assert.equal(bigIntSqrt(x * x), x, `sqrt(${x}²) === ${x}`);
-    }
-  });
-
-  it('returns floor(sqrt(n)) for non-perfect-squares', () => {
-    // floor(sqrt(2)) = 1, floor(sqrt(3)) = 1, floor(sqrt(10)) = 3
-    assert.equal(bigIntSqrt(2n), 1n);
-    assert.equal(bigIntSqrt(3n), 1n);
-    assert.equal(bigIntSqrt(10n), 3n);
-    assert.equal(bigIntSqrt(99n), 9n);
-    // floor(sqrt(10^37)) = 3162277660168379331998893544432718031 (~3.162e18)
-    const big = 10n ** 37n;
-    const root = bigIntSqrt(big);
-    assert.ok(root * root <= big, `floor: root² ≤ n`);
-    assert.ok((root + 1n) * (root + 1n) > big, `tight: (root+1)² > n`);
-  });
-
-  it('is monotonic non-decreasing', () => {
-    let prev = 0n;
-    for (let n = 0n; n < 1000n; n++) {
-      const s = bigIntSqrt(n);
-      assert.ok(s >= prev, `monotonic at n=${n}: prev=${prev}, s=${s}`);
-      prev = s;
-    }
-  });
-
-  it('throws on negative input', () => {
-    assert.throws(() => bigIntSqrt(-1n), /negative/);
-  });
-});
-
-describe('bisectLambda', () => {
-  it('returns zeros when availableStake is 0', () => {
-    const picks: WaterFillPick[] = [
-      { R: 10n ** 18n, D: 10n ** 18n, cap: 10n ** 20n },
-      { R: 5n * 10n ** 17n, D: 2n * 10n ** 18n, cap: 10n ** 20n },
-    ];
-    const out = bisectLambda(picks, 0n);
-    assert.deepEqual(out, [0n, 0n]);
-  });
-
-  it('returns zeros when availableStake is negative (defensive)', () => {
-    const picks: WaterFillPick[] = [{ R: 10n ** 18n, D: 10n ** 18n, cap: 10n ** 20n }];
-    const out = bisectLambda(picks, -5n);
-    assert.deepEqual(out, [0n]);
-  });
-
-  it('does not return over-budget allocations when marginal rewards are tiny', () => {
-    // From the audit: R=3, D=2e18, cap=1e18, availableStake=1n.
-    // With the previous floor-div upper bound on `hi`, bisection settled
-    // on a λ where the closed-form A_i was ~0.449 GRT — orders of
-    // magnitude over a 1-wei budget. With ceil-div on `hi`, the bracket
-    // is honest (sum at hi == 0) so bisection cannot exceed availableStake.
-    const picks: WaterFillPick[] = [{ R: 3n, D: 2n * 10n ** 18n, cap: 10n ** 18n }];
-    const out = bisectLambda(picks, 1n);
-    let sum = 0n;
-    for (const a of out) sum += a;
+    // Fresh D=0 peer must not exceed one chunk (availableStake/CHUNKS).
+    // With indexer staked 100k and (this test) no frozen reservations,
+    // availableStake = 100k GRT → chunk = 100 GRT.
+    const oneChunkPlusEpsilon = GRT(100n) + 1n;
     assert.ok(
-      sum <= 1n,
-      `bisectLambda must not exceed availableStake=1; got sum=${sum.toString()} (out=${out
-        .map((x) => x.toString())
-        .join(',')})`,
+      freshAmount <= oneChunkPlusEpsilon,
+      `fresh D=0 deployment must be at-most one chunk (~100 GRT); got ${freshAmount}`,
+    );
+    // And the saturated peer must dominate the fresh peer by orders of
+    // magnitude — the substantive regression we're guarding against.
+    assert.ok(
+      saturatedAmount > freshAmount * 50n,
+      `saturated peer must dominate fresh by >50×; saturated=${saturatedAmount}, fresh=${freshAmount}`,
     );
   });
 
-  it('never exceeds availableStake across a range of small budgets', () => {
-    // Belt-and-braces: bisection's invariant is sum <= availableStake.
-    const picks: WaterFillPick[] = [
-      { R: 7n, D: 3n * 10n ** 18n, cap: 5n * 10n ** 18n },
-      { R: 11n, D: 2n * 10n ** 18n, cap: 5n * 10n ** 18n },
-      { R: 2n, D: 10n ** 18n, cap: 5n * 10n ** 18n },
-    ];
-    for (const budget of [1n, 10n, 1_000n, 10n ** 9n, 10n ** 15n]) {
-      const out = bisectLambda(picks, budget);
-      let sum = 0n;
-      for (const a of out) sum += a;
+  it('saturated current allocation gets meaningful water-filled stake even when many fresh D=0 candidates exist (regression: user bug)', async () => {
+    // The user's reported scenario in essence: many fresh D=0 candidates +
+    // a few saturated currents. With the previous picks+bisection approach
+    // the fresh D=0 candidates topped the cap-APR ranking and consumed
+    // every slot, leaving the user's saturated currents at zero.
+    //
+    // Under iterative-greedy: each fresh D=0 takes exactly ONE slot for
+    // ONE chunk (~availableStake/1000). The remaining slots and ~99% of
+    // the budget flow to the saturated current via natural water-filling.
+
+    // Build 15 fresh deployments + 1 saturated current.
+    const HEX = '0123456789ABCDEF';
+    const FRESH_IDS: string[] = [];
+    for (let i = 0; i < 15; i++) {
+      // Use slots from the Qm constant pool by mutating last 2 chars to
+      // get distinct valid Qm IDs. Each starts from Q.RUNNING.
+      const j = i.toString(16).toUpperCase().padStart(2, '0');
+      // Real Qm IDs (CIDv0 of bytes32 0x00…0xNN). Derived offline.
+      // This pool is large enough; each is a valid CIDv0 by construction
+      // (bytes32 left-padded with zeros). We compute them at runtime to
+      // avoid hand-keeping a giant table.
+      void HEX;
+      void j;
+    }
+    // Generate Qm IDs corresponding to bytes32 0x00...01, 0x00...02, ...
+    // by reusing the project's IPFS helper. The helper is strict-validated
+    // already (any garbage would throw), so this round-trips cleanly.
+    const { toQmDeploymentId } = await import('../../src/utils/ipfs.js');
+    for (let i = 100; i < 115; i++) {
+      const hex = i.toString(16).padStart(2, '0');
+      const bytes32 = '0x' + '00'.repeat(31) + hex;
+      FRESH_IDS.push(toQmDeploymentId(bytes32));
+    }
+    const SAT_ID = toQmDeploymentId('0x' + '00'.repeat(31) + 'cc');
+
+    // Fresh: small signal, zero stake.
+    const freshDeps = FRESH_IDS.map((id) =>
+      deployment({ id, signal: GRT(1_000n), staked: 0n }),
+    );
+    // Saturated current: high D (other indexers' stake) + this indexer's
+    // existing allocation. totalStakedTokens = D + currentAlloc.
+    const D = GRT(117_000n);
+    const CURR_ALLOC = GRT(11_000n);
+    const saturated = deployment({
+      id: SAT_ID,
+      signal: GRT(2_037n),
+      staked: D + CURR_ALLOC,
+    });
+    const currentAlloc = allocation({
+      id: '0xcurrent_saturated',
+      deploymentId: SAT_ID,
+      allocatedTokens: CURR_ALLOC,
+    });
+
+    const allDeps = [...freshDeps, saturated];
+    const allStatuses = [...FRESH_IDS, SAT_ID].map((id) => indexingStatus({ id }));
+
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(100_000n).toString() }),
+        signalledDeployments: allDeps,
+        activeAllocations: [currentAlloc],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({ statuses: allStatuses }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        maxAllocations: 15,
+        maxAllocationPct: 0.3, // cap = 30k GRT
+        gasEstimateGrt: GRT(0n),
+      }),
+    );
+
+    const satAmount =
+      result.proposedAllocations.find((p) => p.deploymentId === SAT_ID)
+        ?.allocatedTokens ?? 0n;
+
+    // The saturated current must receive a meaningful water-filled stake —
+    // well above the per-fresh chunk size of ~89 GRT.
+    assert.ok(
+      satAmount > GRT(10_000n),
+      `expected saturated current to get >10k GRT; got ${satAmount}`,
+    );
+
+    // Each fresh D=0 must get at most one chunk. availableStake ≈ 89k GRT
+    // (indexer 100k − no frozen reservation in this scenario, but
+    // currentAlloc on SAT counts toward indexer's stake, not against
+    // availableStake — only frozen does). chunk ≤ availableStake/1000.
+    const stakeBudget = GRT(100_000n);
+    const oneChunkPlus = stakeBudget / 1000n + 1n;
+    for (const id of FRESH_IDS) {
+      const amt =
+        result.proposedAllocations.find((p) => p.deploymentId === id)
+          ?.allocatedTokens ?? 0n;
       assert.ok(
-        sum <= budget,
-        `over budget at availableStake=${budget}: sum=${sum.toString()}`,
+        amt <= oneChunkPlus,
+        `fresh deployment ${id} exceeded one chunk: got ${amt}, chunk ≤ ${oneChunkPlus}`,
       );
     }
   });
+
+  it('D=0 deployments get at most one chunk allocation each (claim once, no more)', async () => {
+    // Three fresh D=0 candidates, all with R > 0. Iterative-greedy gives
+    // each one chunk (claim once) and bulk of budget remains idle (no
+    // saturated peer to absorb it).
+    const { toQmDeploymentId } = await import('../../src/utils/ipfs.js');
+    const ID0 = toQmDeploymentId('0x' + '00'.repeat(31) + 'd0');
+    const ID1 = toQmDeploymentId('0x' + '00'.repeat(31) + 'd1');
+    const ID2 = toQmDeploymentId('0x' + '00'.repeat(31) + 'd2');
+    const deps = [
+      deployment({ id: ID0, signal: GRT(1_000n), staked: 0n }),
+      deployment({ id: ID1, signal: GRT(1_000n), staked: 0n }),
+      deployment({ id: ID2, signal: GRT(1_000n), staked: 0n }),
+    ];
+    const statuses = [ID0, ID1, ID2].map((id) => indexingStatus({ id }));
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(10_000n).toString() }),
+        signalledDeployments: deps,
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({ statuses }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        maxAllocations: 10,
+        maxAllocationPct: 0.5,
+        gasEstimateGrt: GRT(0n),
+      }),
+    );
+
+    // Each fresh gets at most one chunk = availableStake/1000 = 10 GRT.
+    const oneChunkPlus = GRT(10n) + 1n;
+    for (const id of [ID0, ID1, ID2]) {
+      const amt =
+        result.proposedAllocations.find((p) => p.deploymentId === id)
+          ?.allocatedTokens ?? 0n;
+      assert.ok(
+        amt <= oneChunkPlus,
+        `fresh ${id} exceeded one chunk; got ${amt}, expected ≤ ${oneChunkPlus}`,
+      );
+    }
+
+    // Sum of all proposed allocations must be a tiny fraction of the
+    // budget — bulk of the budget should remain idle (no saturated peer).
+    let total = 0n;
+    for (const p of result.proposedAllocations) total += p.allocatedTokens;
+    assert.ok(
+      total <= oneChunkPlus * 3n,
+      `expected total proposed ≤ 3 chunks; got ${total}`,
+    );
+  });
 });
+
