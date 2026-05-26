@@ -43,17 +43,27 @@ export const configSchema = z.object({
   /**
    * Gas budget per allocation lifecycle (open + close), denominated in GRT.
    *
-   * Default 0.5 GRT covers single-action allocate/close on Arbitrum One at
-   * typical gas-price load with safety headroom. Operators using batched
-   * action queues (typical via indexer-agent) see effectively ~0.004 GRT
-   * per lifecycle and can set this lower. Mainnet operators (rare now)
-   * should override significantly higher.
+   * Default 0.3 GRT covers Arbitrum One single-mode (non-batched) lifecycle
+   * cost with modest headroom. Real-world observed by an operator running
+   * on Arbitrum One:
+   *
+   *   - Single action (one allocate OR one close): ~$0.01 = ~0.1 GRT
+   *     at GRT ≈ $0.10
+   *   - Single lifecycle (open + close, 2 actions): ~$0.02 = ~0.2 GRT
+   *   - Batched (~100 actions in one tx): ~$0.02 / 100 = ~$0.0002/action
+   *     = ~0.004 GRT per lifecycle when batched
+   *
+   * The default of 0.3 GRT covers the single-mode lifecycle (0.2 GRT)
+   * with 50% headroom for gas-price spikes and GRT/ETH price swings.
+   * Operators using batched action queues (typical via indexer-agent)
+   * can override to 0.01 or lower.
    *
    * The optimizer's gas-floor filter is `projectedReward < 2 × gasEstimateGrt`,
-   * so at 0.5 GRT default it admits any deployment expected to earn at
-   * least 1 GRT/year. Almost all real deployments qualify.
+   * so at the 0.3 GRT default it admits any deployment expected to
+   * earn at least 0.6 GRT/year. This filters dust signal without
+   * excluding real opportunities on Arbitrum.
    */
-  gasEstimateGrt: z.coerce.number().nonnegative().default(0.5),
+  gasEstimateGrt: z.coerce.number().nonnegative().default(0.3),
 
   whitelist: z.array(z.string()).default([]),
   blacklist: z.array(z.string()).default([]),

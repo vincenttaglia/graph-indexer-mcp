@@ -40,7 +40,7 @@ data:
   MAX_ALLOCATION_PCT: "0.25"
   RISKY_DEPLOYMENT_CAP_PCT: "0.05"
   MIN_SIGNAL: "100"
-  GAS_ESTIMATE_GRT: "50"
+  GAS_ESTIMATE_GRT: "0.3"
 
   # --- Lists (comma-separated deployment IPFS hashes) ---
   WHITELIST: ""

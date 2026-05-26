@@ -135,7 +135,12 @@ export function registerCompositeTools(
         .string()
         .regex(GRT_DECIMAL)
         .optional()
-        .describe('Gas budget per allocation lifecycle in GRT (decimal).'),
+        .describe(
+          'Gas budget per allocation lifecycle (open + close) in GRT (decimal). ' +
+            'Defaults to 0.3 GRT — Arbitrum One single-mode (non-batched) ' +
+            'submission with ~50% headroom (real cost ~0.2 GRT/lifecycle). ' +
+            'Drop to ~0.01 if you batch via the indexer-agent action queue.',
+        ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();

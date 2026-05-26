@@ -104,17 +104,17 @@ Workarounds:
 
 ### "Optimizer skips deployments with `projected annual reward < 2× gas`"
 
-The optimizer drops deployments whose projected annual reward doesn't clear `2 × gasEstimateGrt`. The default (`0.5` GRT — Arbitrum One single-action worst case) means deployments earning < 1 GRT/year get filtered.
+The optimizer drops deployments whose projected annual reward doesn't clear `2 × gasEstimateGrt`. The default (`0.3` GRT — single-mode lifecycle on Arbitrum One with 50% headroom) means deployments earning < 0.6 GRT/year get filtered.
 
 If you're seeing too many deployments dropped:
 
-- Lower `GAS_ESTIMATE_GRT`. Operators using batched action queues (the default indexer-agent flow) typically see ~0.004 GRT per lifecycle on Arbitrum — set `0.1` or lower if you batch.
-- Confirm you're not on mainnet (where higher values are warranted) — the Graph network now runs on Arbitrum One.
+- If you batch actions via indexer-agent's queue (the typical setup), real per-lifecycle cost is ~0.004 GRT — override `GAS_ESTIMATE_GRT=0.01` (or even lower) so the floor matches your reality.
 
 If you're seeing unprofitable allocations slip through:
 
 - Raise it. Compute your observed median lifecycle cost (open + close + POI submission), then add ~50% safety headroom.
 - The 2× multiplier in the filter is intentional and already gives some headroom — set the env to your true median cost, not your tail-risk worst case.
+- Single-mode submission (no batching): ~0.2 GRT per lifecycle is typical; the 0.3 default suits this.
 
 ---
 

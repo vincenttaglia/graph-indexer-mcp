@@ -169,7 +169,11 @@ MCP exposes a \`calculate_deployment_apr\` tool that computes APR using
 **Gas**
 On-chain transaction cost for allocation open/close operations. The
 \`gas_estimate_grt\` config supplies a per-lifecycle estimate used by the
-optimizer to avoid unprofitable churn.
+optimizer to avoid unprofitable churn. The default (0.3 GRT) covers
+single-mode (non-batched) submission on Arbitrum One — observed at
+~$0.02/lifecycle (~0.2 GRT at GRT ≈ $0.10) plus 50% headroom. Operators
+batching via the indexer-agent action queue see ~0.004 GRT/lifecycle and
+should override much lower.
 
 **Rewards Cut / Query Fee Cut**
 The indexer's retained share of rewards or fees, expressed in PPM

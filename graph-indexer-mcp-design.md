@@ -660,7 +660,7 @@ max_allocations: 15
 max_allocation_pct: 0.25          # 25% of stake in any single allocation
 risky_deployment_cap_pct: 0.05    # 5% for known-risky deployments
 min_signal: 100                   # minimum GRT signal to consider
-gas_estimate_grt: 50              # estimated gas cost per allocation lifecycle
+gas_estimate_grt: 0.3             # Arbitrum One single-mode lifecycle (~0.2 GRT + 50% headroom)
 
 # Lists
 whitelist: []                     # always consider these deployments
