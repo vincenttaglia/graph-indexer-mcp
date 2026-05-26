@@ -1903,6 +1903,54 @@ describe('AllocationOptimizer.run', () => {
     );
   });
 
+  it('admits synced=false candidates when latestBlock is present and above epoch start', async () => {
+    // Companion to the never-indexed test: `synced=false` ALONE is NOT a
+    // rejection signal. graph-node sets `synced=true` only after the
+    // deployment has reached chain head at least once; a freshly-syncing
+    // deployment that has written several blocks but hasn't caught up to
+    // head is still `synced=false`, yet `latestBlock` is populated and may
+    // already be past the current epoch's start block — making the
+    // allocation perfectly eligible. The hard-reject must require BOTH
+    // `synced=false` AND `latestBlock=null`; the epoch-position gate alone
+    // should decide otherwise.
+    const dep = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          // synced=false but latestBlock=100 > epoch start 50 — admit.
+          indexingStatus({
+            id: Q.OK,
+            chain: 'mainnet',
+            synced: false,
+            latestBlock: 100,
+          }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient({
+        epoch: 100,
+        blockNumbersByNetwork: [{ network: 'mainnet', blockNumber: '50' }],
+      }),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === Q.OK),
+      `synced=false with latestBlock above epoch start must NOT be rejected; ` +
+        `got: ${JSON.stringify(result.proposedAllocations.map((p) => p.deploymentId))}`,
+    );
+    assert.ok(
+      !result.warnings.some((w) => /never processed a block/.test(w)),
+      `synced=false with a populated latestBlock must NOT trigger the never-indexed warning; ` +
+        `got: ${JSON.stringify(result.warnings)}`,
+    );
+  });
+
   it('still admits transient bootstrap candidates (synced=true && no latestBlock)', async () => {
     // The fix for the never-indexed case must NOT regress the genuinely
     // transient bootstrap state: synced=true (graph-node thinks the

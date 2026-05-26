@@ -1060,14 +1060,13 @@ export class AllocationOptimizer {
       );
     }
     if (bypassedNoLatest > 0) {
-      // After the never-indexed reject above, this branch only fires for
-      // synced=true && latestBlock=null — the genuinely transient
-      // bootstrap window between status writes (graph-node has caught up
-      // at least once but hasn't refreshed the latestBlock field yet).
-      // HealthMonitor.classify() at close time is authoritative.
+      // After the never-indexed reject above, this branch only fires when
+      // graph-node returns synced=true with no latestBlock — a status the
+      // optimizer can't interpret as eligibility. HealthMonitor.classify()
+      // at close time is authoritative.
       warnings.push(
         `${bypassedNoLatest} candidate(s) bypassed the epoch-position gate ` +
-          `(synced=true but no latestBlock — transient bootstrap window). ` +
+          `because graph-node returned synced=true but no latestBlock. ` +
           `HealthMonitor will gate at close time.`,
       );
     }
