@@ -47,10 +47,17 @@ const wei = z
   .string()
   .regex(/^[0-9]+$/, 'must be a non-negative decimal wei string');
 
-/** 0x-prefixed 64-hex-char Proof of Indexing (32 bytes). */
-const poiHex = z
-  .string()
-  .regex(/^0x[0-9a-fA-F]{64}$/, 'must be 32-byte hex POI (0x + 64 hex chars)');
+/**
+ * Sentinel all-zero POI (`0x` + 64 zeros). Submitted in place of a real Proof
+ * of Indexing when the caller opts into a forfeit-rewards close via the
+ * `force_zero_poi` flag on `queue_unallocate` / `queue_reallocate`. The
+ * indexer-agent treats this value as "no valid POI provided" and closes the
+ * allocation without claiming indexing rewards. We never let Claude pass a
+ * hand-crafted POI through these tools — POI generation is a graph-node
+ * concern and the only safe knob to expose is binary: let the agent compute
+ * (default) vs. force-zero.
+ */
+const ZERO_POI = '0x' + '0'.repeat(64);
 
 /** 0x-prefixed 40-hex-char allocation id (Ethereum address shape). */
 const allocationIdHex = z
@@ -126,12 +133,15 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     permissionClass: 'agent_queue',
     description:
       'Queue an unallocate (close-allocation) action: closes the given ' +
-      'allocation on-chain, submitting the provided Proof of Indexing. The ' +
-      'POI must be valid for the allocation\'s deployment at the closing ' +
-      'block or the transaction will revert. Both `deployment_id` and ' +
-      '`allocation_id` are required; the caller must supply the deployment ' +
-      'the allocation belongs to (look it up via the network subgraph if ' +
-      'needed).',
+      'allocation on-chain. `deployment_id` and `allocation_id` are required; ' +
+      'the caller must supply the deployment the allocation belongs to (look ' +
+      'it up via the network subgraph if needed). Proof of Indexing is NOT ' +
+      'a tool input — POI generation is a graph-node concern and Claude does ' +
+      'not have visibility into the right value. The only knob is ' +
+      '`force_zero_poi`: when false (default) the indexer-agent computes a ' +
+      'real POI itself at close time and the allocation claims indexing ' +
+      'rewards; when true the action is submitted with an all-zero POI, ' +
+      'which closes the allocation but forfeits the indexing-reward share.',
     inputSchema: {
       deployment_id: z
         .string()
@@ -141,19 +151,33 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       allocation_id: allocationIdHex.describe(
         'On-chain allocation id (0x-prefixed 40-char hex).',
       ),
-      poi: poiHex.describe(
-        '32-byte Proof of Indexing as a 0x-prefixed hex string.',
-      ),
+      force_zero_poi: z
+        .boolean()
+        .default(false)
+        .describe(
+          'When false (default) the indexer-agent computes a real POI at ' +
+            'close time and the allocation claims rewards. When true the ' +
+            'action is submitted with an all-zero POI, forfeiting indexing ' +
+            'rewards for this allocation (use only when graph-node cannot ' +
+            'produce a valid POI for the closing block).',
+        ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
+      // POI is binary by design here: omit it (agent computes, default reward
+      // path) or set the all-zero sentinel (forfeit rewards). We never let
+      // Claude push a hand-crafted POI through this tool — that's a footgun
+      // for the operator's revenue, and the right place to compute POI is
+      // graph-node itself.
       const action: ActionInput = {
         type: 'unallocate',
         deploymentID: args.deployment_id,
         allocationID: args.allocation_id,
-        poi: args.poi,
+        ...(args.force_zero_poi ? { poi: ZERO_POI } : {}),
         source: ACTION_SOURCE,
-        reason: 'queued via MCP queue_unallocate',
+        reason: args.force_zero_poi
+          ? 'queued via MCP queue_unallocate (force_zero_poi=true; rewards forfeited)'
+          : 'queued via MCP queue_unallocate',
         priority: DEFAULT_PRIORITY,
       };
       const result = await client.queueActions([action], { signal: extra.signal });
@@ -168,12 +192,14 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     name: 'queue_reallocate',
     permissionClass: 'agent_queue',
     description:
-      'Queue a reallocate action: atomically closes the given allocation ' +
-      '(submitting POI) and opens a fresh allocation on the same deployment ' +
-      'for `new_amount` GRT wei. Executed as a single multicall on-chain. ' +
-      'All of `deployment_id`, `allocation_id`, `poi`, and `new_amount` are ' +
-      'required; the caller must supply the deployment the allocation ' +
-      'belongs to.',
+      'Queue a reallocate action: atomically closes the given allocation and ' +
+      'opens a fresh allocation on the same deployment for `new_amount` GRT ' +
+      'wei. Executed as a single multicall on-chain. `deployment_id`, ' +
+      '`allocation_id`, and `new_amount` are required; the caller must supply ' +
+      'the deployment the allocation belongs to. Proof of Indexing is NOT a ' +
+      'tool input — see `force_zero_poi`: false (default) lets the agent ' +
+      'compute a real POI at close time and claim indexing rewards, true ' +
+      'submits an all-zero POI and forfeits the rewards for the closing leg.',
     inputSchema: {
       deployment_id: z
         .string()
@@ -184,21 +210,34 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       allocation_id: allocationIdHex.describe(
         'On-chain allocation id to close (0x-prefixed 40-char hex).',
       ),
-      poi: poiHex.describe('Proof of Indexing for the closing allocation.'),
+      force_zero_poi: z
+        .boolean()
+        .default(false)
+        .describe(
+          'When false (default) the indexer-agent computes a real POI for ' +
+            'the closing leg and claims rewards. When true the closing leg ' +
+            'is submitted with an all-zero POI, forfeiting indexing rewards ' +
+            'for it (use only when graph-node cannot produce a valid POI).',
+        ),
       new_amount: wei.describe(
         'GRT amount in wei (decimal string) for the new allocation.',
       ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
+      // See queue_unallocate above: POI is binary. Omit (agent computes,
+      // default reward path) vs. all-zero sentinel (forfeit rewards). Never
+      // accept a caller-supplied POI string through this tool.
       const action: ActionInput = {
         type: 'reallocate',
         deploymentID: args.deployment_id,
         allocationID: args.allocation_id,
-        poi: args.poi,
+        ...(args.force_zero_poi ? { poi: ZERO_POI } : {}),
         amount: args.new_amount,
         source: ACTION_SOURCE,
-        reason: 'queued via MCP queue_reallocate',
+        reason: args.force_zero_poi
+          ? 'queued via MCP queue_reallocate (force_zero_poi=true; rewards forfeited)'
+          : 'queued via MCP queue_reallocate',
         priority: DEFAULT_PRIORITY,
       };
       const result = await client.queueActions([action], { signal: extra.signal });
