@@ -155,16 +155,15 @@ These supply defaults for `run_allocation_optimization` / `run_discovery` / `run
 ### `GAS_ESTIMATE_GRT`
 
 - **Type:** number (coerced), non-negative
-- **Default:** `0.0004`
+- **Default:** `0.3`
 - **Unit:** GRT (decimal; converted to wei internally).
 - **Purpose:** Gas budget per allocation lifecycle (open + close), used by the optimizer to suppress churn whose APR uplift can't cover gas.
-- **Rationale:** The Graph network runs on Arbitrum One. The indexer-agent submits allocate/close via batched multicall; an allocate+close roundtrip is ~900k gas, Arbitrum's L2 base fee is ~0.01 gwei, and L1 calldata amortizes to near zero when several actions share a multicall. That's ~9e-6 ETH per lifecycle (~$0.03 at $3000 ETH, ~0.0003 GRT at $0.10 GRT). The 0.0004 GRT default rounds up modestly for headroom against gas-price spikes and GRT/ETH price swings.
-- **Optimizer behavior:** The gas-floor filter applies a 2× safety multiplier — deployments are skipped when `projectedAnnualReward < 2 × GAS_ESTIMATE_GRT`. At the default, this means deployments earning less than 0.0008 GRT/year are dropped — effectively only dust signal.
+- **Rationale:** The Graph network runs on Arbitrum One. Observed real-world per operator: ~$0.01 per single action (one allocate OR one close), so ~$0.02 = ~0.2 GRT per lifecycle at GRT ≈ $0.10. The default of 0.3 GRT covers this with 50% headroom for gas-price spikes and GRT/ETH price swings.
+- **Optimizer behavior:** The gas-floor filter applies a 2× safety multiplier — deployments are skipped when `projectedAnnualReward < 2 × GAS_ESTIMATE_GRT`. At the default this drops deployments earning less than 0.6 GRT/year — filters dust signal without excluding real opportunities.
 - **Tuning:**
-  - Default (`0.0004`) suits **batched action queues** on Arbitrum (the indexer-agent default).
-  - **Non-batched submission** on Arbitrum on a congested day: ~`0.003` GRT.
-  - **Mainnet** operators (rare now) should override several orders of magnitude higher — Ethereum L1 at 30 gwei × 900k gas is ~$70 = ~`0.7` GRT and up.
-  - Earlier MCP releases shipped a `0.5` GRT default calibrated for single-action mainnet; if you previously pinned that value in your env, unset it (or set to `0.0004`) to pick up the new floor.
+  - Default (`0.3`) suits **single-mode submission** on Arbitrum One.
+  - **Batched action queues** via indexer-agent see ~$0.02 / 100 = ~$0.0002/action ≈ ~0.004 GRT per lifecycle — override to `0.01` or lower if you batch.
+  - **Mainnet** operators (rare now) should override significantly higher — Ethereum L1 at 30 gwei × ~900k gas is ~$70 = ~`0.7` GRT.
 
 ---
 

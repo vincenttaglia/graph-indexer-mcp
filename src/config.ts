@@ -43,28 +43,29 @@ export const configSchema = z.object({
   /**
    * Gas budget per allocation lifecycle (open + close), denominated in GRT.
    *
-   * Default 0.0004 GRT reflects Arbitrum One reality for the typical
-   * batched-multicall path that indexer-agent uses: an allocate +
-   * close roundtrip is ~900k gas, Arbitrum's L2 base fee sits at ~0.01
-   * gwei, and the L1 calldata cost amortizes to near zero when several
-   * actions share a multicall. That works out to ~9e6 gwei (~9e-6 ETH);
-   * at ~$3000 ETH and ~$0.10 GRT that's ~0.0003 GRT per lifecycle. The
-   * default rounds up modestly for headroom against gas-price spikes
-   * and GRT/ETH price swings.
+   * Default 0.3 GRT covers Arbitrum One single-mode (non-batched) lifecycle
+   * cost with modest headroom. Real-world observed by an operator running
+   * on Arbitrum One:
    *
-   * Operators who submit each action individually (no multicall) on a
-   * congested day should bump to ~0.003 GRT. Mainnet operators (rare
-   * now) should override several orders of magnitude higher — Ethereum
-   * L1 gas at 30 gwei × 900k gas is ~$70 = ~0.7 GRT.
+   *   - Single action (one allocate OR one close): ~$0.01 = ~0.1 GRT
+   *     at GRT ≈ $0.10
+   *   - Single lifecycle (open + close, 2 actions): ~$0.02 = ~0.2 GRT
+   *   - Batched (~100 actions in one tx): ~$0.02 / 100 = ~$0.0002/action
+   *     = ~0.004 GRT per lifecycle when batched
+   *
+   * The default of 0.3 GRT covers the single-mode lifecycle (0.2 GRT)
+   * with 50% headroom for gas-price spikes and GRT/ETH price swings.
+   * Operators using batched action queues (typical via indexer-agent)
+   * can override to 0.01 or lower. Mainnet operators (rare now) should
+   * override significantly higher — Ethereum L1 gas at 30 gwei × ~900k
+   * gas is ~$70 = ~0.7 GRT per lifecycle.
    *
    * The optimizer's gas-floor filter is `projectedReward < 2 × gasEstimateGrt`,
-   * so at the 0.0004 GRT default it admits any deployment expected to
-   * earn at least 0.0008 GRT/year. This is well below any deployment
-   * worth allocating to, so the floor mostly filters dust signal rather
-   * than real opportunities — which matches the operator expectation
-   * on Arbitrum.
+   * so at the 0.3 GRT default it admits any deployment expected to
+   * earn at least 0.6 GRT/year. This filters dust signal without
+   * excluding real opportunities on Arbitrum.
    */
-  gasEstimateGrt: z.coerce.number().nonnegative().default(0.0004),
+  gasEstimateGrt: z.coerce.number().nonnegative().default(0.3),
 
   whitelist: z.array(z.string()).default([]),
   blacklist: z.array(z.string()).default([]),

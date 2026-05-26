@@ -104,18 +104,18 @@ Workarounds:
 
 ### "Optimizer skips deployments with `projected annual reward < 2× gas`"
 
-The optimizer drops deployments whose projected annual reward doesn't clear `2 × gasEstimateGrt`. The default (`0.0004` GRT — Arbitrum One with indexer-agent batched multicall) means deployments earning < 0.0008 GRT/year get filtered.
+The optimizer drops deployments whose projected annual reward doesn't clear `2 × gasEstimateGrt`. The default (`0.3` GRT — single-mode lifecycle on Arbitrum One with 50% headroom) means deployments earning < 0.6 GRT/year get filtered.
 
 If you're seeing too many deployments dropped:
 
-- Confirm `GAS_ESTIMATE_GRT` is at its default (`0.0004`) or unset. Earlier releases shipped a far higher default (`0.5`) calibrated for single-action mainnet submission — if you previously pinned a value in your env you're almost certainly over-filtering.
+- If you batch actions via indexer-agent's queue (the typical setup), real per-lifecycle cost is ~0.004 GRT — override `GAS_ESTIMATE_GRT=0.01` (or even lower) so the floor matches your reality.
 - Confirm you're not on mainnet (where higher values are warranted) — the Graph network now runs on Arbitrum One.
 
 If you're seeing unprofitable allocations slip through:
 
 - Raise it. Compute your observed median lifecycle cost (open + close + POI submission), then add ~50% safety headroom.
 - The 2× multiplier in the filter is intentional and already gives some headroom — set the env to your true median cost, not your tail-risk worst case.
-- Non-batched submission on Arbitrum: ~0.003 GRT is a reasonable single-action ceiling at typical gas-price load.
+- Single-mode submission on Arbitrum (no batching): ~0.2 GRT per lifecycle is typical; the 0.3 default suits this.
 - Ethereum L1 (rare): ~0.7 GRT and up.
 
 ---
