@@ -42,6 +42,7 @@ export function buildSanitizedConfig(config: Config): Record<string, unknown> {
 
   return {
     indexerAddress: config.indexerAddress,
+    protocolNetwork: config.protocolNetwork,
 
     endpoints: {
       networkSubgraphUrl: sanitizeEndpoint(config.networkSubgraphUrl),

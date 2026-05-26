@@ -63,6 +63,10 @@ export interface NetworkSubgraphClient {
     status: AllocationStatusFilter,
     opts?: NetworkSubgraphCallOpts,
   ): Promise<PaginatedResult<Allocation>>;
+  getAllocationById(
+    allocationId: string,
+    opts?: NetworkSubgraphCallOpts,
+  ): Promise<Allocation | null>;
   getDeployment(
     deploymentId: string,
     opts?: NetworkSubgraphCallOpts,
@@ -123,6 +127,7 @@ const ALLOCATION_FIELDS = /* GraphQL */ `
     poi
     indexingRewards
     queryFeesCollected
+    isLegacy
   }
 `;
 
@@ -166,6 +171,15 @@ const GET_DEPLOYMENT_QUERY = /* GraphQL */ `
   query GetDeployment($id: ID!) {
     subgraphDeployment(id: $id) {
       ...DeploymentFields
+    }
+  }
+`;
+
+const GET_ALLOCATION_BY_ID_QUERY = /* GraphQL */ `
+  ${ALLOCATION_FIELDS}
+  query GetAllocationById($id: ID!) {
+    allocation(id: $id) {
+      ...AllocationFields
     }
   }
 `;
@@ -224,6 +238,10 @@ interface AllocationsResponse {
 
 interface DeploymentResponse {
   subgraphDeployment: SubgraphDeployment | null;
+}
+
+interface AllocationByIdResponse {
+  allocation: Allocation | null;
 }
 
 interface SignalledDeploymentsResponse {
@@ -355,6 +373,23 @@ export function createNetworkSubgraphClient(
     return getAllocations(indexerAddress, 'Active', callOpts);
   }
 
+  async function getAllocationById(
+    allocationId: string,
+    callOpts?: NetworkSubgraphCallOpts,
+  ): Promise<Allocation | null> {
+    // Allocation.id is a 0x-prefixed hex address — lowercase it for the
+    // network subgraph's `id: ID!` lookup so callers can pass either case.
+    // No caching here: queue-time lookups are rare and the field that
+    // matters (`isLegacy`) is immutable once the allocation exists.
+    const id = allocationId.toLowerCase();
+    const data = await gql.request<AllocationByIdResponse>(
+      GET_ALLOCATION_BY_ID_QUERY,
+      { id },
+      callOpts?.signal ? { signal: callOpts.signal } : undefined,
+    );
+    return data.allocation ?? null;
+  }
+
   async function getDeployment(
     deploymentId: string,
     callOpts?: NetworkSubgraphCallOpts,
@@ -463,6 +498,7 @@ export function createNetworkSubgraphClient(
     getIndexer,
     getActiveAllocations,
     getAllocations,
+    getAllocationById,
     getDeployment,
     getSignalledDeployments,
     getNetworkParameters,

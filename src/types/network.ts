@@ -77,6 +77,14 @@ export interface Allocation {
   /** Query fees collected, wei. */
   // TODO: verify against live schema
   queryFeesCollected?: string;
+  /**
+   * True when the allocation was opened against the pre-Horizon staking
+   * contract; false for Horizon-era allocations. Required as an
+   * ActionInput field by the indexer-agent's GraphQL schema for close
+   * actions — the agent dispatches to the correct contract based on
+   * this flag.
+   */
+  isLegacy?: boolean;
 }
 
 /** Lightweight reference embedded inside Allocation results. */

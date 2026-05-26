@@ -11,6 +11,9 @@ metadata:
 data:
   # --- Indexer identity ---
   INDEXER_ADDRESS: "0x0000000000000000000000000000000000000000"
+  # Protocol network the indexer-agent submits actions against. Required
+  # by the agent's ActionInput GraphQL type post-Horizon migration.
+  PROTOCOL_NETWORK: "arbitrum-one"
 
   # --- Internal-cluster data source endpoints ---
   # NOTE: Gateway URLs that embed API keys (NETWORK_SUBGRAPH_URL,

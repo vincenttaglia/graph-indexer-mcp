@@ -97,7 +97,7 @@ async function main(): Promise<void> {
   registerQosTools(server, { client: qosClient, config });
   registerGraphNodeTools(server, { client: graphNodeClient });
   registerPostgresTools(server, { client: postgresClient });
-  registerAgentTools(server, { client: agentClient, config });
+  registerAgentTools(server, { client: agentClient, networkClient, config });
   registerGraphmanTools(server, { client: graphmanClient });
 
   // Stage 3: composite tools wrapping the three workflow services.

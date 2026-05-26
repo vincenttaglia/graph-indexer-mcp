@@ -100,6 +100,8 @@ This MCP server provides Claude (or any MCP client) with the ability to manage a
 | `unallocate` | allocationID, poi? | Closes allocation. `poi` is optional on the wire — when omitted, the agent computes one at close time and claims rewards; when set to all-zero, the allocation closes without claiming rewards. |
 | `reallocate` | allocationID, poi?, amount | Atomically closes (same `poi` semantics as `unallocate`) and reopens (multicall). |
 
+Every `ActionInput` post-Horizon ALSO requires three additional fields the agent rejects without: `status` (the MCP always queues as `"queued"`), `protocolNetwork` (e.g. `"arbitrum-one"`, sourced from `PROTOCOL_NETWORK` config), and `isLegacy` (auto-fetched from `Allocation.isLegacy` on the network subgraph for close/reallocate; always `false` for new allocates).
+
 **Important operational note:** The agent can run in three modes:
 - **`auto`** — agent makes all allocation decisions autonomously via rules.
 - **`manual`** — agent takes no autonomous actions; all actions must be queued and approved externally.

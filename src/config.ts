@@ -19,6 +19,15 @@ export const configSchema = z.object({
     .string()
     .regex(/^0x[a-fA-F0-9]{40}$/, 'must be a 0x-prefixed 40-character hex address'),
 
+  /**
+   * Protocol-network identifier the indexer-agent submits actions against
+   * (`arbitrum-one` post-Horizon migration). The agent's ActionInput
+   * GraphQL type requires this field on every queued action — without it,
+   * the mutation is rejected at the schema level. Defined alongside
+   * INDEXER_ADDRESS because both identify the indexer's on-chain identity.
+   */
+  protocolNetwork: z.string().min(1).default('arbitrum-one'),
+
   networkSubgraphUrl: z.url(),
   eboSubgraphUrl: z.url(),
   qosSubgraphUrl: z.url(),
@@ -99,6 +108,7 @@ function csv(s: string | undefined): string[] {
 function envToConfigInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
   return {
     indexerAddress: env.INDEXER_ADDRESS,
+    protocolNetwork: env.PROTOCOL_NETWORK,
     networkSubgraphUrl: env.NETWORK_SUBGRAPH_URL,
     eboSubgraphUrl: env.EBO_SUBGRAPH_URL,
     qosSubgraphUrl: env.QOS_SUBGRAPH_URL,

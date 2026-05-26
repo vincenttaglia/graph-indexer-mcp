@@ -21,10 +21,18 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Config } from '../config.js';
 import { registerIndexerTool } from '../server/register.js';
 import type { IndexerAgentClient } from '../clients/indexer-agent.js';
+import type { NetworkSubgraphClient } from '../clients/network-subgraph.js';
 import type { ActionInput } from '../types/agent.js';
 
 export interface AgentToolDeps {
   client: IndexerAgentClient;
+  /**
+   * Network subgraph client — needed to look up the allocation's
+   * `isLegacy` flag at queue time for unallocate / reallocate actions.
+   * The flag is immutable per allocation, so a fresh fetch is fine
+   * (no caching tier required on this code path).
+   */
+  networkClient: NetworkSubgraphClient;
   config: Config;
 }
 
@@ -91,7 +99,39 @@ function jsonResult(value: unknown): {
 }
 
 export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void {
-  const { client } = deps;
+  const { client, networkClient, config } = deps;
+
+  /**
+   * Look up an allocation by id and return its `isLegacy` flag, throwing
+   * a clear error if the allocation can't be found. The indexer-agent
+   * requires this flag on every close/reallocate action — without it the
+   * GraphQL mutation is rejected — so we must look it up before queueing.
+   *
+   * Notes:
+   *   - `isLegacy === undefined` on the schema row is treated as `false`
+   *     (Horizon default). Older schemas without the field fall through
+   *     to the same default.
+   *   - Missing allocations throw rather than defaulting to a value —
+   *     queueing an unallocate against a non-existent allocation would
+   *     fail at the agent anyway, but failing fast here surfaces a
+   *     cleaner error to the operator.
+   */
+  async function lookupIsLegacy(
+    allocationId: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const allocation = await networkClient.getAllocationById(allocationId, {
+      signal,
+    });
+    if (allocation === null) {
+      throw new Error(
+        `Cannot queue action: allocation ${allocationId} not found in the ` +
+          `network subgraph. The agent requires \`isLegacy\` on every close/` +
+          `reallocate action and we cannot determine it for a missing allocation.`,
+      );
+    }
+    return allocation.isLegacy ?? false;
+  }
 
   // -----------------------------------------------------------------------
   // queue_allocate — open a new allocation on a deployment
@@ -119,6 +159,11 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         source: ACTION_SOURCE,
         reason: 'queued via MCP queue_allocate',
         priority: DEFAULT_PRIORITY,
+        status: 'queued',
+        protocolNetwork: config.protocolNetwork,
+        // New allocations are always Horizon-era — legacy positions can
+        // only exist on contracts that no longer accept new opens.
+        isLegacy: false,
       };
       const result = await client.queueActions([action], { signal: extra.signal });
       return jsonResult(result);
@@ -169,6 +214,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       // Claude push a hand-crafted POI through this tool — that's a footgun
       // for the operator's revenue, and the right place to compute POI is
       // graph-node itself.
+      const isLegacy = await lookupIsLegacy(args.allocation_id, extra.signal);
       const action: ActionInput = {
         type: 'unallocate',
         deploymentID: args.deployment_id,
@@ -179,6 +225,9 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
           ? 'queued via MCP queue_unallocate (force_zero_poi=true; rewards forfeited)'
           : 'queued via MCP queue_unallocate',
         priority: DEFAULT_PRIORITY,
+        status: 'queued',
+        protocolNetwork: config.protocolNetwork,
+        isLegacy,
       };
       const result = await client.queueActions([action], { signal: extra.signal });
       return jsonResult(result);
@@ -228,6 +277,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       // See queue_unallocate above: POI is binary. Omit (agent computes,
       // default reward path) vs. all-zero sentinel (forfeit rewards). Never
       // accept a caller-supplied POI string through this tool.
+      const isLegacy = await lookupIsLegacy(args.allocation_id, extra.signal);
       const action: ActionInput = {
         type: 'reallocate',
         deploymentID: args.deployment_id,
@@ -239,6 +289,9 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
           ? 'queued via MCP queue_reallocate (force_zero_poi=true; rewards forfeited)'
           : 'queued via MCP queue_reallocate',
         priority: DEFAULT_PRIORITY,
+        status: 'queued',
+        protocolNetwork: config.protocolNetwork,
+        isLegacy,
       };
       const result = await client.queueActions([action], { signal: extra.signal });
       return jsonResult(result);

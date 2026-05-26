@@ -41,6 +41,8 @@ import {
 } from '../../src/access-control.js';
 import type { Config } from '../../src/config.js';
 import type { IndexerAgentClient } from '../../src/clients/indexer-agent.js';
+import type { NetworkSubgraphClient } from '../../src/clients/network-subgraph.js';
+import type { Allocation } from '../../src/types/network.js';
 import type { Action, ActionInput } from '../../src/types/agent.js';
 
 const ZERO_POI = '0x' + '0'.repeat(64);
@@ -163,17 +165,71 @@ function makeCapturingAgentClient(): CapturingAgentClient {
 const VALID_DEPLOYMENT = 'QmNLei78zWmzUdbeRB3CiUfAizWUrbeeZh5K1rhAQKCh52';
 const VALID_ALLOCATION = '0x1234567890123456789012345678901234567890';
 
-function setupTools(): { server: FakeServer; client: CapturingAgentClient } {
+/**
+ * Minimal NetworkSubgraphClient fake. Only `getAllocationById` is exercised
+ * by the agent-tools tests (the unallocate / reallocate handlers call it to
+ * look up `isLegacy`). The default returns a Horizon-era allocation
+ * (`isLegacy: false`); per-test overrides go through the `isLegacy` option.
+ */
+function makeFakeNetworkClient(opts: { isLegacy?: boolean } = {}): NetworkSubgraphClient {
+  const isLegacy = opts.isLegacy ?? false;
+  return {
+    async getAllocationById(id): Promise<Allocation | null> {
+      return {
+        id,
+        indexer: { id: '0x0000000000000000000000000000000000000000' },
+        subgraphDeployment: {
+          id: '0x' + '00'.repeat(32),
+          signalledTokens: '0',
+          stakedTokens: '0',
+          deniedAt: 0,
+        },
+        allocatedTokens: '0',
+        createdAtEpoch: 0,
+        status: 'Active',
+        isLegacy,
+      };
+    },
+    // The other methods aren't exercised — return safe defaults that keep
+    // the type contract honest if anyone reaches for them.
+    async getIndexer() {
+      return null;
+    },
+    async getActiveAllocations() {
+      return { items: [], truncated: false };
+    },
+    async getAllocations() {
+      return { items: [], truncated: false };
+    },
+    async getDeployment() {
+      return null;
+    },
+    async getSignalledDeployments() {
+      return { items: [], truncated: false };
+    },
+    async getNetworkParameters() {
+      throw new Error('not implemented in agent-tools test fake');
+    },
+    async getDeploymentAllocations() {
+      return { items: [], truncated: false };
+    },
+  };
+}
+
+function setupTools(
+  netOpts: { isLegacy?: boolean } = {},
+): { server: FakeServer; client: CapturingAgentClient } {
   resetAccessControl();
   initAccessControl({ level: 'full', allow: new Set(), deny: new Set() });
   const server = makeFakeServer();
   const client = makeCapturingAgentClient();
-  // `Config` is only used downstream by tools we don't exercise here; an
-  // empty cast keeps the dep contract honest at the type layer.
-  const config = {} as Config;
+  const networkClient = makeFakeNetworkClient(netOpts);
+  // Only `protocolNetwork` is read by the agent-tools handlers; cast the
+  // rest as a minimal partial that satisfies the dep contract.
+  const config = { protocolNetwork: 'arbitrum-one' } as unknown as Config;
   registerAgentTools(
     server as unknown as Parameters<typeof registerAgentTools>[0],
-    { client, config },
+    { client, networkClient, config },
   );
   return { server, client };
 }
@@ -327,5 +383,131 @@ describe('agent-tools: queue_reallocate POI handling', () => {
     assert.equal(action.poi, ZERO_POI);
     assert.equal(action.amount, '1000000000000000000');
     assert.match(action.reason ?? '', /force_zero_poi/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Post-Horizon required ActionInput fields:
+//   - status (always 'queued')
+//   - protocolNetwork (from config)
+//   - isLegacy (looked up from network subgraph for closes; false for opens)
+// The indexer-agent's GraphQL `ActionInput!` type rejects the mutation when
+// any of the three is missing. These tests assert that every MCP-queued
+// action carries them with the right values.
+// ---------------------------------------------------------------------------
+
+describe('agent-tools: required wire fields (status / protocolNetwork / isLegacy)', () => {
+  beforeEach(() => {
+    resetAccessControl();
+  });
+  afterEach(() => {
+    resetAccessControl();
+  });
+
+  it('queue_allocate stamps status=queued, protocolNetwork from config, isLegacy=false', async () => {
+    // New allocations are always Horizon-era — legacy positions can only
+    // exist on the deprecated staking contract that no longer accepts opens.
+    const { server, client } = setupTools();
+    await invokeTool(server, 'queue_allocate', {
+      deployment_id: VALID_DEPLOYMENT,
+      amount: '1000000000000000000',
+    });
+    const action = client.queuedActions[0]![0]!;
+    assert.equal(action.status, 'queued');
+    assert.equal(action.protocolNetwork, 'arbitrum-one');
+    assert.equal(action.isLegacy, false);
+  });
+
+  it('queue_unallocate looks up isLegacy from the network subgraph (Horizon allocation → false)', async () => {
+    const { server, client } = setupTools({ isLegacy: false });
+    await invokeTool(server, 'queue_unallocate', {
+      deployment_id: VALID_DEPLOYMENT,
+      allocation_id: VALID_ALLOCATION,
+    });
+    const action = client.queuedActions[0]![0]!;
+    assert.equal(action.status, 'queued');
+    assert.equal(action.protocolNetwork, 'arbitrum-one');
+    assert.equal(action.isLegacy, false);
+  });
+
+  it('queue_unallocate looks up isLegacy from the network subgraph (legacy allocation → true)', async () => {
+    // Pre-Horizon allocations still need to be closeable via the same MCP
+    // tool surface — `isLegacy: true` must be threaded through verbatim so
+    // the indexer-agent dispatches the close to the legacy contract.
+    const { server, client } = setupTools({ isLegacy: true });
+    await invokeTool(server, 'queue_unallocate', {
+      deployment_id: VALID_DEPLOYMENT,
+      allocation_id: VALID_ALLOCATION,
+    });
+    const action = client.queuedActions[0]![0]!;
+    assert.equal(action.isLegacy, true);
+  });
+
+  it('queue_reallocate looks up isLegacy and propagates it to the queued action', async () => {
+    const { server, client } = setupTools({ isLegacy: true });
+    await invokeTool(server, 'queue_reallocate', {
+      deployment_id: VALID_DEPLOYMENT,
+      allocation_id: VALID_ALLOCATION,
+      new_amount: '1000000000000000000',
+    });
+    const action = client.queuedActions[0]![0]!;
+    assert.equal(action.status, 'queued');
+    assert.equal(action.protocolNetwork, 'arbitrum-one');
+    assert.equal(action.isLegacy, true);
+  });
+
+  it('queue_unallocate throws when the allocation cannot be found in the network subgraph', async () => {
+    // Without isLegacy we cannot construct a valid ActionInput. Failing
+    // fast here is better than letting the agent reject the mutation
+    // (the operator sees a clearer error pointing at the lookup).
+    resetAccessControl();
+    initAccessControl({ level: 'full', allow: new Set(), deny: new Set() });
+    const server = makeFakeServer();
+    const client = makeCapturingAgentClient();
+    const networkClient: NetworkSubgraphClient = {
+      async getAllocationById() {
+        return null;
+      },
+      async getIndexer() {
+        return null;
+      },
+      async getActiveAllocations() {
+        return { items: [], truncated: false };
+      },
+      async getAllocations() {
+        return { items: [], truncated: false };
+      },
+      async getDeployment() {
+        return null;
+      },
+      async getSignalledDeployments() {
+        return { items: [], truncated: false };
+      },
+      async getNetworkParameters() {
+        throw new Error('not implemented');
+      },
+      async getDeploymentAllocations() {
+        return { items: [], truncated: false };
+      },
+    };
+    const config = { protocolNetwork: 'arbitrum-one' } as unknown as Config;
+    registerAgentTools(
+      server as unknown as Parameters<typeof registerAgentTools>[0],
+      { client, networkClient, config },
+    );
+    // registerIndexerTool catches thrown errors and returns an isError
+    // result rather than rejecting the promise — assert on that shape.
+    const result = (await invokeTool(server, 'queue_unallocate', {
+      deployment_id: VALID_DEPLOYMENT,
+      allocation_id: VALID_ALLOCATION,
+    })) as { isError?: boolean; content?: Array<{ text?: string }> };
+    assert.equal(result.isError, true, 'must surface as an error result');
+    assert.match(
+      result.content?.[0]?.text ?? '',
+      /allocation .* not found/,
+      `error message must point at the missing-allocation lookup; got: ${JSON.stringify(result)}`,
+    );
+    // Nothing was queued — the tool errored before reaching the agent.
+    assert.equal(client.queuedActions.length, 0);
   });
 });

@@ -61,9 +61,14 @@ export interface Action {
 
 /**
  * Shape accepted by the agent's `queueActions` mutation. A queue entry must
- * always supply `type`, `deploymentID`, `source`, `reason`, and `priority`;
- * the other fields are gated on action type. We mirror this in the optional
- * fields rather than splitting per-type to keep the client surface small.
+ * always supply `type`, `deploymentID`, `source`, `reason`, `priority`,
+ * `status`, `protocolNetwork`, and `isLegacy`; the other fields are gated
+ * on action type. We mirror this in the optional fields rather than
+ * splitting per-type to keep the client surface small.
+ *
+ * `status`, `protocolNetwork`, and `isLegacy` are REQUIRED on the wire
+ * post-Horizon migration — the indexer-agent's `ActionInput!` GraphQL
+ * type rejects the mutation if any of the three is missing.
  */
 export interface ActionInput {
   type: ActionType;
@@ -75,7 +80,20 @@ export interface ActionInput {
   source: string;
   reason: string;
   priority: number;
-  status?: ActionStatus;
+  /** Required by the agent schema; the MCP always queues as 'queued'. */
+  status: ActionStatus;
+  /**
+   * Required by the agent schema post-Horizon. The chain alias the
+   * indexer-agent submits against, e.g. `arbitrum-one`. Sourced from
+   * `config.protocolNetwork`.
+   */
+  protocolNetwork: string;
+  /**
+   * Required by the agent schema post-Horizon. For close/reallocate
+   * actions, sourced from the allocation's `isLegacy` field on the
+   * network subgraph. For new allocates, always `false` (Horizon-era).
+   */
+  isLegacy: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,13 @@ Comma-separated lists trim whitespace and drop empty entries (`csv()` helper in 
 - **Example:** `0x1234567890abcdef1234567890abcdef12345678`
 - **Purpose:** The indexer's on-chain address. Used as the default `indexer_address` for all tools/services that accept it.
 
+### `PROTOCOL_NETWORK`
+
+- **Type:** `string`, non-empty
+- **Default:** `arbitrum-one`
+- **Example:** `arbitrum-one`
+- **Purpose:** Protocol-network identifier the indexer-agent submits actions against. Required by the agent's `ActionInput!` GraphQL type post-Horizon migration — without it, every `queueActions` mutation is rejected at the schema layer. Defined alongside `INDEXER_ADDRESS` since both identify the indexer's on-chain identity.
+
 ---
 
 ## Data source endpoints

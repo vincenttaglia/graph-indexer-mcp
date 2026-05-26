@@ -81,6 +81,9 @@ describe('IndexerAgentClient.queueActions POI wire shape', () => {
         source: 'mcp',
         reason: 'queued via MCP queue_unallocate',
         priority: 1,
+        status: 'queued',
+        protocolNetwork: 'arbitrum-one',
+        isLegacy: false,
       },
     ]);
     assert.equal(spy.calls.length, 1, 'one upstream request');
@@ -112,6 +115,9 @@ describe('IndexerAgentClient.queueActions POI wire shape', () => {
         source: 'mcp',
         reason: 'queued via MCP queue_unallocate (force_zero_poi=true; rewards forfeited)',
         priority: 1,
+        status: 'queued',
+        protocolNetwork: 'arbitrum-one',
+        isLegacy: false,
       },
     ]);
     assert.equal(spy.calls.length, 1, 'one upstream request');

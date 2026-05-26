@@ -186,6 +186,8 @@ export interface FakeNetworkClientOpts {
   deploymentsById?: Record<string, SubgraphDeployment | null>;
   /** Per-deployment override for getDeploymentAllocations. */
   deploymentAllocations?: Record<string, Allocation[]>;
+  /** Per-allocation override for getAllocationById. */
+  allocationsById?: Record<string, Allocation | null>;
   /** Force getIndexer to throw. */
   throwOnGetIndexer?: Error;
   throwOnGetSignalledDeployments?: Error;
@@ -222,6 +224,17 @@ export function fakeNetworkClient(opts: FakeNetworkClientOpts = {}): NetworkSubg
     async getDeploymentAllocations(id) {
       const items = opts.deploymentAllocations?.[id] ?? [];
       return paged(items);
+    },
+    async getAllocationById(id) {
+      const allocationsById = opts.allocationsById ?? {};
+      if (id in allocationsById) return allocationsById[id] ?? null;
+      // Fall back to scanning activeAllocations for callers that haven't
+      // populated allocationsById explicitly.
+      return (
+        (opts.activeAllocations ?? []).find(
+          (a) => a.id.toLowerCase() === id.toLowerCase(),
+        ) ?? null
+      );
     },
   };
 }
