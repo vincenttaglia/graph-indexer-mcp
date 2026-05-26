@@ -135,7 +135,12 @@ export function registerCompositeTools(
         .string()
         .regex(GRT_DECIMAL)
         .optional()
-        .describe('Gas budget per allocation lifecycle in GRT (decimal).'),
+        .describe(
+          'Gas budget per allocation lifecycle (open + close) in GRT (decimal). ' +
+            'Defaults to ~0.0004 GRT — Arbitrum One with indexer-agent batched ' +
+            'multicall. Bump ~10x for non-batched submission; bump several ' +
+            'orders of magnitude for Ethereum L1.',
+        ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();

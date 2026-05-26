@@ -43,17 +43,28 @@ export const configSchema = z.object({
   /**
    * Gas budget per allocation lifecycle (open + close), denominated in GRT.
    *
-   * Default 0.5 GRT covers single-action allocate/close on Arbitrum One at
-   * typical gas-price load with safety headroom. Operators using batched
-   * action queues (typical via indexer-agent) see effectively ~0.004 GRT
-   * per lifecycle and can set this lower. Mainnet operators (rare now)
-   * should override significantly higher.
+   * Default 0.0004 GRT reflects Arbitrum One reality for the typical
+   * batched-multicall path that indexer-agent uses: an allocate +
+   * close roundtrip is ~900k gas, Arbitrum's L2 base fee sits at ~0.01
+   * gwei, and the L1 calldata cost amortizes to near zero when several
+   * actions share a multicall. That works out to ~9e6 gwei (~9e-6 ETH);
+   * at ~$3000 ETH and ~$0.10 GRT that's ~0.0003 GRT per lifecycle. The
+   * default rounds up modestly for headroom against gas-price spikes
+   * and GRT/ETH price swings.
+   *
+   * Operators who submit each action individually (no multicall) on a
+   * congested day should bump to ~0.003 GRT. Mainnet operators (rare
+   * now) should override several orders of magnitude higher — Ethereum
+   * L1 gas at 30 gwei × 900k gas is ~$70 = ~0.7 GRT.
    *
    * The optimizer's gas-floor filter is `projectedReward < 2 × gasEstimateGrt`,
-   * so at 0.5 GRT default it admits any deployment expected to earn at
-   * least 1 GRT/year. Almost all real deployments qualify.
+   * so at the 0.0004 GRT default it admits any deployment expected to
+   * earn at least 0.0008 GRT/year. This is well below any deployment
+   * worth allocating to, so the floor mostly filters dust signal rather
+   * than real opportunities — which matches the operator expectation
+   * on Arbitrum.
    */
-  gasEstimateGrt: z.coerce.number().nonnegative().default(0.5),
+  gasEstimateGrt: z.coerce.number().nonnegative().default(0.0004),
 
   whitelist: z.array(z.string()).default([]),
   blacklist: z.array(z.string()).default([]),
