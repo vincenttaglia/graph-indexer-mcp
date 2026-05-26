@@ -1761,11 +1761,12 @@ describe('AllocationOptimizer.run', () => {
     //   B: healthy, latestBlock=30,  chain=mainnet, epochStart=50 → filtered
     //   C: healthy, chain=optimism (not tracked by EBO)            → eligible (fail open)
     //
-    // The gate replaces the dropped `synced` filter (graph-node's `synced`
-    // flips false on a single-block lag and is the wrong semantic).
-    // Eligibility means the deployment has indexed past the epoch's start
-    // block on its chain — that's what's needed to generate POI for the
-    // current epoch and earn current-epoch rewards.
+    // The gate replaces the dropped `synced` filter. Graph-node's `synced`
+    // flag means "has reached chain head at least once; stays true
+    // thereafter" — it tells us nothing about position relative to the
+    // current epoch. Eligibility instead means the deployment has indexed
+    // past the epoch's start block on its chain — that's what's needed to
+    // generate POI for the current epoch and earn current-epoch rewards.
     const depA = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
     const depB = deployment({ id: Q.LOW, signal: GRT(50_000n), staked: GRT(1n) });
     const depC = deployment({ id: Q.RUNNING, signal: GRT(50_000n), staked: GRT(1n) });
@@ -1827,6 +1828,57 @@ describe('AllocationOptimizer.run', () => {
       `expected an aggregate "1 candidate(s) filtered" warning; got: ${JSON.stringify(
         result.warnings,
       )}`,
+    );
+  });
+
+  it('warns globally when every candidate bypasses the epoch-position gate due to chain-alias mismatch', async () => {
+    // EBO succeeds (so we don't take the EBO-down fail-open branch) but the
+    // chain alias graph-node reports doesn't match any EBO entry. Every
+    // candidate then bypasses the gate — the optimizer must emit a single
+    // aggregate warning telling the operator the gate is effectively
+    // disabled, otherwise the misconfiguration is silent.
+    const depA = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const depB = deployment({ id: Q.RUNNING, signal: GRT(50_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [depA, depB],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          // graph-node reports chain='arbitrum-one'…
+          indexingStatus({ id: Q.OK, chain: 'arbitrum-one', latestBlock: 100 }),
+          indexingStatus({ id: Q.RUNNING, chain: 'arbitrum-one', latestBlock: 100 }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient({
+        epoch: 100,
+        // …but EBO only knows 'arbitrum'. Naming drift → every candidate
+        // bypasses the gate.
+        blockNumbersByNetwork: [{ network: 'arbitrum', blockNumber: '50' }],
+      }),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // Both candidates survive (fail-open per-candidate).
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      2,
+      `expected both candidates to survive under chain-alias mismatch; ` +
+        `got ${result.state.candidatesAfterFilter}`,
+    );
+
+    // Global-mismatch warning fires with the "effectively disabled" wording.
+    assert.ok(
+      result.warnings.some(
+        (w) =>
+          /bypassed the epoch-position gate/.test(w) &&
+          /effectively disabled/.test(w),
+      ),
+      `expected a global-mismatch warning calling out the effectively-disabled gate; ` +
+        `got: ${JSON.stringify(result.warnings)}`,
     );
   });
 
