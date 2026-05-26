@@ -496,10 +496,24 @@ export class AllocationOptimizer {
 
     opts?.signal?.throwIfAborted?.();
 
+    // graph-node's `s.subgraph` is contractually always Qm — if anything
+    // else shows up it's a graph-node bug, not a configuration issue.
+    // Validate through the same strict normalizer used to build
+    // `candidateIdList` above so map keys are guaranteed-consistent with
+    // downstream lookups. Promote to `errors` (not `warnings`) so operators
+    // see it, but keep going so the run still produces a result.
     const statusById = new Map<string, SubgraphIndexingStatus>();
     if (statusesRes.status === 'fulfilled') {
       for (const s of statusesRes.value) {
-        statusById.set(s.subgraph, s);
+        try {
+          const key = normalizeToQm(s.subgraph);
+          statusById.set(key, s);
+        } catch {
+          errors.push(
+            `graph-node returned a malformed deployment id ${JSON.stringify(s.subgraph)} ` +
+              `on an indexing status (expected Qm<base58-44>); skipping.`,
+          );
+        }
       }
     } else {
       errors.push(
