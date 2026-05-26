@@ -126,9 +126,19 @@ export interface AgentActionPlan {
 }
 
 export interface OptimizationStateSummary {
+  /**
+   * Total allocatable budget (= `indexer.tokenCapacity`): self-stake plus
+   * delegated stake capped by the protocol delegation ratio. This is what
+   * `availableStake`, per-deployment caps, and the gas-floor budget are
+   * measured against — NOT the indexer's self-stake alone.
+   */
   totalStake: bigint;
   /** Stake not pinned by frozen allocations — what the optimizer can deploy. */
   availableStake: bigint;
+  /** Indexer's own stake (wei). Surfaced for operator-side sanity. */
+  selfStake: bigint;
+  /** Stake delegated to this indexer (wei). Surfaced for operator-side sanity. */
+  delegatedStake: bigint;
   activeAllocationCount: number;
   candidatesConsidered: number;
   candidatesAfterFilter: number;
@@ -354,6 +364,8 @@ export class AllocationOptimizer {
         state: {
           totalStake: 0n,
           availableStake: 0n,
+          selfStake: 0n,
+          delegatedStake: 0n,
           activeAllocationCount: 0,
           candidatesConsidered: 0,
           candidatesAfterFilter: 0,
@@ -738,7 +750,18 @@ export class AllocationOptimizer {
     // ---------------------------------------------------------------------
     // 3. Compute optimization inputs.
     // ---------------------------------------------------------------------
-    const totalStake = toBigInt(indexer.stakedTokens);
+    // totalStake is the indexer's MAXIMUM ALLOCATABLE STAKE — self + capped
+    // delegation. This is what `availableStake`, per-deployment caps
+    // (maxAllocationPct × totalStake), and the gas-floor budget should all
+    // be measured against. Using self-stake alone (indexer.stakedTokens)
+    // would budget against ~30% of the indexer's real allocation capacity
+    // for any indexer with meaningful delegation.
+    //
+    // `tokenCapacity` already reflects the delegationRatio cap on the
+    // network-subgraph side: capacity = self + min(delegated, self × delegationRatio).
+    const totalStake = toBigInt(indexer.tokenCapacity);
+    const selfStake = toBigInt(indexer.stakedTokens);
+    const delegatedStake = toBigInt(indexer.delegatedTokens);
     const totalSignal = networkParams
       ? toBigInt(networkParams.totalTokensSignalled)
       : 0n;
@@ -849,8 +872,13 @@ export class AllocationOptimizer {
 
     return {
       state: {
+        // totalStake is the indexer's allocation budget (tokenCapacity =
+        // self + capped delegation). selfStake / delegatedStake are
+        // surfaced separately so operators can see the decomposition.
         totalStake,
         availableStake,
+        selfStake,
+        delegatedStake,
         activeAllocationCount: activeAllocations.length,
         candidatesConsidered,
         candidatesAfterFilter,

@@ -1072,5 +1072,91 @@ describe('AllocationOptimizer.run', () => {
         `got ${unallocates.length}`,
     );
   });
+
+  it('budgets against tokenCapacity (self + delegated) not just self-stake (regression: per-deployment cap was under-sized by ~3.4× for delegated indexers)', async () => {
+    // User-reported bug: AllocationOptimizer used `indexer.stakedTokens`
+    // (self-stake only) as `totalStake`. The protocol-effective allocation
+    // budget is `tokenCapacity` = self + min(delegated, self × delegationRatio).
+    //
+    // User's case: self 102k + delegated 248k = capacity 350k.
+    // Optimizer was budgeting 102k — ~30% of real capacity. Per-deployment
+    // caps (maxAllocationPct × budget) were under-sized by the same factor.
+    //
+    // Under the fix: with self=100k, delegated=300k, tokenCapacity=400k
+    // (delegationRatio=16 doesn't bind: 100k × 16 = 1.6M > 300k) and
+    // maxAllocationPct=0.25, the per-deployment cap should be 100k GRT
+    // (25% × 400k), NOT 25k GRT (25% × 100k self).
+    //
+    // A single saturated candidate has high enough marginal at the cap
+    // that water-filling will push it all the way to the cap; we then
+    // assert the cap-bound allocation is ~100k, proving the budget grew.
+    const saturated = deployment({
+      id: Q.OK,
+      signal: GRT(50_000n),
+      staked: GRT(10_000_000n), // big D so marginal stays positive through the cap
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({
+          stakedTokens: GRT(100_000n).toString(),
+          delegatedTokens: GRT(300_000n).toString(),
+          tokenCapacity: GRT(400_000n).toString(),
+        }),
+        signalledDeployments: [saturated],
+        networkParams: networkParams(),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: Q.OK })],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        maxAllocations: 1,
+        maxAllocationPct: 0.25,
+        gasEstimateGrt: GRT(0n),
+      }),
+    );
+
+    // State exposes the full allocation budget (= tokenCapacity), not
+    // self-stake.
+    assert.equal(
+      result.state.totalStake.toString(),
+      GRT(400_000n).toString(),
+      `totalStake should equal tokenCapacity (400k GRT), not stakedTokens (100k). ` +
+        `Got ${result.state.totalStake.toString()}.`,
+    );
+    // State also decomposes the budget so operators can see self vs
+    // delegated.
+    assert.equal(
+      result.state.selfStake.toString(),
+      GRT(100_000n).toString(),
+      `selfStake should equal stakedTokens (100k GRT)`,
+    );
+    assert.equal(
+      result.state.delegatedStake.toString(),
+      GRT(300_000n).toString(),
+      `delegatedStake should equal delegatedTokens (300k GRT)`,
+    );
+
+    const candAlloc = result.proposedAllocations[0]?.allocatedTokens ?? 0n;
+    // Per-deployment cap = 25% × 400k tokenCapacity = 100k GRT. With a
+    // single saturated candidate and 400k budget, water-filling pushes
+    // it to the cap. Allow a small chunk-rounding slack (CHUNKS=1000 →
+    // chunk = budget/1000 = 400 GRT).
+    assert.ok(
+      candAlloc >= GRT(99_000n),
+      `expected cap-bound allocation near 100k GRT (= 25% × 400k tokenCapacity); ` +
+        `got ${candAlloc / 10n ** 18n}k GRT — if ≲25k, the bug regressed and ` +
+        `the optimizer is budgeting against self-stake (100k) again.`,
+    );
+    // Sanity: the allocation must not exceed the cap.
+    assert.ok(
+      candAlloc <= GRT(100_000n),
+      `allocation must not exceed the per-deployment cap (100k GRT); ` +
+        `got ${candAlloc / 10n ** 18n}k GRT`,
+    );
+  });
 });
 
