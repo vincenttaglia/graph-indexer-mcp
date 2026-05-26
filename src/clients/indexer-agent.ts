@@ -29,19 +29,35 @@ import type {
  * Shared field set for Action results — kept as one fragment so query and
  * each mutation return the same shape and our parser stays trivial.
  */
+// Action selection set. Mirrors the canonical
+// `vincenttaglia/indexer-tools-v4/src/api/graphql/mutations/actions.ts`
+// field list — querying a SHORTER selection against a post-Horizon agent
+// causes the agent to return a non-spec error envelope that
+// graphql-request's strict parser then rejects with
+// `Invalid execution result: errors is not plain object OR array`.
+//
+// Keep this in lockstep with the `Action` interface in
+// src/types/agent.ts so the typed response shape matches what we query.
 const ACTION_FIELDS = /* GraphQL */ `
   id
+  status
   type
   deploymentID
   allocationID
   amount
   poi
-  status
+  publicPOI
+  poiBlockNumber
+  force
+  priority
   source
   reason
-  priority
   transaction
   failureReason
+  createdAt
+  updatedAt
+  protocolNetwork
+  isLegacy
 `;
 
 const ACTIONS_QUERY = /* GraphQL */ `

@@ -300,17 +300,22 @@ describe('agent-tools: queue_unallocate POI handling', () => {
     assert.equal(action.type, 'unallocate');
     assert.equal(action.deploymentID, VALID_DEPLOYMENT);
     assert.equal(action.allocationID, VALID_ALLOCATION);
-    // Load-bearing: poi must NOT be a defined property on the ActionInput, so
-    // the agent's compute-POI-at-close-time path is what runs.
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(action, 'poi'),
-      false,
-      'ActionInput must not include a poi field when force_zero_poi is false',
-    );
-    assert.equal(action.poi, undefined);
+    // Load-bearing: the full four-field POI bundle must be absent from the
+    // ActionInput so the agent's compute-POI-at-close-time path runs and
+    // the allocation claims rewards.
+    for (const field of ['poi', 'publicPOI', 'poiBlockNumber', 'force'] as const) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(action, field),
+        false,
+        `ActionInput must not include a '${field}' field when force_zero_poi is false`,
+      );
+    }
+    // amount is required on every ActionInput even for unallocate; the
+    // wizard's convention is the literal '0'.
+    assert.equal(action.amount, '0');
   });
 
-  it('force_zero_poi=false (explicit): omits poi from the queued ActionInput', async () => {
+  it('force_zero_poi=false (explicit): omits the full POI bundle', async () => {
     const { server, client } = setupTools();
     await invokeTool(server, 'queue_unallocate', {
       deployment_id: VALID_DEPLOYMENT,
@@ -318,14 +323,23 @@ describe('agent-tools: queue_unallocate POI handling', () => {
       force_zero_poi: false,
     });
     const action = client.queuedActions[0]![0]!;
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(action, 'poi'),
-      false,
-      'explicit force_zero_poi=false must still omit the poi field',
-    );
+    for (const field of ['poi', 'publicPOI', 'poiBlockNumber', 'force'] as const) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(action, field),
+        false,
+        `explicit force_zero_poi=false must still omit '${field}'`,
+      );
+    }
   });
 
-  it('force_zero_poi=true: sends the all-zero POI sentinel', async () => {
+  it('force_zero_poi=true: sends the full four-field zero-POI bundle (poi + publicPOI + poiBlockNumber + force)', async () => {
+    // Per indexer-tools-v4's wizard `buildPoiFields('0x0')` branch, the
+    // forfeit-rewards close is a four-field bundle, not just a zero poi:
+    //   poi=0x00…, publicPOI=0x00…, poiBlockNumber=0, force=true
+    // The agent re-verifies POIs by default; `force: true` is what tells
+    // it to accept the operator-supplied zero POI as-is. Sending only one
+    // or two of the four would either be rejected by the agent or claim
+    // rewards against an invalid POI.
     const { server, client } = setupTools();
     await invokeTool(server, 'queue_unallocate', {
       deployment_id: VALID_DEPLOYMENT,
@@ -334,6 +348,12 @@ describe('agent-tools: queue_unallocate POI handling', () => {
     });
     const action = client.queuedActions[0]![0]!;
     assert.equal(action.poi, ZERO_POI);
+    assert.equal(action.publicPOI, ZERO_POI);
+    assert.equal(action.poiBlockNumber, 0);
+    assert.equal(action.force, true);
+    // amount is always set even on unallocate — the agent rejects the
+    // mutation otherwise; the wizard's convention is the literal '0'.
+    assert.equal(action.amount, '0');
     // The reason string surfaces the forfeit-rewards intent so it shows up
     // in the agent's action history for auditing.
     assert.match(action.reason ?? '', /force_zero_poi/);
@@ -363,15 +383,16 @@ describe('agent-tools: queue_reallocate POI handling', () => {
     assert.equal(action.deploymentID, VALID_DEPLOYMENT);
     assert.equal(action.allocationID, VALID_ALLOCATION);
     assert.equal(action.amount, '1000000000000000000');
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(action, 'poi'),
-      false,
-      'ActionInput must not include a poi field when force_zero_poi is false',
-    );
-    assert.equal(action.poi, undefined);
+    for (const field of ['poi', 'publicPOI', 'poiBlockNumber', 'force'] as const) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(action, field),
+        false,
+        `ActionInput must not include '${field}' when force_zero_poi is false`,
+      );
+    }
   });
 
-  it('force_zero_poi=true: sends the all-zero POI sentinel and keeps new_amount', async () => {
+  it('force_zero_poi=true: sends the full four-field zero-POI bundle and keeps new_amount', async () => {
     const { server, client } = setupTools();
     await invokeTool(server, 'queue_reallocate', {
       deployment_id: VALID_DEPLOYMENT,
@@ -381,6 +402,9 @@ describe('agent-tools: queue_reallocate POI handling', () => {
     });
     const action = client.queuedActions[0]![0]!;
     assert.equal(action.poi, ZERO_POI);
+    assert.equal(action.publicPOI, ZERO_POI);
+    assert.equal(action.poiBlockNumber, 0);
+    assert.equal(action.force, true);
     assert.equal(action.amount, '1000000000000000000');
     assert.match(action.reason ?? '', /force_zero_poi/);
   });

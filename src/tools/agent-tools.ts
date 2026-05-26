@@ -67,6 +67,32 @@ const wei = z
  */
 const ZERO_POI = '0x' + '0'.repeat(64);
 
+/**
+ * POI bundle sent on `unallocate` / `reallocate` when the caller sets
+ * `force_zero_poi=true`. All four fields move together:
+ *   - `poi` and `publicPOI`: the all-zero sentinel
+ *   - `poiBlockNumber`: 0 (matches the zero POI)
+ *   - `force`: true, so the agent skips re-verification of the POI
+ *
+ * Default branch (`force_zero_poi=false`) returns `{}` so all four fields
+ * are absent from the wire payload; the agent then computes a real POI at
+ * close time and the allocation claims rewards.
+ *
+ * Mirrors the `buildPoiFields('0x0')` branch in indexer-tools-v4's
+ * AllocationWizard (`src/stores/wizardStore.ts`).
+ */
+function poiBundle(
+  forceZeroPoi: boolean,
+): Pick<ActionInput, 'poi' | 'publicPOI' | 'poiBlockNumber' | 'force'> {
+  if (!forceZeroPoi) return {};
+  return {
+    poi: ZERO_POI,
+    publicPOI: ZERO_POI,
+    poiBlockNumber: 0,
+    force: true,
+  };
+}
+
 /** 0x-prefixed 40-hex-char allocation id (Ethereum address shape). */
 const allocationIdHex = z
   .string()
@@ -200,26 +226,31 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         .boolean()
         .default(false)
         .describe(
-          'When false (default) the indexer-agent computes a real POI at ' +
-            'close time and the allocation claims rewards. When true the ' +
-            'action is submitted with an all-zero POI, forfeiting indexing ' +
-            'rewards for this allocation (use only when graph-node cannot ' +
-            'produce a valid POI for the closing block).',
+          'When false (default) the indexer-agent computes the POI + ' +
+            'publicPOI at close time and the allocation claims rewards. ' +
+            'When true the action is submitted with the all-zero POI bundle ' +
+            '(poi=0x00…, publicPOI=0x00…, poiBlockNumber=0, force=true), ' +
+            'forfeiting indexing rewards for this allocation. Use only when ' +
+            'graph-node cannot produce a valid POI for the closing block.',
         ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      // POI is binary by design here: omit it (agent computes, default reward
-      // path) or set the all-zero sentinel (forfeit rewards). We never let
-      // Claude push a hand-crafted POI through this tool — that's a footgun
-      // for the operator's revenue, and the right place to compute POI is
-      // graph-node itself.
+      // POI is binary by design here: omit the four-field bundle (agent
+      // computes everything, default reward path) or set the all-zero
+      // bundle (forfeit rewards, `force: true`). We never let Claude push
+      // a hand-crafted POI through this tool — that's a footgun for the
+      // operator's revenue, and POI generation belongs in graph-node.
       const isLegacy = await lookupIsLegacy(args.allocation_id, extra.signal);
       const action: ActionInput = {
         type: 'unallocate',
         deploymentID: args.deployment_id,
         allocationID: args.allocation_id,
-        ...(args.force_zero_poi ? { poi: ZERO_POI } : {}),
+        // amount is required on every ActionInput, including unallocate;
+        // the agent's schema rejects mutations without it. Matches the
+        // wizard's `amount: '0'` convention.
+        amount: '0',
+        ...poiBundle(args.force_zero_poi),
         source: ACTION_SOURCE,
         reason: args.force_zero_poi
           ? 'queued via MCP queue_unallocate (force_zero_poi=true; rewards forfeited)'
@@ -263,10 +294,11 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         .boolean()
         .default(false)
         .describe(
-          'When false (default) the indexer-agent computes a real POI for ' +
-            'the closing leg and claims rewards. When true the closing leg ' +
-            'is submitted with an all-zero POI, forfeiting indexing rewards ' +
-            'for it (use only when graph-node cannot produce a valid POI).',
+          'When false (default) the indexer-agent computes POI + publicPOI ' +
+            'for the closing leg and claims rewards. When true the closing ' +
+            'leg is submitted with the all-zero POI bundle (poi=0x00…, ' +
+            'publicPOI=0x00…, poiBlockNumber=0, force=true), forfeiting the ' +
+            'closing rewards. Use only when graph-node cannot produce a valid POI.',
         ),
       new_amount: wei.describe(
         'GRT amount in wei (decimal string) for the new allocation.',
@@ -274,16 +306,17 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      // See queue_unallocate above: POI is binary. Omit (agent computes,
-      // default reward path) vs. all-zero sentinel (forfeit rewards). Never
-      // accept a caller-supplied POI string through this tool.
+      // See queue_unallocate above: POI is binary. Omit the four-field
+      // bundle (agent computes, default reward path) vs. set the all-zero
+      // bundle (forfeit rewards, force: true). Never accept a
+      // caller-supplied POI string through this tool.
       const isLegacy = await lookupIsLegacy(args.allocation_id, extra.signal);
       const action: ActionInput = {
         type: 'reallocate',
         deploymentID: args.deployment_id,
         allocationID: args.allocation_id,
-        ...(args.force_zero_poi ? { poi: ZERO_POI } : {}),
         amount: args.new_amount,
+        ...poiBundle(args.force_zero_poi),
         source: ACTION_SOURCE,
         reason: args.force_zero_poi
           ? 'queued via MCP queue_reallocate (force_zero_poi=true; rewards forfeited)'
@@ -313,6 +346,7 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         .enum([
           'queued',
           'approved',
+          'deploying',
           'pending',
           'success',
           'failed',

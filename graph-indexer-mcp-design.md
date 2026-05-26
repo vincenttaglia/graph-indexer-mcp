@@ -100,7 +100,11 @@ This MCP server provides Claude (or any MCP client) with the ability to manage a
 | `unallocate` | allocationID, poi? | Closes allocation. `poi` is optional on the wire — when omitted, the agent computes one at close time and claims rewards; when set to all-zero, the allocation closes without claiming rewards. |
 | `reallocate` | allocationID, poi?, amount | Atomically closes (same `poi` semantics as `unallocate`) and reopens (multicall). |
 
-Every `ActionInput` post-Horizon ALSO requires three additional fields the agent rejects without: `status` (the MCP always queues as `"queued"`), `protocolNetwork` (e.g. `"arbitrum-one"`, sourced from `PROTOCOL_NETWORK` config), and `isLegacy` (auto-fetched from `Allocation.isLegacy` on the network subgraph for close/reallocate; always `false` for new allocates).
+Every `ActionInput` post-Horizon ALSO requires three additional fields the agent rejects without: `status` (the MCP always queues as `"queued"`), `protocolNetwork` (e.g. `"arbitrum-one"`, sourced from `PROTOCOL_NETWORK` config), and `isLegacy` (auto-fetched from `Allocation.isLegacy` on the network subgraph for close/reallocate; always `false` for new allocates). `amount` is also required on every action (set to `"0"` for `unallocate`).
+
+The POI fields move together as a four-field bundle:
+- Default: `poi`, `publicPOI`, `poiBlockNumber`, and `force` are all absent → agent computes both POIs at close time and the allocation claims rewards.
+- `force_zero_poi=true` on the MCP tool: bundle becomes `poi: ZERO_POI`, `publicPOI: ZERO_POI`, `poiBlockNumber: 0`, `force: true` → allocation closes without claiming rewards. Mirrors `indexer-tools-v4`'s `buildPoiFields('0x0')`.
 
 **Important operational note:** The agent can run in three modes:
 - **`auto`** — agent makes all allocation decisions autonomously via rules.

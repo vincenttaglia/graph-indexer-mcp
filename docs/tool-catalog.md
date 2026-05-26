@@ -196,22 +196,22 @@ Source: `src/tools/agent-tools.ts`. Backed by the indexer-agent Management API. 
 ### `queue_unallocate`
 
 - **Permission:** `agent_queue`
-- **Description:** Queue an `unallocate` (close) action. POI is NOT a tool input — POI generation is a graph-node concern. The default path (`force_zero_poi=false`) lets the indexer-agent compute a real POI at close time and claim indexing rewards; setting `force_zero_poi=true` submits the all-zero POI sentinel (`0x00…00`) which closes the allocation but forfeits rewards. The tool also looks up the allocation's `isLegacy` flag from the network subgraph and threads it onto the queued action so the agent dispatches to the correct (Horizon vs. pre-Horizon) staking contract. `status` and `protocolNetwork` are sourced from server config.
+- **Description:** Queue an `unallocate` (close) action. POI is NOT a tool input — POI generation is a graph-node concern. The default path (`force_zero_poi=false`) lets the indexer-agent compute POI + publicPOI at close time and claim indexing rewards; setting `force_zero_poi=true` submits the **four-field all-zero POI bundle** (`poi=0x00…`, `publicPOI=0x00…`, `poiBlockNumber=0`, `force=true`) so the agent accepts the operator-supplied zero POI and closes the allocation without claiming rewards. The tool also looks up the allocation's `isLegacy` flag from the network subgraph and threads it onto the queued action so the agent dispatches to the correct (Horizon vs. pre-Horizon) staking contract. `status='queued'` and `protocolNetwork` are sourced from server config. `amount` is always set to `'0'` (the agent rejects unallocate without an `amount` field).
 - **Args:**
   - `deployment_id` (string, required).
   - `allocation_id` (string, required) — 0x-prefixed 40-char hex.
-  - `force_zero_poi` (boolean, optional, default `false`) — `true` to submit the zero-POI sentinel and forfeit rewards (use only when graph-node cannot produce a valid POI for the closing block).
+  - `force_zero_poi` (boolean, optional, default `false`) — `true` to submit the four-field zero-POI bundle and forfeit rewards (use only when graph-node cannot produce a valid POI for the closing block).
 - **Returns:** JSON agent response. Errors with `allocation … not found` if the allocation cannot be retrieved from the network subgraph (the `isLegacy` lookup is required to construct a valid `ActionInput`).
 
 ### `queue_reallocate`
 
 - **Permission:** `agent_queue`
-- **Description:** Atomic close + reopen on the same deployment; executed as a multicall on-chain. Same POI semantics as `queue_unallocate` — `force_zero_poi` is the only POI knob. `isLegacy` is auto-fetched from the network subgraph for the closing leg; `protocolNetwork` and `status='queued'` come from server config.
+- **Description:** Atomic close + reopen on the same deployment; executed as a multicall on-chain. Same POI semantics as `queue_unallocate` — `force_zero_poi=true` sends the four-field zero-POI bundle for the closing leg. `isLegacy` is auto-fetched from the network subgraph for the closing leg; `protocolNetwork` and `status='queued'` come from server config.
 - **Args:**
   - `deployment_id` (string, required).
   - `allocation_id` (string, required) — hex.
   - `new_amount` (string, required) — wei for the new allocation.
-  - `force_zero_poi` (boolean, optional, default `false`) — `true` to submit the zero-POI sentinel for the closing leg and forfeit rewards.
+  - `force_zero_poi` (boolean, optional, default `false`) — `true` to submit the four-field zero-POI bundle for the closing leg and forfeit rewards.
 - **Returns:** JSON agent response. Same error semantics as `queue_unallocate` for missing allocations.
 
 ### `get_action_queue`
