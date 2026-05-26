@@ -505,11 +505,14 @@ export function fakeAgentClient(): IndexerAgentClient {
       return out;
     },
     async setCostModel(model) {
+      // The agent's CostModelInput accepts only { deployment, model }.
+      // The returned CostModel can still carry a `variables` field
+      // (it's an output-only attribute the agent derives), but we leave
+      // it unset here unless a test future-extends this fake.
       const out: CostModel = {
         deployment: model.deployment,
         model: model.model,
       };
-      if (model.variables !== undefined) out.variables = model.variables;
       return out;
     },
   };

@@ -223,11 +223,19 @@ export interface IndexerAgentClient {
     rule: Partial<IndexingRule> & { identifier: string },
     opts?: IndexerAgentCallOpts,
   ): Promise<IndexingRule>;
+  /**
+   * Upsert an Agora cost model for a deployment.
+   *
+   * The agent's `CostModelInput` accepts ONLY `{ deployment, model }` —
+   * `variables` is an OUTPUT field on `CostModel` but the input type does
+   * not declare it, and sending it causes the agent to reject the
+   * mutation with an `unknown field` error. Keep the input shape
+   * narrowed to the two fields the schema accepts.
+   */
   setCostModel(
     model: {
       deployment: string;
       model: string;
-      variables?: string;
     },
     opts?: IndexerAgentCallOpts,
   ): Promise<CostModel>;
@@ -337,13 +345,17 @@ export function createIndexerAgentClient(
       model: {
         deployment: string;
         model: string;
-        variables?: string;
       },
       callOpts?: IndexerAgentCallOpts,
     ): Promise<CostModel> {
+      // CostModelInput accepts ONLY { deployment, model }. Defensively
+      // pick exactly those two fields so a future caller that hands us a
+      // wider object (e.g. via spread) cannot accidentally leak an
+      // `unknown field` rejection from the agent.
+      const costModel = { deployment: model.deployment, model: model.model };
       const res = await gql.request<SetCostModelResponse>(
         SET_COST_MODEL_MUTATION,
-        { costModel: model },
+        { costModel },
         callOpts?.signal ? { signal: callOpts.signal } : undefined,
       );
       return res.setCostModel;

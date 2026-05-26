@@ -510,23 +510,27 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
 
   // -----------------------------------------------------------------------
   // set_cost_model — upsert an Agora cost model for a deployment
+  //
+  // The agent's `CostModelInput` GraphQL type accepts only
+  // `{ deployment, model }`. `variables` is an OUTPUT field on
+  // `CostModel` (the agent populates it from the model source) but the
+  // input type does not declare it, so the tool surface intentionally
+  // omits a `variables` parameter — exposing one would let callers send
+  // a field the agent rejects.
   // -----------------------------------------------------------------------
   registerIndexerTool(server, {
     name: 'set_cost_model',
     permissionClass: 'agent_queue',
     description:
       'Set or update the Agora cost model for a deployment. `model` is the ' +
-      'Agora source; `variables` is an optional JSON string of model ' +
-      'parameters. Use deployment id `global` to set the fallback model.',
+      'Agora source code; the agent derives any cost-model variables from ' +
+      'the source itself and the input does not accept a separate variables ' +
+      'field. Use deployment id `global` to set the fallback model.',
     inputSchema: {
       deployment_id: z
         .string()
         .describe('Deployment IPFS hash, or `global` for the fallback model.'),
       model: z.string().describe('Agora cost-model source code.'),
-      variables: z
-        .string()
-        .optional()
-        .describe('Optional JSON-encoded variables object.'),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
@@ -534,7 +538,6 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         {
           deployment: args.deployment_id,
           model: args.model,
-          variables: args.variables,
         },
         { signal: extra.signal },
       );

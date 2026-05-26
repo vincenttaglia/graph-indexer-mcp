@@ -113,14 +113,24 @@ interface CapturingAgentClient extends IndexerAgentClient {
    * copy) so tests can assert on which fields the tool injected vs. forwarded.
    */
   setRuleCalls: Array<Partial<import('../../src/types/agent.js').IndexingRule> & { identifier: string }>;
+  /**
+   * Every `setCostModel` call's input payload, captured verbatim. We
+   * record the raw object the tool handler hands the client so tests can
+   * assert on EXACTLY which fields appear (in particular: that no
+   * `variables` field leaks through, since `CostModelInput` doesn't
+   * declare one).
+   */
+  costModelInputs: Array<Record<string, unknown>>;
 }
 
 function makeCapturingAgentClient(): CapturingAgentClient {
   const queuedActions: ActionInput[][] = [];
   const setRuleCalls: CapturingAgentClient['setRuleCalls'] = [];
+  const costModelInputs: Array<Record<string, unknown>> = [];
   const client: CapturingAgentClient = {
     queuedActions,
     setRuleCalls,
+    costModelInputs,
     async queueActions(actions: ActionInput[]): Promise<Action[]> {
       // Push a structural copy so assertions see the exact shape the handler
       // emitted (in particular: which optional fields the handler set vs.
@@ -166,6 +176,9 @@ function makeCapturingAgentClient(): CapturingAgentClient {
       };
     },
     async setCostModel(model) {
+      // Record the exact object the handler passed in (structural copy so
+      // later mutations can't affect the captured shape).
+      costModelInputs.push({ ...(model as Record<string, unknown>) });
       return { deployment: model.deployment, model: model.model };
     },
   };
@@ -616,5 +629,96 @@ describe('agent-tools: set_indexing_rule protocolNetwork injection', () => {
     assert.equal(threw, true, 'schema must reject protocolNetwork in rule_params');
     // Nothing reached the client — validation failed up-front.
     assert.equal(client.setRuleCalls.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// set_cost_model input-shape regression.
+//
+// The canonical agent schema defines:
+//
+//   type  CostModel       { deployment: String! model: String variables: String }
+//   input CostModelInput  { deployment: String! model: String }
+//
+// `variables` is OUTPUT-only — sending it on the input causes the agent to
+// reject the mutation. These tests assert that the MCP tool surface and the
+// `setCostModel` client method together never put a `variables` field on the
+// wire, regardless of what extra keys a misbehaving caller tries to pass.
+// ---------------------------------------------------------------------------
+
+describe('agent-tools: set_cost_model input shape', () => {
+  beforeEach(() => {
+    resetAccessControl();
+  });
+  afterEach(() => {
+    resetAccessControl();
+  });
+
+  it('passes a { deployment, model } payload to the agent client (happy path)', async () => {
+    const { server, client } = setupTools();
+    const result = await invokeTool(server, 'set_cost_model', {
+      deployment_id: VALID_DEPLOYMENT,
+      model: 'default => 0.0001;',
+    });
+    assert.ok(result);
+    assert.equal((result as { isError?: boolean }).isError, undefined);
+    assert.equal(client.costModelInputs.length, 1);
+    const input = client.costModelInputs[0]!;
+    assert.equal(input.deployment, VALID_DEPLOYMENT);
+    assert.equal(input.model, 'default => 0.0001;');
+    // Load-bearing: `variables` must never appear on the input — it's an
+    // output-only field on CostModel; CostModelInput doesn't declare it.
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(input, 'variables'),
+      false,
+      'CostModelInput must not carry a `variables` field',
+    );
+  });
+
+  it('does NOT accept a `variables` tool input — schema has no variables key', async () => {
+    // The tool's Zod inputSchema must not declare `variables`. Zod strips
+    // unknown keys by default, so a caller that tries to sneak one in
+    // either errors (strict) or has it silently dropped (strip). Either
+    // way, what reaches the agent client must NOT contain `variables`.
+    const { server, client } = setupTools();
+    let threw = false;
+    try {
+      await invokeTool(server, 'set_cost_model', {
+        deployment_id: VALID_DEPLOYMENT,
+        model: 'default => 0.0001;',
+        // Hand-crafted variables payload a misbehaving caller might try.
+        variables: '{"foo":"bar"}',
+      });
+    } catch {
+      threw = true;
+    }
+    if (threw) {
+      // Schema rejected outright — nothing reached the agent client.
+      assert.equal(client.costModelInputs.length, 0);
+      return;
+    }
+    // Schema accepted (strip mode): one call recorded, with no `variables`.
+    assert.equal(client.costModelInputs.length, 1);
+    const input = client.costModelInputs[0]!;
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(input, 'variables'),
+      false,
+      'caller-supplied `variables` must not be forwarded to the indexer-agent',
+    );
+    // The deployment + model fields still made it through verbatim.
+    assert.equal(input.deployment, VALID_DEPLOYMENT);
+    assert.equal(input.model, 'default => 0.0001;');
+  });
+
+  it('forwards the `global` sentinel deployment id unmodified', async () => {
+    // The agent treats deployment='global' as the fallback model; the MCP
+    // must not transform that special value.
+    const { server, client } = setupTools();
+    await invokeTool(server, 'set_cost_model', {
+      deployment_id: 'global',
+      model: 'default => 0.00005;',
+    });
+    assert.equal(client.costModelInputs.length, 1);
+    assert.equal(client.costModelInputs[0]!.deployment, 'global');
   });
 });
