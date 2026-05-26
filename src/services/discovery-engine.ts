@@ -160,21 +160,42 @@ const FANOUT_CONCURRENCY = 8;
 /**
  * Normalize a deployment id to the canonical Qm form used by every
  * internal map / set in this service. Accepts either bytes32 (`0x…`) or
- * Qm (`Qm…`) encodings via `toQmDeploymentId`. Anything else (opaque
- * test-fixture ids, unrecognized encodings) falls back to lowercase so
- * the same input always produces the same output across call sites.
+ * Qm (`Qm…`) encodings via `toQmDeploymentId`.
  *
- * Lenient by design — discovery's read paths must not crash on a single
- * malformed id from any one client. The trade-off is that an unknown
- * encoding only unifies with itself (not across producers), which
- * matches the prior pre-Qm behavior.
+ * Strict by design: throws on anything that isn't valid bytes32 or Qm
+ * form. Callers MUST catch and skip the bad id rather than admit it
+ * into the whitelist / blacklist / frozenlist / syncingIds / sizesById
+ * lookup maps. The prior lenient fallback (lowercased raw input) silently
+ * poisoned those maps with non-canonical keys and caused cross-encoding
+ * lookups to miss, defeating the very normalization the service was
+ * supposed to provide.
  */
 function normalizeDeploymentId(raw: string): string {
-  try {
-    return toQmDeploymentId(raw);
-  } catch {
-    return raw.toLowerCase();
+  return toQmDeploymentId(raw); // throws on garbage
+}
+
+/**
+ * Try to normalize `raw` into a config-list Set. On failure, push a
+ * per-source warning and drop the entry. Returns the resulting Set so
+ * call-site code stays compact.
+ */
+function normalizeConfigList(
+  raws: readonly string[],
+  sourceLabel: string,
+  warnings: string[],
+): Set<string> {
+  const out = new Set<string>();
+  for (const raw of raws) {
+    try {
+      out.add(normalizeDeploymentId(raw));
+    } catch {
+      warnings.push(
+        `${sourceLabel} entry ${JSON.stringify(raw)} is not a valid ` +
+          `deployment ID (expected 0x<64-hex> or Qm<base58-44>); skipping.`,
+      );
+    }
   }
+  return out;
 }
 
 // =============================================================================
@@ -198,9 +219,13 @@ export class DiscoveryEngine {
     // raw input was insufficient because the two encodings never compare
     // equal — a bytes32 entry in `frozenlist` would silently fail to match
     // a Qm-form `status.subgraph` during cleanup.
-    const whitelist = new Set(config.whitelist.map(normalizeDeploymentId));
-    const blacklist = new Set(config.blacklist.map(normalizeDeploymentId));
-    const frozenlist = new Set(config.frozenlist.map(normalizeDeploymentId));
+    //
+    // Strict: malformed entries are dropped + warned per-source. A typo in
+    // any of these lists used to silently poison every downstream lookup
+    // (lowercase fallback → unique key that never matched anything).
+    const whitelist = normalizeConfigList(config.whitelist, 'Whitelist', warnings);
+    const blacklist = normalizeConfigList(config.blacklist, 'Blacklist', warnings);
+    const frozenlist = normalizeConfigList(config.frozenlist, 'Frozenlist', warnings);
 
     throwIfAborted(opts?.signal);
 
@@ -287,18 +312,52 @@ export class DiscoveryEngine {
     // silently misses across encodings — discovery would either re-pick
     // already-syncing deployments as opportunities or fail to classify
     // genuinely stale ones during cleanup.
-    const signalledIds = new Set(
-      signalledPage.items.map((d) => normalizeDeploymentId(d.id)),
-    );
-    const signalledById = new Map<string, SubgraphDeployment>(
-      signalledPage.items.map((d) => [normalizeDeploymentId(d.id), d]),
-    );
-    const allocatedDeploymentIds = new Set(
-      activeAllocations.map((a) => normalizeDeploymentId(a.subgraphDeployment.id)),
-    );
-    const syncingIds = new Set(
-      indexingStatuses.map((s) => normalizeDeploymentId(s.subgraph)),
-    );
+    //
+    // Strict normalization: a single malformed id from any one client
+    // must NOT poison the lookup maps with a non-canonical key. Skip and
+    // warn; the rest of the run proceeds normally.
+    const signalledIds = new Set<string>();
+    const signalledById = new Map<string, SubgraphDeployment>();
+    for (const d of signalledPage.items) {
+      try {
+        const key = normalizeDeploymentId(d.id);
+        signalledIds.add(key);
+        signalledById.set(key, d);
+      } catch {
+        warnings.push(
+          `Signalled deployment id ${JSON.stringify(d.id)} from the network ` +
+            `subgraph is malformed (expected 0x<64-hex> or Qm<base58-44>); ` +
+            `skipping.`,
+        );
+      }
+    }
+    const allocatedDeploymentIds = new Set<string>();
+    for (const a of activeAllocations) {
+      try {
+        allocatedDeploymentIds.add(normalizeDeploymentId(a.subgraphDeployment.id));
+      } catch {
+        warnings.push(
+          `Active allocation ${JSON.stringify(a.id)} has a malformed ` +
+            `deployment id ${JSON.stringify(a.subgraphDeployment.id)} ` +
+            `(expected 0x<64-hex> or Qm<base58-44>); skipping.`,
+        );
+      }
+    }
+    // graph-node's `s.subgraph` is contractually always Qm — if anything
+    // else shows up it's a graph-node bug, not a configuration issue.
+    // Promote to `errors` (not `warnings`) so operators see it, but keep
+    // going so the run still produces a result.
+    const syncingIds = new Set<string>();
+    for (const s of indexingStatuses) {
+      try {
+        syncingIds.add(normalizeDeploymentId(s.subgraph));
+      } catch {
+        errors.push(
+          `graph-node returned a malformed deployment id ${JSON.stringify(s.subgraph)} ` +
+            `on an indexing status (expected Qm<base58-44>); skipping.`,
+        );
+      }
+    }
 
     // ------------------------------------------------------------------------
     // CLEANUP HALF
@@ -383,7 +442,19 @@ export class DiscoveryEngine {
           signal ? { signal } : undefined,
         );
         for (const s of sizes) {
-          sizesById.set(normalizeDeploymentId(s.deploymentId), BigInt(s.sizeBytes));
+          try {
+            sizesById.set(normalizeDeploymentId(s.deploymentId), BigInt(s.sizeBytes));
+          } catch {
+            // Postgres returned a row whose deployment id can't be
+            // normalized — almost certainly a stale `subgraphs.subgraph`
+            // entry from a pre-Qm-canonicalization era. Skip the row
+            // rather than fail the whole size-catalog build.
+            warnings.push(
+              `postgres: subgraph size row has malformed deployment id ` +
+                `${JSON.stringify(s.deploymentId)} (expected 0x<64-hex> or ` +
+                `Qm<base58-44>); size enrichment skipped for this entry.`,
+            );
+          }
         }
       } catch (err) {
         // Abort propagation precedes degradation: a cancelled postgres call
@@ -444,7 +515,17 @@ export class DiscoveryEngine {
       // sets are normalized to Qm at the gather boundary. Using the raw
       // `deploymentId` directly works only when both sides happen to be
       // Qm — `normalizeDeploymentId` makes that explicit and idempotent.
-      const idKey = normalizeDeploymentId(deploymentId);
+      //
+      // graph-node should always emit Qm here; if it doesn't, we already
+      // recorded an error during the syncingIds build above. Skip the
+      // status row defensively — it can't classify against any of the
+      // Qm-keyed lookup sets anyway.
+      let idKey: string;
+      try {
+        idKey = normalizeDeploymentId(deploymentId);
+      } catch {
+        continue;
+      }
 
       // Pause comes from the indexing-status fetch itself.
       const paused = status.paused;
@@ -649,7 +730,14 @@ export class DiscoveryEngine {
     // works across encodings — the previous bytes32-vs-Qm mismatch was
     // silently re-picking already-syncing deployments as opportunities.
     for (const dep of signalled) {
-      const key = normalizeDeploymentId(dep.id);
+      let key: string;
+      try {
+        key = normalizeDeploymentId(dep.id);
+      } catch {
+        // Already warned during the signalledIds build above; silently
+        // skip here so the candidate is excluded without double-warning.
+        continue;
+      }
       if (allocatedDeploymentIds.has(key)) continue;
       if (syncingIds.has(key)) continue;
       if (blacklist.has(key)) continue;
@@ -706,11 +794,20 @@ export class DiscoveryEngine {
           // subgraph stores `SubgraphDeployment.id` as the IPFS hash, so
           // this is usually idempotent — but candidate lookups below use
           // bytes32-form `dep.id`, so we ALSO normalize via the same path
-          // when reading so encodings unify.
-          queryVolumeById.set(
-            normalizeDeploymentId(v.deployment_id),
-            parseQueryCount(v.query_count),
-          );
+          // when reading so encodings unify. Skip rows whose id can't be
+          // normalized rather than poisoning the map.
+          try {
+            queryVolumeById.set(
+              normalizeDeploymentId(v.deployment_id),
+              parseQueryCount(v.query_count),
+            );
+          } catch {
+            // Malformed QoS row — skip silently. A single oddball entry
+            // isn't worth warning on per-row; if every row is malformed
+            // the resulting empty map already biases volumeScore to 0
+            // for every candidate, which is the worst-case correct
+            // behavior.
+          }
         }
       }
       if (qosVolumeTruncated) {

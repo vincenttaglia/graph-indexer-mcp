@@ -375,33 +375,64 @@ export class AllocationOptimizer {
     /**
      * Normalize a deployment id to Qm canonical form for internal lookups.
      *
-     * Accepts either bytes32 (`0x…`) or Qm (`Qm…`) encodings via
-     * `toQmDeploymentId`. Anything else (e.g. an opaque test fixture id, or
-     * a future encoding we don't yet recognize) falls through unchanged
-     * rather than throwing — the optimizer's gather phase must not crash on
-     * a malformed id from any single client. Such ids simply don't unify
-     * across encodings, which is the prior behavior.
+     * Strict by design: throws on anything that isn't valid bytes32 (`0x…`)
+     * or Qm (`Qm…`) form. Callers MUST catch and skip the bad id rather
+     * than admit it into `candidateIds` / downstream maps — admitting a raw
+     * unnormalized string would forward it to `graphNodeClient
+     * .getIndexingStatuses(...)`, which rejects the entire batch on one
+     * invalid id, leaving `statusById` empty and the §4.1 health/sync
+     * gate dropping every candidate (regression: a typo in `whitelist`
+     * would silently close every allocation).
      */
     const normalizeToQm = (raw: string): string => {
-      let qm: string;
-      try {
-        qm = toQmDeploymentId(raw);
-      } catch {
-        qm = raw;
-      }
+      const qm = toQmDeploymentId(raw); // throws on garbage
       if (!qmToOriginalId.has(qm)) qmToOriginalId.set(qm, raw);
       return qm;
     };
     const originalOf = (qm: string): string => qmToOriginalId.get(qm) ?? qm;
 
-    const whitelist = new Set(config.whitelist.map(normalizeToQm));
-    const blacklist = new Set(config.blacklist.map(normalizeToQm));
-    const frozenSet = new Set(config.frozenlist.map(normalizeToQm));
-    const riskySet = new Set(config.riskyDeployments.map(normalizeToQm));
+    /**
+     * Helper for the config-list normalization pattern: try to normalize
+     * each raw id, push a per-source warning + skip on failure, return
+     * the resulting Qm-form Set.
+     */
+    const normalizeSet = (raws: readonly string[], sourceLabel: string): Set<string> => {
+      const out = new Set<string>();
+      for (const raw of raws) {
+        try {
+          out.add(normalizeToQm(raw));
+        } catch {
+          warnings.push(
+            `${sourceLabel} entry ${JSON.stringify(raw)} is not a valid ` +
+              `deployment ID (expected 0x<64-hex> or Qm<base58-44>); skipping.`,
+          );
+        }
+      }
+      return out;
+    };
+
+    const whitelist = normalizeSet(config.whitelist, 'Whitelist');
+    const blacklist = normalizeSet(config.blacklist, 'Blacklist');
+    const frozenSet = normalizeSet(config.frozenlist, 'Frozenlist');
+    const riskySet = normalizeSet(config.riskyDeployments, 'RiskyDeployments');
 
     const currentByDeployment = new Map<string, Allocation>();
     for (const alloc of activeAllocations) {
-      const qm = normalizeToQm(alloc.subgraphDeployment.id);
+      let qm: string;
+      try {
+        qm = normalizeToQm(alloc.subgraphDeployment.id);
+      } catch {
+        // An active allocation from the network subgraph with a malformed
+        // deployment id is an upstream-data bug. Skip rather than poison
+        // the candidate batch — the run still produces a plan for valid
+        // allocations and surfaces the bad row in warnings.
+        warnings.push(
+          `Active allocation ${JSON.stringify(alloc.id)} has a malformed ` +
+            `deployment id ${JSON.stringify(alloc.subgraphDeployment.id)} ` +
+            `(expected 0x<64-hex> or Qm<base58-44>); skipping.`,
+        );
+        continue;
+      }
       // Keep the largest active allocation per deployment if there are
       // multiple (shouldn't happen, but the schema doesn't forbid it).
       const existing = currentByDeployment.get(qm);
@@ -416,9 +447,22 @@ export class AllocationOptimizer {
     // Start the candidate pool from signalled deployments (the "discovery"
     // axis) and union with whitelist + current allocations so we don't drop
     // a deployment just because it dipped under minSignal between runs.
+    //
+    // Malformed signalled-deployment ids are skipped with a warning —
+    // including one in `candidateIdList` would taint the graph-node batch
+    // (single bad id rejects the whole request) and drop every other
+    // candidate's status lookup downstream.
     const candidateIds = new Set<string>();
     for (const dep of signalledDeployments) {
-      candidateIds.add(normalizeToQm(dep.id));
+      try {
+        candidateIds.add(normalizeToQm(dep.id));
+      } catch {
+        warnings.push(
+          `Signalled deployment id ${JSON.stringify(dep.id)} from the network ` +
+            `subgraph is malformed (expected 0x<64-hex> or Qm<base58-44>); ` +
+            `skipping.`,
+        );
+      }
     }
     for (const id of whitelist) candidateIds.add(id);
     for (const id of currentByDeployment.keys()) candidateIds.add(id);
@@ -516,7 +560,14 @@ export class AllocationOptimizer {
     // and APR / A_total inputs would be garbage.
     const signalledById = new Map<string, SubgraphDeployment>();
     for (const dep of signalledDeployments) {
-      signalledById.set(normalizeToQm(dep.id), dep);
+      try {
+        // The candidate-pool build above already warned about any
+        // malformed signalled-deployment id; silently skip the same ids
+        // here so we don't double-warn.
+        signalledById.set(normalizeToQm(dep.id), dep);
+      } catch {
+        // Already warned above.
+      }
     }
 
     // Hydrate whitelist/current-only candidates missing from the signalled
