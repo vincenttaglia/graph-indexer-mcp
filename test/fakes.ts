@@ -30,12 +30,21 @@ export function paged<T>(items: T[], truncated = false): PaginatedResult<T> {
 }
 
 export function indexer(overrides: Partial<Indexer> = {}): Indexer {
+  // Default tokenCapacity to (stakedTokens + delegatedTokens) when the
+  // caller doesn't explicitly override it. This mirrors the protocol
+  // semantics — tokenCapacity = self + capped delegation — and ensures
+  // tests that only override `stakedTokens` still produce a consistent
+  // budget (otherwise capacity would stay at 1M while staked drops to e.g.
+  // 100k, inflating the optimizer's per-deployment cap by 10×).
+  const staked = overrides.stakedTokens ?? (1_000_000n * 10n ** 18n).toString();
+  const delegated = overrides.delegatedTokens ?? '0';
+  const defaultCapacity = (BigInt(staked) + BigInt(delegated)).toString();
   return {
     id: '0x0000000000000000000000000000000000000001',
-    stakedTokens: (1_000_000n * 10n ** 18n).toString(),
+    stakedTokens: staked,
     allocatedTokens: '0',
-    delegatedTokens: '0',
-    tokenCapacity: (1_000_000n * 10n ** 18n).toString(),
+    delegatedTokens: delegated,
+    tokenCapacity: defaultCapacity,
     indexingRewardCut: 1_000_000,
     queryFeeCut: 1_000_000,
     ...overrides,
