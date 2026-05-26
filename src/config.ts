@@ -65,6 +65,20 @@ export const configSchema = z.object({
    */
   gasEstimateGrt: z.coerce.number().nonnegative().default(0.3),
 
+  /**
+   * Minimum projected indexing reward, in GRT over a 28-day window, for a
+   * NEW allocation to be opened. Applies only to candidates that don't
+   * already have an existing allocation — current allocations are exempt
+   * (their close decisions follow the gas floor and a separate overall-APR
+   * check).
+   *
+   * Default 10 GRT / 28 days (~130 GRT/year) filters out marginal-revenue
+   * deployments that aren't worth the operational attention of opening a
+   * new position, even on Arbitrum where gas is cheap. Set to 0 to disable
+   * this floor and admit any candidate that clears the gas floor.
+   */
+  minRewards28dGrt: z.coerce.number().nonnegative().default(10),
+
   whitelist: z.array(z.string()).default([]),
   blacklist: z.array(z.string()).default([]),
   frozenlist: z.array(z.string()).default([]),
@@ -106,6 +120,7 @@ function envToConfigInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     riskyDeploymentCapPct: env.RISKY_DEPLOYMENT_CAP_PCT,
     minSignal: env.MIN_SIGNAL,
     gasEstimateGrt: env.GAS_ESTIMATE_GRT,
+    minRewards28dGrt: env.MIN_REWARDS_GRT_28D,
     whitelist: csv(env.WHITELIST),
     blacklist: csv(env.BLACKLIST),
     frozenlist: csv(env.FROZENLIST),

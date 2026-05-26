@@ -76,6 +76,7 @@ export function buildSanitizedConfig(config: Config): Record<string, unknown> {
       riskyDeploymentCapPct: config.riskyDeploymentCapPct,
       minSignal: config.minSignal,
       gasEstimateGrt: config.gasEstimateGrt,
+      minRewards28dGrt: config.minRewards28dGrt,
     },
 
     lists: {

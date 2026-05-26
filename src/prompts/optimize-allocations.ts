@@ -41,7 +41,7 @@ Mode: ${dryRun ? '**dry_run = true** — produce a plan only; do NOT call any qu
 
 ## PRIMARY PATH — composite tool
 
-Call \`run_allocation_optimization\`. Optional overrides: \`indexer_address\`, \`max_allocations\`, \`max_allocation_pct\`, \`risky_deployment_cap_pct\`, \`min_signal_grt\`, \`gas_estimate_grt\`.
+Call \`run_allocation_optimization\`. Optional overrides: \`indexer_address\`, \`max_allocations\`, \`max_allocation_pct\`, \`risky_deployment_cap_pct\`, \`min_signal_grt\`, \`gas_estimate_grt\`, \`min_rewards_grt_28d\`.
 
 **Note on marginal vs realized APR:** Both numbers come from the same formula \`APR = (S/T) × issuance_per_year / (stakedTokens + new_allocation)\`, where \`stakedTokens\` is the deployment's existing total stake (which already includes the indexer's current allocation, if any). The only difference is \`new_allocation\`: dashboards show *realized* APR by setting \`new_allocation = 0\`; the optimizer reports *projected/marginal* APR by setting it to the proposed delta. On thin-staked deployments even a modest added allocation materially shifts the denominator, so the two APRs can diverge noticeably — this is a different metric, not a discrepancy.
 
@@ -64,7 +64,7 @@ Use this path when you need to gather state manually, override individual steps,
 
 Read these first so all numbers below come from one source of truth:
 
-- \`indexer://config\` — indexer address, max_allocations, max_allocation_pct, risky_deployment_cap_pct, min_signal, gas_estimate_grt, whitelist/blacklist/frozenlist.
+- \`indexer://config\` — indexer address, max_allocations, max_allocation_pct, risky_deployment_cap_pct, min_signal, gas_estimate_grt, min_rewards_grt_28d, whitelist/blacklist/frozenlist.
 - \`indexer://overview\` — cached infrastructure summary (current stake, allocation count, recent epoch). The \`get_infrastructure_overview\` tool returns the same payload for clients that don't surface resources.
 - \`indexer://glossary\` — Graph Protocol terminology if any term below is unclear.
 
@@ -113,6 +113,8 @@ APR = ((S / T) * issuance_per_year * (A_i / A_total)) / A_i
 \`\`\`
 
 Net APR must subtract \`gas_estimate_grt\` amortized over expected allocation lifetime.
+
+For **new** allocation candidates (no existing position on the deployment), additionally drop any candidate whose projected 28-day reward is below \`min_rewards_grt_28d\` (default 10 GRT). Existing allocations are exempt from this floor — only the gas floor applies to keep/close decisions on positions you already hold.
 
 ## Step 4 — Optimize
 

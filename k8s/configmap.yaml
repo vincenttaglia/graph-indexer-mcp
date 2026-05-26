@@ -41,6 +41,7 @@ data:
   RISKY_DEPLOYMENT_CAP_PCT: "0.05"
   MIN_SIGNAL: "100"
   GAS_ESTIMATE_GRT: "0.3"
+  MIN_REWARDS_GRT_28D: "10"
 
   # --- Lists (comma-separated deployment IPFS hashes) ---
   WHITELIST: ""

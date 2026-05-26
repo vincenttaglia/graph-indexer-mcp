@@ -141,6 +141,16 @@ export function registerCompositeTools(
             'submission with ~50% headroom (real cost ~0.2 GRT/lifecycle). ' +
             'Drop to ~0.01 if you batch via the indexer-agent action queue.',
         ),
+      min_rewards_grt_28d: z
+        .string()
+        .regex(GRT_DECIMAL)
+        .optional()
+        .describe(
+          'Minimum projected 28-day reward (GRT decimal) for opening a NEW ' +
+            'allocation. Pre-seated existing allocations are exempt — close ' +
+            'decisions fall back to the gas floor only. Defaults to 10 GRT/28d. ' +
+            'Set to 0 to disable.',
+        ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
@@ -153,6 +163,9 @@ export function registerCompositeTools(
         minSignal: grtToWei(args.min_signal_grt ?? deps.config.minSignal),
         gasEstimateGrt: grtToWei(
           args.gas_estimate_grt ?? deps.config.gasEstimateGrt,
+        ),
+        minRewards28dGrt: grtToWei(
+          args.min_rewards_grt_28d ?? deps.config.minRewards28dGrt,
         ),
         whitelist: deps.config.whitelist,
         blacklist: deps.config.blacklist,

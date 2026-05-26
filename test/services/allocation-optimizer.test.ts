@@ -48,6 +48,10 @@ function baseConfig(over: Partial<OptimizerConfig> = {}): OptimizerConfig {
     riskyDeploymentCapPct: 0.05,
     minSignal: GRT(1_000n),
     gasEstimateGrt: GRT(10n),
+    // Disable the new-allocation 28d reward floor by default so the
+    // existing tests continue to test gas-floor behavior in isolation.
+    // Tests that exercise the reward floor set this explicitly.
+    minRewards28dGrt: 0n,
     whitelist: [],
     blacklist: [],
     frozenlist: [],
@@ -838,7 +842,9 @@ describe('AllocationOptimizer.run', () => {
     );
     assert.equal(result.proposedAllocations.length, 0);
     assert.ok(
-      result.warnings.some((w) => /2× gas budget/.test(w)),
+      result.warnings.some(
+        (w) => /reward-floor reflow/.test(w) && /gas floor/.test(w),
+      ),
       `expected gas-floor warning, got: ${JSON.stringify(result.warnings)}`,
     );
   });
@@ -990,13 +996,129 @@ describe('AllocationOptimizer.run', () => {
     // Operator-facing warning must surface the reflow.
     assert.ok(
       result.warnings.some(
-        (w) => /reflow/i.test(w) && /gas/i.test(w) && /2× gas budget/.test(w),
+        (w) => /reward-floor reflow/.test(w) && /gas floor/.test(w),
       ),
       `expected a gas-floor reflow warning; got: ${JSON.stringify(result.warnings)}`,
     );
     assert.ok(
       result.warnings.some((w) => /reflow summary/i.test(w)),
       `expected a reflow summary warning; got: ${JSON.stringify(result.warnings)}`,
+    );
+  });
+
+  it('drops a NEW candidate whose projected 28-day reward is below minRewards28dGrt', async () => {
+    // The 28-day reward floor is an operator-attention threshold for
+    // opening a new allocation: even if a deployment would clear the
+    // gas break-even floor, it should be ignored if the projected reward
+    // doesn't reach the configured monthly minimum.
+    //
+    // Scenario: a single signalled deployment with a small signal share
+    // that projects ~1 GRT/year (~0.077 GRT/28d). With the floor at
+    // 10 GRT/28d (default) and gas at ~0, the deployment fails the
+    // reward floor and is dropped. No existing allocation, so it's a
+    // "new" pick subject to the floor.
+    const dep = deployment({
+      id: Q.DUST,
+      signal: GRT(5_000n),
+      staked: GRT(0n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+        networkParams: networkParams({
+          // 1e12 GRT total signal so per-deployment reward is tiny.
+          totalTokensSignalled: (10n ** 30n).toString(),
+        }),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: Q.DUST })],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        gasEstimateGrt: GRT(0n),
+        minRewards28dGrt: GRT(10n),
+      }),
+    );
+    assert.equal(
+      result.proposedAllocations.length,
+      0,
+      `expected the dust deployment to be dropped by the 28d reward floor; ` +
+        `got: ${JSON.stringify(result.proposedAllocations.map((p) => p.deploymentId))}`,
+    );
+    assert.ok(
+      result.warnings.some(
+        (w) =>
+          /reward-floor reflow/.test(w) &&
+          /new-allocation 28d reward floor/.test(w),
+      ),
+      `expected a reward-floor reflow warning citing the 28d floor; got: ${JSON.stringify(result.warnings)}`,
+    );
+  });
+
+  it('preserves an EXISTING allocation below the 28d reward floor (floor applies to new picks only)', async () => {
+    // User-stated requirement: the 28d reward floor is for opening NEW
+    // allocations, not closing existing ones. Existing allocations may
+    // earn below the configured monthly minimum and still be preserved
+    // (their close decisions follow the gas floor and a separate
+    // overall-APR check — not in scope for this filter).
+    //
+    // Scenario: same dust deployment as the previous test, but this
+    // time the indexer already has a current allocation on it. The pick
+    // is pre-seated as "existing", so the new-allocation 28d floor
+    // does NOT apply and the allocation is preserved.
+    const dep = deployment({
+      id: Q.DUST,
+      signal: GRT(5_000n),
+      staked: GRT(1_000n),
+    });
+    const existingAlloc = allocation({
+      id: '0xexisting-dust',
+      deploymentId: Q.DUST,
+      allocatedTokens: GRT(1_000n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+        activeAllocations: [existingAlloc],
+        deploymentsById: { [Q.DUST]: dep },
+        networkParams: networkParams({
+          totalTokensSignalled: (10n ** 30n).toString(),
+        }),
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: Q.DUST })],
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
+    });
+    const result = await opt.run(
+      baseConfig({
+        gasEstimateGrt: GRT(0n),
+        minRewards28dGrt: GRT(10n),
+      }),
+    );
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === Q.DUST),
+      `expected the existing allocation on Q.DUST to be preserved; ` +
+        `got: ${JSON.stringify(result.proposedAllocations.map((p) => p.deploymentId))}`,
+    );
+    // The reward floor must not produce an `unallocate` action against
+    // an existing allocation.
+    const unallocatesForDust = result.actions
+      .filter((a) => a.deploymentId === Q.DUST && a.type === 'unallocate');
+    assert.equal(
+      unallocatesForDust.length,
+      0,
+      `reward floor must not close an existing allocation; got: ${JSON.stringify(unallocatesForDust)}`,
     );
   });
 

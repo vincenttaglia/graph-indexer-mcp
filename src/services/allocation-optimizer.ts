@@ -66,6 +66,12 @@ export interface OptimizerConfig {
   minSignal: bigint | string;
   /** Estimated total gas in GRT wei spent over an allocation's lifetime. */
   gasEstimateGrt: bigint | string;
+  /**
+   * Minimum projected 28-day reward (GRT wei) for opening a NEW
+   * allocation. Pre-seated existing allocations are exempt; their
+   * survival is gated by the gas floor only. Set to 0 to disable.
+   */
+  minRewards28dGrt?: bigint | string;
   /** Deployments that bypass the candidate filter. */
   whitelist: string[];
   /** Deployments that must never be allocated to. */
@@ -1237,13 +1243,16 @@ export class AllocationOptimizer {
    *      their real marginal alongside everybody else.
    *   5. Stop when budget is exhausted, slots are full, or no candidate has
    *      positive marginal.
-   *   6. Gas-floor reflow: after the main loop, identify allocations whose
-   *      projected annual reward < 2× gas, zero them out, sum their stake
-   *      as a "reflow budget", mark them gas-floor-rejected, and run
-   *      iterative-greedy again on the surviving (non-rejected, non-capped)
-   *      picks with the recovered budget. Repeat up to GAS_REFLOW_PASSES
-   *      passes — usually 1-2 suffice. This prevents the stake that would
-   *      otherwise sit idle from being silently under-allocated.
+   *   6. Reward-floor reflow: after the main loop, drop picks whose
+   *      projected reward fails the floor — 2× gas for ALL picks, plus
+   *      `minRewards28dGrt` (annualized) for NEW (non-pre-seated) picks.
+   *      Existing allocations are exempt from the new-allocation reward
+   *      floor; their close decisions follow gas-floor only. Zero dropped
+   *      picks, sum their stake as a reflow budget, mark them rejected,
+   *      and run iterative-greedy again on survivors with the recovered
+   *      budget. Repeat up to REFLOW_PASSES passes (usually 1-2 suffice).
+   *      Prevents stake that would otherwise sit idle from being silently
+   *      under-allocated.
    *
    * Cap binding: each candidate has a per-deployment cap; allocations stop
    * growing past it. Slot binding: a candidate at A=0 cannot start unless
@@ -1458,48 +1467,82 @@ export class AllocationOptimizer {
     }
 
     // -----------------------------------------------------------------------
-    // Gas-floor reflow pass.
+    // Reward-floor reflow pass.
     //
-    // The previous design dropped any allocation whose projected reward fell
-    // below 2× gas and let that stake go idle — silently under-allocating
-    // the operator's budget (the user reported up to ~21% idle stake in
-    // production runs). Reflow recovers that stake: identify gas-floor
-    // skips, zero their allocation, sum the recovered amount as a reflow
-    // budget, mark them rejected so they can't re-claim it, and run the
-    // same iterative-greedy loop again on survivors (non-rejected,
-    // non-capped) with the recovered budget. Repeat until no new skips
-    // appear or we hit a defensive iteration cap.
+    // Two floors compose here:
+    //   - Gas floor (applies to ALL picks): projected annual reward must
+    //     clear 2× gasEstimateGrt — a break-even check against open/close
+    //     costs.
+    //   - New-allocation reward floor (applies to NEW picks only — i.e.
+    //     not pre-seated existing allocations): projected 28-day reward
+    //     must clear minRewards28dGrt. Default 10 GRT/28d (~130 GRT/year)
+    //     filters marginal-revenue deployments not worth opening a new
+    //     position on. Existing allocations are exempt — their close
+    //     decisions follow the gas floor and a separate overall-APR
+    //     check (planned, not in this pass).
+    //
+    // The previous design dropped any allocation whose projected reward
+    // fell below 2× gas and let that stake go idle — silently under-
+    // allocating the operator's budget. Reflow recovers that stake:
+    // identify skipped picks, zero their allocation, sum the recovered
+    // amount as a reflow budget, mark them rejected so they can't
+    // re-claim it, and run the same iterative-greedy loop again on
+    // survivors (non-rejected, non-capped) with the recovered budget.
+    // Repeat until no new skips appear or we hit a defensive iteration
+    // cap.
     //
     // Slot guard: the reflow loop does NOT need to re-check slots for
     // already-allocated survivors (they're already inside the plan), and
-    // gas-floor-rejected candidates are skipped explicitly. Pre-seated
+    // floor-rejected candidates are skipped explicitly. Pre-seated
     // currents that were zeroed by an upstream pass keep their original
     // slot reservation, so reflow can re-fund them if their post-reflow
     // marginal becomes attractive again (it usually won't, but it's
     // correct).
     // -----------------------------------------------------------------------
     const gas = toBigInt(config.gasEstimateGrt);
-    const gasFloorRejected = new Array<boolean>(picks.length).fill(false);
-    const GAS_REFLOW_PASSES = 5;
+    const minRewards28dWei = toBigInt(config.minRewards28dGrt);
+    // Express the 28-day floor as an annual threshold so it composes with
+    // the gas floor against the optimizer's annual projectedRewardWei.
+    // (28 → 365 day projection assumes constant signal share and constant
+    // issuance per block — same assumptions the optimizer makes elsewhere.)
+    const minRewardsAnnualWei = (minRewards28dWei * 365n) / 28n;
+    const gasFloorAnnualWei = gas * 2n;
+    const rewardFloorRejected = new Array<boolean>(picks.length).fill(false);
+    const REFLOW_PASSES = 5;
     let totalDropped = 0;
     let totalReflowedWei = 0n;
-    if (gas > 0n) {
-      for (let pass = 0; pass < GAS_REFLOW_PASSES; pass++) {
+    if (gas > 0n || minRewards28dWei > 0n) {
+      for (let pass = 0; pass < REFLOW_PASSES; pass++) {
         let reflowBudget = 0n;
         let droppedThisPass = 0;
         const droppedIds: string[] = [];
+        let droppedForRewardFloor = 0;
         for (let i = 0; i < picks.length; i++) {
-          if (gasFloorRejected[i]) continue;
+          if (rewardFloorRejected[i]) continue;
           const amount = allocations[i]!;
           if (amount === 0n) continue;
           const p = picks[i]!;
           const totalAlloc = p.D + amount;
           const projectedRewardWei =
             totalAlloc === 0n ? 0n : (p.R * amount) / totalAlloc;
-          if (projectedRewardWei < gas * 2n) {
+          // Per-pick threshold: new (non-pre-seated) picks must clear both
+          // floors; pre-seated existing allocations only need to clear gas.
+          const threshold = preSeated[i]
+            ? gasFloorAnnualWei
+            : gasFloorAnnualWei > minRewardsAnnualWei
+              ? gasFloorAnnualWei
+              : minRewardsAnnualWei;
+          if (projectedRewardWei < threshold) {
+            // Track which floor triggered this drop so the warning is
+            // honest about the reason. A new-pick drop where the reward
+            // floor strictly exceeds the gas floor wouldn't have happened
+            // under the old gas-only filter.
+            if (!preSeated[i] && projectedRewardWei >= gasFloorAnnualWei) {
+              droppedForRewardFloor++;
+            }
             reflowBudget += amount;
             allocations[i] = 0n;
-            gasFloorRejected[i] = true;
+            rewardFloorRejected[i] = true;
             droppedThisPass++;
             droppedIds.push(p.candidate.deploymentId);
           }
@@ -1508,10 +1551,16 @@ export class AllocationOptimizer {
 
         totalDropped += droppedThisPass;
         totalReflowedWei += reflowBudget;
+        const reasonNote =
+          droppedForRewardFloor > 0
+            ? `${droppedForRewardFloor} for new-allocation 28d reward floor ` +
+              `(< ${minRewards28dWei / 10n ** 18n} GRT / 28d), ` +
+              `the rest for gas floor (< 2× ${gas / 10n ** 18n} GRT)`
+            : `gas floor (< 2× ${gas / 10n ** 18n} GRT)`;
         warnings.push(
-          `gas-floor reflow pass ${pass + 1}: dropped ${droppedThisPass} ` +
-            `deployment(s) [${droppedIds.join(', ')}] with projected reward ` +
-            `< 2× gas budget; redistributing ${(reflowBudget / 10n ** 18n).toString()} GRT ` +
+          `reward-floor reflow pass ${pass + 1}: dropped ${droppedThisPass} ` +
+            `deployment(s) [${droppedIds.join(', ')}] — ${reasonNote}; ` +
+            `redistributing ${(reflowBudget / 10n ** 18n).toString()} GRT ` +
             `to surviving candidates.`,
         );
 
@@ -1525,7 +1574,7 @@ export class AllocationOptimizer {
           let bestIdx = -1;
           let bestMarginal = 0n;
           for (let i = 0; i < picks.length; i++) {
-            if (gasFloorRejected[i]) continue;
+            if (rewardFloorRejected[i]) continue;
             const p = picks[i]!;
             const A = allocations[i]!;
             if (A >= p.cap) continue;
@@ -1559,15 +1608,15 @@ export class AllocationOptimizer {
       }
       if (totalDropped > 0) {
         warnings.push(
-          `gas-floor reflow summary: ${totalDropped} deployment(s) dropped, ` +
+          `reward-floor reflow summary: ${totalDropped} deployment(s) dropped, ` +
             `${(totalReflowedWei / 10n ** 18n).toString()} GRT reflowed to ` +
-            `surviving candidates across ${GAS_REFLOW_PASSES} max passes.`,
+            `surviving candidates across ${REFLOW_PASSES} max passes.`,
         );
       }
     }
 
     // Build proposals from the final allocations. The reflow loop above
-    // already enforced the gas-floor invariant, so we trust allocations[]
+    // already enforced the reward-floor invariants, so we trust allocations[]
     // here and only emit positive entries.
     const proposals: ProposedAllocation[] = [];
     for (let i = 0; i < picks.length; i++) {

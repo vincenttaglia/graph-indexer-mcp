@@ -116,6 +116,23 @@ If you're seeing unprofitable allocations slip through:
 - The 2× multiplier in the filter is intentional and already gives some headroom — set the env to your true median cost, not your tail-risk worst case.
 - Single-mode submission (no batching): ~0.2 GRT per lifecycle is typical; the 0.3 default suits this.
 
+### "Optimizer dropped a candidate citing `new-allocation 28d reward floor`"
+
+This is the `MIN_REWARDS_GRT_28D` filter (default `10` GRT / 28 days). It applies to **new** allocations only — pre-seated existing allocations are exempt. The warning surfaces in `reward-floor reflow pass N` lines like:
+
+```
+reward-floor reflow pass 1: dropped 3 deployment(s) [...] — 3 for new-allocation 28d reward floor (< 10 GRT / 28d), the rest for gas floor (< 2× 0 GRT); ...
+```
+
+If the floor is filtering revenue-meaningful deployments you wanted:
+
+- Lower the threshold (`MIN_REWARDS_GRT_28D=1`) or disable entirely (`MIN_REWARDS_GRT_28D=0`).
+- Confirm the dropped candidate really is below ~`min_rewards_grt_28d × 365/28 ≈ 130` GRT/year at default. If it should be earning more, double-check `min_signal`, total network signal, and the deployment's signalled tokens — the projection math is in `calculateApr` / glossary.
+
+If existing allocations look stuck on low-revenue deployments:
+
+- The 28-day floor doesn't close them. A separate overall-APR check (planned) is needed to gate closes; for now, close them manually via `queue_unallocate` or by adjusting indexing rules.
+
 ---
 
 ## Cancellation / aborts

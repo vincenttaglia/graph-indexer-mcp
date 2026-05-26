@@ -164,6 +164,19 @@ These supply defaults for `run_allocation_optimization` / `run_discovery` / `run
   - Default (`0.3`) suits **single-mode submission** on Arbitrum One.
   - **Batched action queues** via indexer-agent see ~$0.02 / 100 = ~$0.0002/action ≈ ~0.004 GRT per lifecycle — override to `0.01` or lower if you batch.
 
+### `MIN_REWARDS_GRT_28D`
+
+- **Type:** number (coerced), non-negative
+- **Default:** `10`
+- **Unit:** GRT (decimal; converted to wei internally).
+- **Purpose:** Minimum projected indexing reward, over a rolling 28-day window, for a NEW allocation to be opened. Operator-attention floor — even if a deployment clears the gas break-even check, it's filtered if the projected monthly reward is below this threshold.
+- **Scope:** Applies to **new allocations only**. Pre-seated existing allocations are exempt; their close decisions follow the gas floor and a separate overall-APR check (not yet implemented).
+- **Optimizer behavior:** The floor is projected to an annual equivalent (`× 365 / 28`) and composed with the gas floor: a NEW candidate must clear `max(2 × GAS_ESTIMATE_GRT, MIN_REWARDS_GRT_28D × 365 / 28)`. At the defaults (`10` GRT/28d, `0.3` GRT gas), new candidates need ~130 GRT/year projected reward. Stake reclaimed from dropped candidates reflows to surviving picks via the same iterative-greedy loop.
+- **Tuning:**
+  - Default (`10`) suits operators who want to focus on revenue-meaningful deployments.
+  - **Set to `0`** to disable and fall back to the gas-floor-only behavior — every candidate that clears `2 × GAS_ESTIMATE_GRT` becomes eligible.
+  - Raise for indexers with more selective opening policies (e.g., `50` for a ~650 GRT/year minimum).
+
 ---
 
 ## Lists

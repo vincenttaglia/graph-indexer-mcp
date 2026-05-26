@@ -175,6 +175,15 @@ single-mode (non-batched) submission on Arbitrum One — observed at
 batching via the indexer-agent action queue see ~0.004 GRT/lifecycle and
 should override much lower.
 
+**Reward Floor (28-day)**
+A second filter the optimizer applies when opening NEW allocations:
+projected reward over a 28-day window must clear
+\`min_rewards_grt_28d\` (default 10 GRT ≈ 130 GRT/year). Existing
+allocations are exempt — their close decisions follow the gas floor and
+a separate overall-APR check. Set the config to 0 to fall back to
+gas-floor-only behavior. Stake reclaimed from dropped candidates
+reflows to surviving picks.
+
 **Rewards Cut / Query Fee Cut**
 The indexer's retained share of rewards or fees, expressed in PPM
 (parts-per-million, 1e6 = 100%). The remainder flows to delegators.

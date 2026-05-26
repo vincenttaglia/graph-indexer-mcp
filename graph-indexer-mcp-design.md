@@ -661,6 +661,7 @@ max_allocation_pct: 0.25          # 25% of stake in any single allocation
 risky_deployment_cap_pct: 0.05    # 5% for known-risky deployments
 min_signal: 100                   # minimum GRT signal to consider
 gas_estimate_grt: 0.3             # Arbitrum One single-mode lifecycle (~0.2 GRT + 50% headroom)
+min_rewards_grt_28d: 10           # NEW-allocation operator-attention floor (~130 GRT/year equivalent); existing allocations are exempt
 
 # Lists
 whitelist: []                     # always consider these deployments
