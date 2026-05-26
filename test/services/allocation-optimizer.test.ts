@@ -9,6 +9,7 @@ import {
   allocation,
   deployment,
   fakeAgentClient,
+  fakeEboClient,
   fakeGraphmanClient,
   fakeGraphNodeClient,
   fakeNetworkClient,
@@ -116,6 +117,7 @@ describe('AllocationOptimizer.run', () => {
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(baseConfig());
     assert.equal(result.proposedAllocations.length, 0);
@@ -138,6 +140,7 @@ describe('AllocationOptimizer.run', () => {
       // longer touches graphman, so the test no longer needs to wire one.
       qosClient: fakeQosClient({ throwOnTopQueried: boom }),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(baseConfig({ whitelist: [] }));
     assert.ok(result.errors.length >= 2);
@@ -166,6 +169,7 @@ describe('AllocationOptimizer.run', () => {
       // graphman wired and still honors pause state.
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
     const ids = result.proposedAllocations.map((p) => p.deploymentId);
@@ -225,6 +229,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
 
@@ -282,6 +287,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
     assert.equal(
@@ -319,6 +325,7 @@ describe('AllocationOptimizer.run', () => {
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(cfg);
     const ids = result.proposedAllocations.map((p) => p.deploymentId).sort();
@@ -338,6 +345,7 @@ describe('AllocationOptimizer.run', () => {
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({ whitelist: [Q.BOTH], blacklist: [Q.BOTH] }),
@@ -381,6 +389,7 @@ describe('AllocationOptimizer.run', () => {
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -438,6 +447,7 @@ describe('AllocationOptimizer.run', () => {
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({ frozenlist: [Q.FROZEN], maxAllocations: 1 }),
@@ -470,6 +480,7 @@ describe('AllocationOptimizer.run', () => {
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const cfg = baseConfig({
       maxAllocationPct: 0.5,
@@ -528,6 +539,7 @@ describe('AllocationOptimizer.run', () => {
       qosClient: fakeQosClient(),
       // graphmanClient omitted — services should work without it.
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
 
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
@@ -619,6 +631,7 @@ describe('AllocationOptimizer.run', () => {
       },
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
 
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
@@ -730,6 +743,7 @@ describe('AllocationOptimizer.run', () => {
       },
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
 
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
@@ -809,6 +823,7 @@ describe('AllocationOptimizer.run', () => {
       graphmanClient: fakeGraphmanClient(),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({ minSignal: GRT(1_000n), gasEstimateGrt: GRT(1_000_000_000n) }),
@@ -878,6 +893,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     // Run twice: once with gas=0 (baseline, no reflow path) and once
     // with a gas budget large enough to knock B below 2× gas.
@@ -1010,6 +1026,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -1094,6 +1111,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -1160,6 +1178,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const cfg = baseConfig({
       maxAllocations: 2,
@@ -1244,6 +1263,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -1348,6 +1368,7 @@ describe('AllocationOptimizer.run', () => {
       graphNodeClient: fakeGraphNodeClient({ statuses: allStatuses }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -1408,6 +1429,7 @@ describe('AllocationOptimizer.run', () => {
       graphNodeClient: fakeGraphNodeClient({ statuses }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -1506,6 +1528,7 @@ describe('AllocationOptimizer.run', () => {
       graphNodeClient: fakeGraphNodeClient({ statuses }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -1614,6 +1637,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
 
     const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
@@ -1681,6 +1705,7 @@ describe('AllocationOptimizer.run', () => {
       }),
       qosClient: fakeQosClient(),
       agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
     });
     const result = await opt.run(
       baseConfig({
@@ -1727,6 +1752,137 @@ describe('AllocationOptimizer.run', () => {
       candAlloc <= GRT(100_000n),
       `allocation must not exceed the per-deployment cap (100k GRT); ` +
         `got ${candAlloc / 10n ** 18n}k GRT`,
+    );
+  });
+
+  it('gates candidates by latestBlock >= epochStartBlock (epoch-position eligibility)', async () => {
+    // Three candidates exercise the three branches of the gate:
+    //   A: healthy, latestBlock=100, chain=mainnet, epochStart=50 → eligible
+    //   B: healthy, latestBlock=30,  chain=mainnet, epochStart=50 → filtered
+    //   C: healthy, chain=optimism (not tracked by EBO)            → eligible (fail open)
+    //
+    // The gate replaces the dropped `synced` filter (graph-node's `synced`
+    // flips false on a single-block lag and is the wrong semantic).
+    // Eligibility means the deployment has indexed past the epoch's start
+    // block on its chain — that's what's needed to generate POI for the
+    // current epoch and earn current-epoch rewards.
+    const depA = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const depB = deployment({ id: Q.LOW, signal: GRT(50_000n), staked: GRT(1n) });
+    const depC = deployment({ id: Q.RUNNING, signal: GRT(50_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [depA, depB, depC],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          // Above epoch start on mainnet (50): eligible.
+          indexingStatus({ id: Q.OK, chain: 'mainnet', latestBlock: 100 }),
+          // Below epoch start on mainnet (50): filtered.
+          indexingStatus({ id: Q.LOW, chain: 'mainnet', latestBlock: 30 }),
+          // Chain EBO doesn't track: fail-open, eligible regardless of block.
+          indexingStatus({ id: Q.RUNNING, chain: 'optimism', latestBlock: 10 }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient({
+        epoch: 100,
+        // mainnet=50 covers A + B; optimism intentionally omitted so C
+        // exercises the missing-per-chain fail-open path.
+        blockNumbersByNetwork: [
+          { network: 'mainnet', blockNumber: '50' },
+        ],
+      }),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    const ids = result.proposedAllocations.map((p) => p.deploymentId).sort();
+    assert.ok(
+      ids.includes(Q.OK),
+      `expected A (above epoch start) in plan; got ${JSON.stringify(ids)}`,
+    );
+    assert.ok(
+      !ids.includes(Q.LOW),
+      `expected B (below epoch start) to be filtered; got ${JSON.stringify(ids)}`,
+    );
+    assert.ok(
+      ids.includes(Q.RUNNING),
+      `expected C (chain not tracked by EBO) to pass under fail-open; got ${JSON.stringify(ids)}`,
+    );
+
+    // candidatesAfterFilter should reflect the drop: 3 considered, 2 surviving.
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      2,
+      `expected exactly 2 of 3 candidates to survive the epoch-position gate; ` +
+        `got ${result.state.candidatesAfterFilter}`,
+    );
+
+    // Aggregate warning surfaces the dropped count so operators see the cohort.
+    assert.ok(
+      result.warnings.some(
+        (w) => /latestBlock < currentEpochStartBlock/.test(w) && /1 candidate/.test(w),
+      ),
+      `expected an aggregate "1 candidate(s) filtered" warning; got: ${JSON.stringify(
+        result.warnings,
+      )}`,
+    );
+  });
+
+  it('fails open when EBO getCurrentEpoch fetch errors (no epoch-position gating)', async () => {
+    // If EBO is down, the optimizer must NOT drop otherwise-healthy
+    // candidates — that would convert an EBO outage into an
+    // "everything filtered" failure mode. The authoritative gate lives in
+    // HealthMonitor.classify() at close time, so the optimizer being
+    // permissive here is safe. A clearly-labeled warning must surface so
+    // the operator knows the eligibility filter is degraded.
+    const dep = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const boom = new Error('EBO unreachable');
+    const eboClient = fakeEboClient();
+    eboClient.getCurrentEpoch = async () => {
+      throw boom;
+    };
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        // latestBlock well below any conceivable epoch start — only
+        // EBO-fail-open keeps this candidate eligible.
+        statuses: [indexingStatus({ id: Q.OK, chain: 'mainnet', latestBlock: 1 })],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient,
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    // Candidate survives — EBO outage must not gate.
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === Q.OK),
+      `expected healthy candidate to survive EBO outage; got: ${JSON.stringify(
+        result.proposedAllocations.map((p) => p.deploymentId),
+      )}`,
+    );
+
+    // No aggregate epoch-position warning (the gate didn't run).
+    assert.ok(
+      !result.warnings.some((w) => /latestBlock < currentEpochStartBlock/.test(w)),
+      `expected NO epoch-position drop warning under fail-open; got: ${JSON.stringify(
+        result.warnings,
+      )}`,
+    );
+
+    // Operator-facing degradation warning mentions EBO so the run isn't silent.
+    assert.ok(
+      result.warnings.some(
+        (w) => /EBO.*failed/i.test(w) && /epoch-position eligibility gate/.test(w),
+      ),
+      `expected EBO-failure warning mentioning the skipped gate; got: ${JSON.stringify(
+        result.warnings,
+      )}`,
     );
   });
 });

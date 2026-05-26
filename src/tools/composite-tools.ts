@@ -80,6 +80,7 @@ export function registerCompositeTools(
     graphmanClient: deps.graphmanClient,
     qosClient: deps.qosClient,
     agentClient: deps.agentClient,
+    eboClient: deps.eboClient,
   });
 
   const healthMonitor = new HealthMonitor({

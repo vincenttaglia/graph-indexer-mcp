@@ -24,6 +24,7 @@
  * amounts. APR is returned as a Number (decimal fraction, e.g. 0.12 = 12%).
  */
 
+import type { EboSubgraphClient } from '../clients/ebo-subgraph.js';
 import type { GraphmanClient } from '../clients/graphman.js';
 import type { GraphNodeClient } from '../clients/graph-node.js';
 import type { IndexerAgentClient } from '../clients/indexer-agent.js';
@@ -35,7 +36,10 @@ import type {
   Indexer,
   SubgraphDeployment,
 } from '../types/network.js';
-import type { SubgraphIndexingStatus } from '../types/graphnode.js';
+import type {
+  ChainIndexingStatus,
+  SubgraphIndexingStatus,
+} from '../types/graphnode.js';
 import { BLOCKS_PER_YEAR } from '../utils/constants.js';
 import { toQmDeploymentId } from '../utils/ipfs.js';
 
@@ -167,6 +171,14 @@ export interface AllocationOptimizerDeps {
   graphmanClient?: GraphmanClient;
   qosClient: QosSubgraphClient;
   agentClient: IndexerAgentClient;
+  /**
+   * EBO subgraph client — provides `currentEpoch` and per-chain
+   * epoch-start blocks. The optimizer uses these to gate candidates by
+   * `latestBlock >= epochStartBlock` (canonical "ready to allocate" check;
+   * see the eligibility filter below). Fail-open when EBO is unavailable —
+   * HealthMonitor.classify() is the authoritative gate at close time.
+   */
+  eboClient: EboSubgraphClient;
 }
 
 // ===========================================================================
@@ -297,6 +309,48 @@ function isSyncedAt(status: SubgraphIndexingStatus | undefined): boolean {
 
 function isHealthyAt(status: SubgraphIndexingStatus | undefined): boolean {
   return status?.health === 'healthy';
+}
+
+/**
+ * Pick the chain alias to use when looking up epoch-start blocks for a
+ * deployment. Mirrors HealthMonitor.pickChain: the first `chains[]` entry
+ * (typical case is exactly one chain per deployment). Returns null when
+ * the status row is missing or has no chains.
+ */
+function pickChainFromStatus(status: SubgraphIndexingStatus | undefined): string | null {
+  if (!status) return null;
+  const first = status.chains[0];
+  return first ? first.network : null;
+}
+
+/**
+ * Pick the deployment's latest indexed block from its status row. Mirrors
+ * HealthMonitor.pickLatestBlock: prefer the chosen chain, fall back to any
+ * chain row that reports a `latestBlock`. Returns null when no row has a
+ * `latestBlock.number` (status missing, or chain still bootstrapping).
+ */
+function pickLatestBlockFromStatus(
+  status: SubgraphIndexingStatus | undefined,
+  chain: string | null,
+): number | null {
+  if (!status) return null;
+  let row: ChainIndexingStatus | undefined;
+  if (chain) {
+    row = status.chains.find((c) => c.network === chain);
+  }
+  if (!row) row = status.chains.find((c) => c.latestBlock !== undefined);
+  if (!row?.latestBlock) return null;
+  return safeToInt(row.latestBlock.number);
+}
+
+/** Parse a string|number as a base-10 integer; throws on non-finite input. */
+function safeToInt(value: string | number): number {
+  if (typeof value === 'number') return Math.trunc(value);
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Cannot parse "${value}" as integer.`);
+  }
+  return n;
 }
 
 function isPausedAt(status: SubgraphIndexingStatus | undefined): boolean {
@@ -551,7 +605,7 @@ export class AllocationOptimizer {
     // passing Qm here keeps cache keys consistent with the response form.
     const candidateIdList = Array.from(candidateIds);
 
-    const [statusesRes, qosRes] = await Promise.allSettled([
+    const [statusesRes, qosRes, currentEpochRes] = await Promise.allSettled([
       this.deps.graphNodeClient.getIndexingStatuses(candidateIdList, sigOpt),
       this.deps.qosClient.getTopQueriedDeployments(
         {
@@ -560,7 +614,35 @@ export class AllocationOptimizer {
         },
         sigOpt,
       ),
+      // Current epoch + per-chain start blocks: powers the
+      // `latestBlock >= epochStartBlock` eligibility gate below. We fetch
+      // alongside the other state so EBO latency doesn't serialize.
+      this.deps.eboClient.getCurrentEpoch(sigOpt),
     ]);
+
+    // Per-chain epoch-start block map (chain alias lowercased → block#).
+    // Populated on EBO success; left empty on EBO failure. Downstream gate
+    // fails OPEN when the map is empty for a candidate's chain — see the
+    // candidate-filter loop below.
+    const epochStartByChain = new Map<string, number>();
+    if (currentEpochRes.status === 'fulfilled') {
+      for (const row of currentEpochRes.value.blockNumbersByNetwork) {
+        try {
+          epochStartByChain.set(row.network.toLowerCase(), safeToInt(row.blockNumber));
+        } catch {
+          // Skip a single bad row — keep the rest of the chain map usable.
+        }
+      }
+    } else {
+      // Fail OPEN: don't gate on epoch position when EBO is down. Surface
+      // the degradation as a warning so the operator knows the eligibility
+      // filter is permissive for this run.
+      warnings.push(
+        `EBO getCurrentEpoch failed (${errString(currentEpochRes.reason)}); ` +
+          `skipping epoch-position eligibility gate. Candidates whose ` +
+          `latestBlock < epochStartBlock may be included.`,
+      );
+    }
 
     opts?.signal?.throwIfAborted?.();
 
@@ -787,6 +869,13 @@ export class AllocationOptimizer {
 
     const minSignal = toBigInt(config.minSignal);
 
+    // Count candidates dropped by the epoch-position gate so we can emit a
+    // single aggregate warning after the filter loop rather than spamming
+    // one warning per candidate. The cohort filtered here is "healthy but
+    // syncing toward the epoch boundary" — they'll be eligible once they
+    // catch up, so operators should see the count without being deluged.
+    let belowEpochCount = 0;
+
     const candidates: OptimizationCandidate[] = [];
     for (const id of candidateIdList) {
       const isWhitelisted = whitelist.has(id);
@@ -832,6 +921,34 @@ export class AllocationOptimizer {
       // understanding why HealthMonitor.classify() owns that responsibility.
       if (!healthy || paused) continue;
 
+      // Epoch-position eligibility: a deployment must have indexed up to
+      // (or past) the current epoch's start block on its chain to generate
+      // POI for that epoch and earn current-epoch rewards. This is the
+      // canonical "ready to allocate" check — it replaces the previously
+      // dropped `synced` gate, which had the wrong semantic (synced flips
+      // false on a single-block lag while the deployment is still fully
+      // capable of closing the current epoch).
+      //
+      // Fail-open policy: enforce ONLY when we have BOTH the per-chain
+      // epoch-start block AND the candidate's latestBlock. If either input
+      // is missing (EBO down → empty map; status incomplete after the
+      // graph-node fallback above; deployment on a chain EBO doesn't
+      // track) we admit the candidate — HealthMonitor.classify() is the
+      // authoritative gate at close time, so the optimizer being
+      // permissive here doesn't risk an unrecoverable bad close.
+      const chain = pickChainFromStatus(status);
+      const chainEpochStart =
+        chain !== null ? epochStartByChain.get(chain.toLowerCase()) : undefined;
+      const latestBlock = pickLatestBlockFromStatus(status, chain);
+      if (
+        chainEpochStart !== undefined &&
+        latestBlock !== null &&
+        latestBlock < chainEpochStart
+      ) {
+        belowEpochCount++;
+        continue;
+      }
+
       const current = currentByDeployment.get(id);
       const currentAllocation = current ? toBigInt(current.allocatedTokens) : 0n;
 
@@ -859,6 +976,15 @@ export class AllocationOptimizer {
     }
 
     const candidatesAfterFilter = candidates.length;
+
+    if (belowEpochCount > 0) {
+      warnings.push(
+        `${belowEpochCount} candidate(s) filtered: latestBlock < ` +
+          `currentEpochStartBlock (can't earn current-epoch rewards). These ` +
+          `deployments are still syncing toward the epoch boundary and will be ` +
+          `eligible once they catch up.`,
+      );
+    }
 
     // ---------------------------------------------------------------------
     // 3. Compute optimization inputs.
