@@ -823,15 +823,22 @@ export class AllocationOptimizer {
    *   1. Rank candidates by per-unit APR at a small probe size. Whitelisted
    *      candidates float to the top.
    *   2. Pick up to `maxAllocations - frozenSlots` candidates.
-   *   3. Distribute `availableStake` across picks proportional to signal
-   *      share. Cap each allocation by `maxAllocationPct * totalStake` (or
-   *      `riskyDeploymentCapPct * totalStake` for risky).
+   *   3. Distribute `availableStake` across picks proportional to
+   *      `signal / max(other_indexers_stake, 1_GRT_floor)`. This is the
+   *      marginal-APR weighting — deployments with high signal relative to
+   *      existing competing stake get more of the budget, converging to the
+   *      APR-maximizing equilibrium. Cap each allocation by
+   *      `maxAllocationPct * totalStake` (or `riskyDeploymentCapPct * totalStake`
+   *      for risky).
    *   4. Drop any allocation whose projected annual reward is less than
    *      `2 * gasEstimateGrt`.
    *
-   * The signal-share weighting is the canonical Graph Protocol allocation
-   * heuristic — it converges to the APR-maximizing distribution in the
-   * limit of many indexers competing on identical issuance.
+   * The marginal-APR weighting follows from differentiating the per-pick
+   * reward w.r.t. our allocation A_i: at small A_i,
+   *   marginal_i ≈ (S_i / T) × issuance / A_other_i
+   * so weighting by S_i / A_other_i equalizes marginal APRs across picks
+   * at the water-filling optimum under signal-share-equilibrium assumptions
+   * (the same model indexer-tools / autoagent use).
    */
   private optimize(args: {
     candidates: OptimizationCandidate[];
@@ -924,12 +931,39 @@ export class AllocationOptimizer {
     // baked into the ordering). --
     const picks = ranked.slice(0, remainingSlots);
 
-    // -- 3. Distribute by signal share, applying per-deployment caps. --
-    let totalPickSignal = 0n;
-    for (const r of picks) totalPickSignal += r.candidate.signalledTokens;
-    if (totalPickSignal === 0n) {
+    // -- 3. Distribute by marginal-APR weight, applying per-deployment caps.
+    //
+    // Weight each pick by signal / (other_indexers_allocation + floor). High
+    // signal relative to existing competing stake = high marginal APR =
+    // should get more of the budget. This converges to the marginal-APR-
+    // equalizing (water-filling) optimum under signal-share-equilibrium
+    // assumptions.
+    //
+    // FLOOR is needed because a fresh deployment with zero other allocations
+    // would have weight=Infinity. Use 1 GRT as the floor: small enough to
+    // barely affect saturated deployments, large enough that brand-new
+    // deployments don't dominate the budget.
+    const FLOOR = 10n ** 18n; // 1 GRT in wei
+
+    interface Weighted {
+      ranked: Ranked;
+      /** signalledTokens × 1e18 / max(otherIndexers, FLOOR). */
+      weight: bigint;
+    }
+
+    const weighted: Weighted[] = picks.map((r) => {
+      const denom = r.otherIndexers > FLOOR ? r.otherIndexers : FLOOR;
+      // Scale numerator by 1e18 so we keep ~18 decimals of precision before
+      // dividing. Otherwise small-signal/big-stake candidates underflow to 0n.
+      const weight = (r.candidate.signalledTokens * 10n ** 18n) / denom;
+      return { ranked: r, weight };
+    });
+
+    let totalWeight = 0n;
+    for (const w of weighted) totalWeight += w.weight;
+    if (totalWeight === 0n) {
       warnings.push(
-        'picked candidates have zero total signal — cannot distribute stake',
+        'picked candidates have zero total signal/stake weight — cannot distribute',
       );
       return [];
     }
@@ -937,14 +971,15 @@ export class AllocationOptimizer {
     const gas = toBigInt(config.gasEstimateGrt);
     const proposals: ProposedAllocation[] = [];
     let remainingStake = availableStake;
-    for (const r of picks) {
+    for (const w of weighted) {
       if (remainingStake === 0n) break;
+      const r = w.ranked;
       const cand = r.candidate;
       const cap = perDeploymentCap(totalStake, cand.isRisky, config);
 
-      // Signal-share allocation, capped by both per-deployment cap and the
-      // remaining stake budget.
-      let amount = (availableStake * cand.signalledTokens) / totalPickSignal;
+      // Marginal-APR-weighted allocation, capped by both per-deployment cap
+      // and the remaining stake budget.
+      let amount = (availableStake * w.weight) / totalWeight;
       if (amount > cap) amount = cap;
       if (amount > remainingStake) amount = remainingStake;
       if (amount === 0n) continue;
@@ -979,7 +1014,7 @@ export class AllocationOptimizer {
       const rationale = [
         r.whitelisted ? 'whitelisted' : `ranked #${proposals.length + 1} by APR`,
         cand.isRisky ? 'risky cap applied' : null,
-        `signal share ${shareLabel(cand.signalledTokens, totalPickSignal)}`,
+        `marginal weight ${shareLabel(w.weight, totalWeight)}`,
       ]
         .filter((s): s is string => Boolean(s))
         .join('; ');
