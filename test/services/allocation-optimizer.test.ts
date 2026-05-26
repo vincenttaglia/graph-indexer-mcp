@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   AllocationOptimizer,
   bigIntSqrt,
+  bisectLambda,
   calculateApr,
   type OptimizerConfig,
+  type WaterFillPick,
 } from '../../src/services/allocation-optimizer.js';
 import {
   allocation,
@@ -700,23 +702,32 @@ describe('AllocationOptimizer.run', () => {
     );
   });
 
-  it('matches or exceeds status-quo realized APR (water-filling beats linear weighting + cap-aware ranking)', async () => {
-    // Regression test for the user's reported bug: optimizer produced
-    // ~0.82% weighted APR vs ~17.4% status quo because:
-    //   (a) probe-APR ranking inflated fresh D=0 deployments' rank by
-    //       dividing by probeAmount ≈ 1k GRT instead of the realistic
-    //       full-allocation denominator, crowding out the user's
-    //       current saturated-but-healthy allocations.
+  it('allocates meaningful budget to a saturated high-S peer and zero to a fresh D=0 peer', async () => {
+    // Regression test for the user's reported bug. The fix had two parts:
+    //   (a) probe-APR ranking previously inflated fresh D=0 deployments'
+    //       rank by dividing by probeAmount ≈ 1k GRT instead of the
+    //       realistic full-allocation denominator, crowding out the
+    //       user's current saturated-but-healthy allocations. Cap-aware
+    //       ranking now uses the realistic denominator.
     //   (b) S/D linear weighting then assigned most of the budget to
     //       those fresh deployments (D=0 → weight ≈ ∞), where realized
-    //       APR collapsed.
+    //       APR collapsed. Water-filling correctly assigns 0 to D=0.
+    //
+    // This test does NOT compute the status-quo APR or compare against a
+    // numeric baseline. It verifies the two behavioral invariants that
+    // make the regression impossible:
+    //   1. The saturated, currently-allocated, high-signal deployment
+    //      receives a meaningful allocation (> noise threshold).
+    //   2. The fresh D=0 deployment receives exactly zero (water-filling
+    //      math: its reward is independent of A_i).
+    // For an actual APR comparison see the "weighted APR exceeds ..."
+    // suite (if/when added); duplicating that scaffolding here is not
+    // worth the noise.
     //
     // Scenario: one high-signal saturated current allocation + one fresh
     // zero-D deployment with the same signal. Cap-aware ranking puts
-    // the saturated one first (its R/(D+cap) APR is realistic; the
-    // fresh one's R/cap APR is also moderate, but tie-broken away).
-    // Water-filling allocates a meaningful amount to the saturated
-    // pick and ZERO to the fresh one.
+    // the saturated one first; water-filling allocates a meaningful
+    // amount to the saturated pick and ZERO to the fresh one.
     const saturated = deployment({
       id: Q.OK,
       signal: GRT(2_037n),
@@ -818,5 +829,58 @@ describe('bigIntSqrt', () => {
 
   it('throws on negative input', () => {
     assert.throws(() => bigIntSqrt(-1n), /negative/);
+  });
+});
+
+describe('bisectLambda', () => {
+  it('returns zeros when availableStake is 0', () => {
+    const picks: WaterFillPick[] = [
+      { R: 10n ** 18n, D: 10n ** 18n, cap: 10n ** 20n },
+      { R: 5n * 10n ** 17n, D: 2n * 10n ** 18n, cap: 10n ** 20n },
+    ];
+    const out = bisectLambda(picks, 0n);
+    assert.deepEqual(out, [0n, 0n]);
+  });
+
+  it('returns zeros when availableStake is negative (defensive)', () => {
+    const picks: WaterFillPick[] = [{ R: 10n ** 18n, D: 10n ** 18n, cap: 10n ** 20n }];
+    const out = bisectLambda(picks, -5n);
+    assert.deepEqual(out, [0n]);
+  });
+
+  it('does not return over-budget allocations when marginal rewards are tiny', () => {
+    // From the audit: R=3, D=2e18, cap=1e18, availableStake=1n.
+    // With the previous floor-div upper bound on `hi`, bisection settled
+    // on a λ where the closed-form A_i was ~0.449 GRT — orders of
+    // magnitude over a 1-wei budget. With ceil-div on `hi`, the bracket
+    // is honest (sum at hi == 0) so bisection cannot exceed availableStake.
+    const picks: WaterFillPick[] = [{ R: 3n, D: 2n * 10n ** 18n, cap: 10n ** 18n }];
+    const out = bisectLambda(picks, 1n);
+    let sum = 0n;
+    for (const a of out) sum += a;
+    assert.ok(
+      sum <= 1n,
+      `bisectLambda must not exceed availableStake=1; got sum=${sum.toString()} (out=${out
+        .map((x) => x.toString())
+        .join(',')})`,
+    );
+  });
+
+  it('never exceeds availableStake across a range of small budgets', () => {
+    // Belt-and-braces: bisection's invariant is sum <= availableStake.
+    const picks: WaterFillPick[] = [
+      { R: 7n, D: 3n * 10n ** 18n, cap: 5n * 10n ** 18n },
+      { R: 11n, D: 2n * 10n ** 18n, cap: 5n * 10n ** 18n },
+      { R: 2n, D: 10n ** 18n, cap: 5n * 10n ** 18n },
+    ];
+    for (const budget of [1n, 10n, 1_000n, 10n ** 9n, 10n ** 15n]) {
+      const out = bisectLambda(picks, budget);
+      let sum = 0n;
+      for (const a of out) sum += a;
+      assert.ok(
+        sum <= budget,
+        `over budget at availableStake=${budget}: sum=${sum.toString()}`,
+      );
+    }
   });
 });

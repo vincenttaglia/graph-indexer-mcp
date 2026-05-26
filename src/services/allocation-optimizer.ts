@@ -910,7 +910,7 @@ export class AllocationOptimizer {
       return [];
     }
 
-    // -- 1. Rank by APR at the per-deployment cap. --
+    // -- 1. Rank by APR at min(cap, availableStake). --
     //
     // Cap-aware ranking is saturation-aware: a fresh D=0 deployment with
     // S=100 ranks by R/cap (e.g. ~10.8% APR) instead of R/probe (~271%
@@ -918,6 +918,13 @@ export class AllocationOptimizer {
     // R/(D+cap) ≈ 39.5%, which is the actual yield if we filled the cap.
     // This puts the user's real high-yield current allocations at the top
     // instead of letting fresh-deployment artifacts crowd them out.
+    //
+    // When availableStake < cap, ranking at the full cap overstates a
+    // high-R/high-D candidate's realized yield: bisection will never get
+    // close to filling the cap, so a lower-D peer that we can actually
+    // saturate would deliver more reward per wei. Ranking at the smaller
+    // of (cap, availableStake) keeps the comparison honest under tight
+    // budgets (frozen-heavy state, single-slot left, etc).
 
     interface Ranked {
       candidate: OptimizationCandidate;
@@ -935,11 +942,20 @@ export class AllocationOptimizer {
           ? c.totalStakedTokens - c.currentAllocation
           : 0n;
       const cap = perDeploymentCap(totalStake, c.isRisky, config);
+      // Rank by realized APR at the SMALLER of (cap, availableStake). When
+      // availableStake < cap (frozen-heavy or single-slot scenarios), ranking
+      // at full cap can favor a high-R high-D deployment whose realized
+      // reward at our actual budget would be much worse than a lower-D peer.
+      // If both cap and availableStake collapse to 0 the ranking is
+      // degenerate; fall back to 1n so calculateApr's totalAlloc>0 guard
+      // doesn't return a flat 0 for every candidate.
+      let rankAllocation = cap < availableStake ? cap : availableStake;
+      if (rankAllocation <= 0n) rankAllocation = 1n;
       const rankApr = calculateApr({
         signal: c.signalledTokens,
         totalSignal,
         issuancePerYear,
-        proposedAllocation: cap,
+        proposedAllocation: rankAllocation,
         otherIndexersAllocation: otherIndexers,
       });
       return {
@@ -1163,7 +1179,7 @@ function shareLabel(part: bigint, whole: bigint): string {
  * A bisection input: per-pick R (reward coefficient = S/T × issuance),
  * D (other-indexers' stake on the deployment), and per-deployment cap.
  */
-interface WaterFillPick {
+export interface WaterFillPick {
   R: bigint;
   D: bigint;
   cap: bigint;
@@ -1220,6 +1236,12 @@ function totalAllocatedAtLambda(picks: WaterFillPick[], lambdaScaled: bigint): b
 export function bisectLambda(picks: WaterFillPick[], availableStake: bigint): bigint[] {
   if (picks.length === 0) return [];
 
+  // Zero-budget guard: with no stake to deploy every A_i must be 0. The
+  // bisection bracket below assumes availableStake > 0 (otherwise `hi`
+  // collapses to 1 and we'd return a tiny but non-zero allocation that's
+  // strictly over budget).
+  if (availableStake <= 0n) return picks.map(() => 0n);
+
   // Edge: every pick has D=0 (all fresh) → every A_i = 0 regardless of λ.
   // Return zeros directly; bisection would degenerate otherwise.
   let anyD = false;
@@ -1247,11 +1269,19 @@ export function bisectLambda(picks: WaterFillPick[], availableStake: bigint): bi
   // Upper bound for λ: at this value every (unclamped) A_i is exactly 0,
   // because sqrt(R × D × LAMBDA_SCALE / hi) = D. Above this λ the sum is
   // strictly 0, so the answer is bracketed at or below hi.
+  //
+  // We must use CEIL division here. Floor-div on (R × LAMBDA_SCALE) / D
+  // can return a value strictly below the true zero-allocation threshold:
+  // bisection then settles on a λ where unclamped sqrt(R × D × SCALE / λ)
+  // is still > D, producing a positive A_i that the loop reports as
+  // "within budget" even when availableStake is 1 wei. Ceil-div guarantees
+  // sqrt(R × D × SCALE / hi) ≤ D for every pick → total at hi is 0 →
+  // the bracket is honest.
   let hi = 1n;
   for (const { R, D } of picks) {
     if (D > 0n && R > 0n) {
-      // marginal-at-zero = R / D, scaled.
-      const marginalAtZeroScaled = (R * LAMBDA_SCALE) / D;
+      // Ceil-div: ceil((R × LAMBDA_SCALE) / D) = (R × LAMBDA_SCALE + D − 1) / D.
+      const marginalAtZeroScaled = (R * LAMBDA_SCALE + D - 1n) / D;
       if (marginalAtZeroScaled > hi) hi = marginalAtZeroScaled;
     }
   }
