@@ -41,6 +41,16 @@
  * treat it as healthy-at-epoch-start. This is conservative for Path A on the
  * healthy row (current health implies past health) but is noted in
  * `closabilityReason` so the operator can override.
+ *
+ * Closability driver: the canonical closability-eligibility signal is the
+ * derived `AllocationHealth.aboveEpochStart` boolean (true iff both
+ * `latestBlock` and `epochStartBlock` are known and `latestBlock >=
+ * epochStartBlock`). The `AllocationHealth.synced` field is INFORMATIONAL
+ * ONLY — it mirrors graph-node's `synced` flag, which flips true once a
+ * deployment has reached chain head AT LEAST ONCE and stays true thereafter
+ * (it does NOT track real-time chainhead lag). HealthMonitor's classification
+ * intentionally never reads `synced`; operators evaluating "can I close this
+ * cleanly?" should read `aboveEpochStart`.
  */
 
 import type { Allocation } from '../types/network.js';
@@ -70,11 +80,33 @@ export interface AllocationHealth {
   /** Allocated GRT in wei (preserved as BigInt to avoid precision loss). */
   allocatedTokens: bigint;
   health: 'healthy' | 'unhealthy' | 'failed';
+  /**
+   * Graph-node's `synced` flag — INFORMATIONAL ONLY.
+   *
+   * Per graph-node convention: true once the deployment has reached
+   * chain head at least once; stays true thereafter (does NOT flip
+   * false on transient lag). Not used in HealthMonitor's classification
+   * — closability is determined by `latestBlock >= epochStartBlock`
+   * (see `aboveEpochStart` for the derived signal).
+   *
+   * When `statusMissing` is true this field is `false` as a sentinel
+   * for "unknown"; operators should consult `statusMissing` first.
+   */
   synced: boolean;
   /** Most recent block indexed by graph-node, or null if unknown. */
   latestBlock: number | null;
   /** Epoch-start block on the deployment's chain, or null if unresolved. */
   epochStartBlock: number | null;
+  /**
+   * Derived closability-eligibility signal. True when both `latestBlock`
+   * and `epochStartBlock` are known AND `latestBlock >= epochStartBlock`.
+   * Null if either input is unknown.
+   *
+   * This is the actual closability driver — `synced` doesn't matter.
+   * Operators looking to determine "can I close this allocation cleanly
+   * at the current epoch boundary?" should check this field.
+   */
+  aboveEpochStart: boolean | null;
   /** Pathway by which this allocation can be closed cleanly. */
   closability: ClosabilityPath;
   /** Why this path (or none) — quotes the matrix row. */
@@ -488,9 +520,13 @@ export class HealthMonitor {
           deploymentId: safeToQm(alloc.subgraphDeployment.id),
           allocatedTokens: safeToBigInt(alloc.allocatedTokens),
           health: 'failed',
+          // Sentinel — actual sync state is unknown here. statusMissing
+          // is the primary indicator that this row carries no real data.
           synced: false,
           latestBlock: null,
           epochStartBlock: null,
+          // Both inputs unknown → eligibility is genuinely unknown.
+          aboveEpochStart: null,
           closability: 'none',
           closabilityReason:
             'Classification failed — see errors list. Operator review required.',
@@ -541,8 +577,10 @@ export class HealthMonitor {
       if (ah.closability === 'A') {
         // Path A from healthy allocations is "only if rebalancing" — the
         // optimizer owns that decision. We do NOT recommend closing healthy
-        // synced allocations here; emit Path A close plan only when the
-        // allocation is degraded (unhealthy/failed) or otherwise actionable.
+        // allocations here; emit Path A close plan only when the allocation
+        // is degraded (unhealthy/failed) or otherwise actionable. ("synced"
+        // is intentionally not part of this guard — see
+        // AllocationHealth.synced for why that flag is informational only.)
         if (ah.health === 'healthy') {
           // Skip — healthy allocations are not actioned by this workflow.
           continue;
@@ -636,9 +674,13 @@ export class HealthMonitor {
         deploymentId: safeToQm(alloc.subgraphDeployment.id),
         allocatedTokens: safeToBigInt(alloc.allocatedTokens),
         health: 'failed',
+        // Sentinel — actual sync state is unknown when graph-node has no
+        // row for this deployment. Consult `statusMissing` first.
         synced: false,
         latestBlock: null,
         epochStartBlock,
+        // latestBlock unknown → eligibility is genuinely unknown.
+        aboveEpochStart: null,
         closability: 'none',
         closabilityReason:
           'graph-node has no indexing-status row for this deployment; operator review required (deployment may not be assigned to this node).',
@@ -671,15 +713,26 @@ export class HealthMonitor {
       fatalErrorBlock,
     });
 
+    // Derived closability-eligibility signal. Null when either input is
+    // unknown — operators reading this should treat null as "can't say".
+    const aboveEpochStart =
+      latestBlock !== null && epochStartBlock !== null
+        ? latestBlock >= epochStartBlock
+        : null;
+
     return {
       allocationId: alloc.id,
       // Always emit Qm canonical form (see safeToQm doc above).
       deploymentId: safeToQm(alloc.subgraphDeployment.id),
       allocatedTokens: safeToBigInt(alloc.allocatedTokens),
       health: status.health,
+      // Informational mirror of graph-node's `synced` flag — NOT used in
+      // any classification logic. See the type-level comment on
+      // AllocationHealth.synced for the precise graph-node semantic.
       synced: status.synced,
       latestBlock,
       epochStartBlock,
+      aboveEpochStart,
       closability,
       closabilityReason: reason,
       fatalErrorDeterministic: fatalDeterministic,
