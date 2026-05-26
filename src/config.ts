@@ -40,7 +40,20 @@ export const configSchema = z.object({
   maxAllocationPct: z.coerce.number().min(0).max(1).default(0.25),
   riskyDeploymentCapPct: z.coerce.number().min(0).max(1).default(0.05),
   minSignal: z.coerce.number().nonnegative().default(100),
-  gasEstimateGrt: z.coerce.number().nonnegative().default(50),
+  /**
+   * Gas budget per allocation lifecycle (open + close), denominated in GRT.
+   *
+   * Default 0.5 GRT covers single-action allocate/close on Arbitrum One at
+   * typical gas-price load with safety headroom. Operators using batched
+   * action queues (typical via indexer-agent) see effectively ~0.004 GRT
+   * per lifecycle and can set this lower. Mainnet operators (rare now)
+   * should override significantly higher.
+   *
+   * The optimizer's gas-floor filter is `projectedReward < 2 × gasEstimateGrt`,
+   * so at 0.5 GRT default it admits any deployment expected to earn at
+   * least 1 GRT/year. Almost all real deployments qualify.
+   */
+  gasEstimateGrt: z.coerce.number().nonnegative().default(0.5),
 
   whitelist: z.array(z.string()).default([]),
   blacklist: z.array(z.string()).default([]),
