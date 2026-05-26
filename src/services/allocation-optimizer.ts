@@ -302,9 +302,10 @@ function isHealthyAt(status: SubgraphIndexingStatus | undefined): boolean {
 function isPausedAt(status: SubgraphIndexingStatus | undefined): boolean {
   // graph-node surfaces `paused` natively on `indexingStatuses`. When a
   // status entry is missing (the deployment isn't tracked locally) we
-  // conservatively report "not paused" — the surrounding sync/health gate
-  // already excludes those candidates, so this only matters for
-  // not-yet-synced deployments the operator forced via whitelist.
+  // conservatively report "not paused" — the surrounding health gate
+  // already excludes those candidates (no status → isHealthyAt returns
+  // false), so this default only matters for the rare path where the
+  // candidate has a status row but no `paused` field populated.
   return Boolean(status?.paused);
 }
 
@@ -592,11 +593,10 @@ export class AllocationOptimizer {
     // graph-node's bulk indexingStatuses may return partial results when the
     // candidate list is large (response-size / query-complexity limits at the
     // gateway or graph-node side). The filter below treats a missing status
-    // as "unhealthy + unsynced" and silently drops the candidate — which has
-    // bitten operators on real deployments at cap with healthy + synced state
-    // confirmed via per-deployment health checks. Per-deployment fallbacks
-    // are reliable: each call is a single-element query so size limits don't
-    // come into play.
+    // as "unhealthy" and silently drops the candidate — which has bitten
+    // operators on real deployments at cap with healthy state confirmed via
+    // per-deployment health checks. Per-deployment fallbacks are reliable:
+    // each call is a single-element query so size limits don't come into play.
     //
     // Build missing list, prioritized by source. Current allocations and
     // whitelist entries are the most operator-critical — fall back on them
@@ -813,13 +813,24 @@ export class AllocationOptimizer {
       }
 
       const status = statusById.get(id);
-      const synced = isSyncedAt(status);
       const healthy = isHealthyAt(status);
       const paused = pauseById.get(id) ?? false;
+      // `isSynced` is captured on the candidate for diagnostics/operator
+      // visibility only — it is intentionally NOT part of the gate below.
+      const synced = isSyncedAt(status);
 
-      // Health / sync / pause gates — whitelist does NOT override these; it's
-      // unsafe to allocate to a deployment we can't serve.
-      if (!synced || !healthy || paused) continue;
+      // Health + pause gates — whitelist does NOT override these; it's
+      // unsafe to allocate to a deployment that's actively broken.
+      //
+      // We DO NOT gate on `synced` (graph-node's "caught up to chainhead"
+      // flag). Synced flips false on a single-block lag — restart, RPC
+      // blip, normal pacing — and a healthy lagging deployment is still
+      // allocatable: it will earn future-epoch rewards once it catches up.
+      // Closability for the current epoch (latestBlock >= epochStartBlock)
+      // is the HealthMonitor's concern, not the optimizer's eligibility
+      // check. Do NOT re-introduce a `synced` gate here without first
+      // understanding why HealthMonitor.classify() owns that responsibility.
+      if (!healthy || paused) continue;
 
       const current = currentByDeployment.get(id);
       const currentAllocation = current ? toBigInt(current.allocatedTokens) : 0n;

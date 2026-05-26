@@ -537,8 +537,12 @@ export class DiscoveryEngine {
       const isFrozen = frozenlist.has(idKey);
       const isWhitelisted = whitelist.has(idKey);
 
-      // Skip the whole sync state — graph-node is still pulling a fresh
-      // deployment and we shouldn't propose tearing it down mid-flight.
+      // Discovery's cleanup half DOES care about `synced` here, unlike the
+      // optimizer's eligibility filter: a not-yet-synced deployment may still
+      // be a deployment graph-node is actively pulling state for, and we
+      // shouldn't propose tearing it down mid-flight. Sync state IS relevant
+      // for cleanup classification — skip until it's caught up before
+      // deciding whether it's stale.
       if (!status.synced) continue;
 
       // Classify. First match wins; ordering reflects priority (no signal is
