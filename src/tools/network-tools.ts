@@ -190,15 +190,16 @@ export function registerNetworkTools(
       const deployment = await deps.client.getDeployment(deployment_id, {
         signal: extra.signal,
       });
+      // Normalize the echoed `deployment_id` to Qm canonical form so the
+      // output contract ("all outputs are Qm") holds regardless of which
+      // encoding the caller supplied. Falls back to the raw input on
+      // unexpected shapes (defensive — input schema should already reject).
+      const echoedId = toQmIdOrRaw(deployment_id);
       if (!deployment) {
-        return asText({ deployment_id, found: false });
+        return asText({ deployment_id: echoedId, found: false });
       }
-      // Emit the deployment id in Qm canonical form regardless of which
-      // encoding the caller passed in. The echoed `deployment_id` field
-      // is the OPERATOR's input (left untouched); `deployment.id` is the
-      // canonical output.
       return asText({
-        deployment_id,
+        deployment_id: echoedId,
         found: true,
         deployment: deploymentToQm(deployment),
       });
@@ -265,7 +266,10 @@ export function registerNetworkTools(
         signal: extra.signal,
       });
       return asText({
-        deployment_id,
+        // Normalize the echoed `deployment_id` to Qm canonical form so the
+        // output contract holds regardless of which encoding the caller
+        // supplied.
+        deployment_id: toQmIdOrRaw(deployment_id),
         count: items.length,
         truncated,
         // Convert each nested deployment id to Qm canonical form before
@@ -304,6 +308,11 @@ export function registerNetworkTools(
         deps.client.getNetworkParameters({ signal: extra.signal }),
       ]);
 
+      // Normalize the echoed `deployment_id` once for both response paths so
+      // the output contract ("all outputs are Qm") holds regardless of which
+      // encoding the caller supplied.
+      const echoedId = toQmIdOrRaw(deployment_id);
+
       if (!deployment) {
         throw new Error(`Deployment ${deployment_id} not found in network subgraph.`);
       }
@@ -313,7 +322,7 @@ export function registerNetworkTools(
       // a nonzero APR based on stale signal/issuance state.
       if (BigInt(deployment.deniedAt ?? 0) > 0n) {
         return asText({
-          deployment_id,
+          deployment_id: echoedId,
           allocation_amount,
           apr: 0,
           denied: true,
@@ -358,8 +367,10 @@ export function registerNetworkTools(
 
       // Friendly debug/explainability fields — every input is echoed verbatim
       // so the caller (and the operator reviewing a recommendation) can audit.
+      // `deployment_id` is normalized to Qm (see `echoedId` above) so the
+      // output contract holds regardless of input encoding.
       return asText({
-        deployment_id,
+        deployment_id: echoedId,
         allocation_amount,
         apr,
         denied: false,

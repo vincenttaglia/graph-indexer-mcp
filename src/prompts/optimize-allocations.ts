@@ -75,7 +75,8 @@ Call these Stage 1 tools (in parallel where possible):
 - \`get_network_parameters\` — total signal, total stake, issuance per block, GRT per block.
 - \`get_indexer_allocations\` — current active allocations for the indexer (from \`indexer://config\`).
 - \`get_all_signalled_deployments\` — every deployment with non-zero curation signal (the candidate universe).
-- \`get_indexing_statuses\` — per-deployment health + sync state from graph-node; only synced+healthy deployments are eligible.
+- \`get_indexing_statuses\` — per-deployment health + sync state from graph-node. Eligible candidates: healthy + not paused + indexed up to the current epoch's start block (\`latestBlock >= epochStartBlock\` per the deployment's chain). graph-node's \`synced\` flag is NOT used — it has a misleading semantic (it's "has reached chain head at least once; stays true thereafter") and the actual gate is epoch-position.
+- \`get_current_epoch\` — current epoch number and the start block per chain alias. Pair with \`get_indexing_statuses\` to apply the epoch-position eligibility gate.
 - \`get_indexing_rules\` — current never/always/offchain rules so we don't override operator intent.
 - \`get_top_queried_deployments\` — QoS volume data for tie-breaking and risk-weighting.
 
@@ -83,7 +84,7 @@ Call these Stage 1 tools (in parallel where possible):
 
 Apply the design §4.1 filters in order:
 
-1. Drop deployments where \`get_indexing_statuses\` reports unhealthy / not fully synced.
+1. Drop deployments where \`get_indexing_statuses\` reports unhealthy (\`health != 'healthy'\`). Then drop deployments whose \`latestBlock < currentEpochStartBlock\` for their chain (can't earn current-epoch rewards). Do NOT use graph-node's \`synced\` flag for eligibility — it means "has reached chain head at least once; stays true thereafter" and is the wrong gate. Use \`get_current_epoch\` to obtain the per-chain epoch start block. Fail open per-candidate if either input (chain alias or latest block) is missing — the close-time HealthMonitor gate is authoritative.
 2. Drop deployments with \`deniedAt != 0\` (rewards denied) — surfaced by \`get_all_signalled_deployments\`.
 3. Drop deployments below \`min_signal\` from \`indexer://config\`.
 4. Drop blacklisted deployments. Keep frozenlist allocations as-is (do not propose changes to them).
