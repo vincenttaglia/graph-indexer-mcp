@@ -108,12 +108,19 @@ async function invokeTool(
 
 interface CapturingAgentClient extends IndexerAgentClient {
   queuedActions: ActionInput[][];
+  /**
+   * Each `setIndexingRule` call records the rule arg verbatim (structural
+   * copy) so tests can assert on which fields the tool injected vs. forwarded.
+   */
+  setRuleCalls: Array<Partial<import('../../src/types/agent.js').IndexingRule> & { identifier: string }>;
 }
 
 function makeCapturingAgentClient(): CapturingAgentClient {
   const queuedActions: ActionInput[][] = [];
+  const setRuleCalls: CapturingAgentClient['setRuleCalls'] = [];
   const client: CapturingAgentClient = {
     queuedActions,
+    setRuleCalls,
     async queueActions(actions: ActionInput[]): Promise<Action[]> {
       // Push a structural copy so assertions see the exact shape the handler
       // emitted (in particular: which optional fields the handler set vs.
@@ -145,10 +152,17 @@ function makeCapturingAgentClient(): CapturingAgentClient {
       return [];
     },
     async setIndexingRule(rule) {
+      // Record a structural copy so tests can assert on exactly which
+      // fields the tool layer constructed vs. forwarded — in particular
+      // the protocolNetwork-injection contract.
+      setRuleCalls.push({ ...rule });
       return {
         identifier: rule.identifier,
         identifierType: rule.identifierType ?? 'deployment',
         decisionBasis: rule.decisionBasis ?? 'rules',
+        // Required by the IndexingRule schema shape; echo back what the
+        // tool sent so the fake matches a real agent's response shape.
+        protocolNetwork: rule.protocolNetwork ?? 'arbitrum-one',
       };
     },
     async setCostModel(model) {
@@ -533,5 +547,74 @@ describe('agent-tools: required wire fields (status / protocolNetwork / isLegacy
     );
     // Nothing was queued — the tool errored before reaching the agent.
     assert.equal(client.queuedActions.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// set_indexing_rule: schema-required `protocolNetwork` injection.
+//
+// The agent's `IndexingRuleInput!` requires `protocolNetwork` (same class of
+// post-Horizon schema bug as the ActionInput protocolNetwork case). The tool
+// must inject it from `config.protocolNetwork` and refuse to let a caller
+// override it via `rule_params`.
+// ---------------------------------------------------------------------------
+
+describe('agent-tools: set_indexing_rule protocolNetwork injection', () => {
+  beforeEach(() => {
+    resetAccessControl();
+  });
+  afterEach(() => {
+    resetAccessControl();
+  });
+
+  it('injects protocolNetwork from config on every rule write', async () => {
+    const { server, client } = setupTools();
+    await invokeTool(server, 'set_indexing_rule', {
+      deployment_id: VALID_DEPLOYMENT,
+      rule_params: {
+        allocationAmount: '1000000000000000000',
+        decisionBasis: 'rules',
+      },
+    });
+    assert.equal(client.setRuleCalls.length, 1);
+    const rule = client.setRuleCalls[0]!;
+    assert.equal(rule.identifier, VALID_DEPLOYMENT);
+    assert.equal(rule.identifierType, 'deployment');
+    // Load-bearing: the agent's IndexingRuleInput! rejects writes that omit
+    // `protocolNetwork`, so the tool MUST inject it from config.
+    assert.equal(rule.protocolNetwork, 'arbitrum-one');
+    // Caller-supplied params still flow through.
+    assert.equal(rule.allocationAmount, '1000000000000000000');
+    assert.equal(rule.decisionBasis, 'rules');
+  });
+
+  it('rejects `protocolNetwork` supplied via rule_params (reserved key)', async () => {
+    // Same belt-and-suspenders contract as `identifier` / `identifierType`:
+    // overriding protocolNetwork through rule_params would let the caller
+    // write a rule scoped to a different chain than the MCP is configured
+    // against. The Zod refine must reject the call outright.
+    const { server, client } = setupTools();
+    let threw = false;
+    try {
+      await invokeTool(server, 'set_indexing_rule', {
+        deployment_id: VALID_DEPLOYMENT,
+        rule_params: {
+          protocolNetwork: 'mainnet',
+          decisionBasis: 'rules',
+        },
+      });
+    } catch (err) {
+      threw = true;
+      // The Zod refine message names the three reserved keys; assert that
+      // the error mentions protocolNetwork so the operator gets a clear hint.
+      assert.match(
+        String(err),
+        /protocolNetwork/,
+        `validation error must name the reserved key; got: ${String(err)}`,
+      );
+    }
+    assert.equal(threw, true, 'schema must reject protocolNetwork in rule_params');
+    // Nothing reached the client — validation failed up-front.
+    assert.equal(client.setRuleCalls.length, 0);
   });
 });

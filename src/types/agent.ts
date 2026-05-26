@@ -164,24 +164,63 @@ export type IndexingDecisionBasis = 'rules' | 'never' | 'always' | 'offchain';
 
 /**
  * Indexer-agent rule controlling whether/how the agent allocates to a
- * deployment. `safety` and `custom` are open-shape passthroughs to keep this
- * compatible with agent versions that add new knobs (the design doc leaves
- * the exact rule schema partly underspecified).
+ * deployment. Mirrors the canonical agent schema's `IndexingRule` type
+ * (graphprotocol/indexer indexer-management/client.ts).
+ *
+ * Schema-required fields (`!` in GraphQL) are typed as required here when
+ * we always select them; otherwise they're optional in the TS shape so
+ * partial selection sets stay representable. `autoRenewal`, `requireSupported`,
+ * `safety`, `decisionBasis`, `identifier`, `identifierType`, and
+ * `protocolNetwork` are non-null in the schema; the rest are nullable.
+ *
+ * BigInt-typed schema fields (`allocationAmount`, `minSignal`, `maxSignal`,
+ * `minStake`, `minAverageQueryFees`) are decimal strings on the wire — see
+ * the file header for the BigInt-as-string convention.
  */
 export interface IndexingRule {
   identifier: string;
   identifierType: IndexingRuleIdentifierType;
-  /** Default allocation size in GRT wei, decimal string. */
-  allocationAmount?: string;
+  /** Default allocation size in GRT wei, decimal string (BigInt). */
+  allocationAmount?: string | null;
   /** Epochs to keep the allocation open before auto-reallocating. */
-  allocationLifetime?: number;
+  allocationLifetime?: number | null;
+  /**
+   * When true the agent reallocates automatically as the lifetime
+   * expires; when false the allocation stays closed after expiry. Non-null
+   * in the schema (`Boolean!`); marked optional here so partial selection
+   * sets are representable.
+   */
+  autoRenewal?: boolean;
+  /** Maximum concurrent allocations the agent is allowed to open. */
+  parallelAllocations?: number | null;
+  /** Cap on the percentage of total stake committed to this rule, 0..1. */
+  maxAllocationPercentage?: number | null;
+  /** Minimum curation signal (BigInt wei) for the rule to match. */
+  minSignal?: string | null;
+  /** Maximum curation signal (BigInt wei) for the rule to match. */
+  maxSignal?: string | null;
+  /** Minimum indexer stake (BigInt wei) required for the rule to match. */
+  minStake?: string | null;
+  /** Minimum trailing average query fee (BigInt wei) for the rule to match. */
+  minAverageQueryFees?: string | null;
+  /** Free-form operator-supplied tag forwarded to the agent. */
+  custom?: string | null;
   decisionBasis: IndexingDecisionBasis;
   /** Require deployment to be supported on the protocol network. */
   requireSupported?: boolean;
-  /** Bag of safety-related knobs (e.g. minStake, minAvgQueryFees). */
-  safety?: Record<string, unknown>;
-  /** Bag of operator-defined / forward-compat fields. */
-  custom?: Record<string, unknown>;
+  /**
+   * Safety flag — when true the agent applies additional pre-flight
+   * checks before opening / closing allocations on this deployment.
+   * Non-null in the schema (`Boolean!`); marked optional here so partial
+   * selection sets are representable.
+   */
+  safety?: boolean;
+  /**
+   * Protocol-network alias the rule applies to (e.g. `arbitrum-one`).
+   * Non-null in the schema (`String!`). Required on the wire and on this
+   * TS shape because we always select it.
+   */
+  protocolNetwork: string;
 }
 
 // ---------------------------------------------------------------------------

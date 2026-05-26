@@ -102,13 +102,27 @@ const allocationIdHex = z
   );
 
 /**
- * Keys that callers MUST NOT supply via `rule_params` — they are derived from
- * `deployment_id` and overriding them would let a deployment-scoped tool
- * mutate the global / group / subgraph rule instead. Keep in sync with the
- * Zod refine on the rule_params schema below and with the spread order in
- * the set_indexing_rule handler.
+ * Keys that callers MUST NOT supply via `rule_params`. They are derived
+ * from server-side context (the deployment id and the MCP's configured
+ * protocol network) and overriding them would let a deployment-scoped
+ * tool mutate the wrong rule scope or cross-target a different chain.
+ *
+ *   - `identifier` / `identifierType`: derived from `deployment_id`;
+ *     overriding lets a deployment-scoped tool mutate the global / group /
+ *     subgraph rule instead.
+ *   - `protocolNetwork`: required by the agent's `IndexingRuleInput!` and
+ *     sourced from `config.protocolNetwork`; overriding lets the caller
+ *     write a rule scoped to a different chain than the one the MCP and
+ *     the indexer-agent are configured for.
+ *
+ * Keep in sync with the Zod refine on the rule_params schema below and
+ * with the spread order in the set_indexing_rule handler.
  */
-const RESERVED_RULE_KEYS = new Set(['identifier', 'identifierType']);
+const RESERVED_RULE_KEYS = new Set([
+  'identifier',
+  'identifierType',
+  'protocolNetwork',
+]);
 
 /**
  * Pretty-print a JSON-able value as a single MCP text content block. We
@@ -425,9 +439,10 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
       'passed through to the agent\'s `setIndexingRule` mutation; common ' +
       'fields include `allocationAmount` (wei string), `allocationLifetime` ' +
       '(epochs), `decisionBasis` (`rules|never|always|offchain`), and ' +
-      '`requireSupported`. `identifier` and `identifierType` are derived ' +
-      'from `deployment_id` and cannot be overridden via `rule_params` — ' +
-      'this tool is strictly deployment-scoped.',
+      '`requireSupported`. `identifier`, `identifierType`, and ' +
+      '`protocolNetwork` are derived from `deployment_id` and the MCP ' +
+      'configuration and cannot be overridden via `rule_params` — this ' +
+      'tool is strictly deployment-scoped on the configured network.',
     inputSchema: {
       deployment_id: z
         .string()
@@ -441,21 +456,22 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
             !Object.keys(params).some((k) => RESERVED_RULE_KEYS.has(k)),
           {
             message:
-              'rule_params must not contain `identifier` or `identifierType`; ' +
-              'they are derived from deployment_id.',
+              'rule_params must not contain `identifier`, `identifierType`, ' +
+              'or `protocolNetwork`; they are derived from deployment_id ' +
+              'and the MCP configuration.',
           },
         )
         .describe(
-          'Open-shape map of rule fields to set; `identifier` / ' +
-            '`identifierType` are reserved and rejected.',
+          'Open-shape map of rule fields to set; `identifier`, ' +
+            '`identifierType`, and `protocolNetwork` are reserved and rejected.',
         ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
       // Suspenders: even though the schema rejects reserved keys, strip them
       // again here and put derived fields LAST so a spread can never override
-      // them. This is a deployment-scoped tool; do not let user input change
-      // the rule scope.
+      // them. This is a deployment-scoped tool on the configured network;
+      // do not let user input change either dimension.
       const filteredParams = Object.fromEntries(
         Object.entries(args.rule_params).filter(
           ([k]) => !RESERVED_RULE_KEYS.has(k),
@@ -465,6 +481,11 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
         ...filteredParams,
         identifier: args.deployment_id,
         identifierType: 'deployment' as const,
+        // Required by the agent's `IndexingRuleInput!` post-Horizon; the
+        // mutation is rejected at the schema layer without it. Sourced
+        // from config so the rule lands on the same chain the agent is
+        // configured to submit actions against.
+        protocolNetwork: config.protocolNetwork,
       } as Parameters<typeof client.setIndexingRule>[0];
       const result = await client.setIndexingRule(rule, { signal: extra.signal });
       return jsonResult(result);

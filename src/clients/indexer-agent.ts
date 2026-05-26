@@ -112,17 +112,37 @@ const CANCEL_ACTIONS_MUTATION = /* GraphQL */ `
   }
 `;
 
+// IndexingRule selection set. Mirrors the canonical agent schema's
+// `IndexingRule` type field-for-field — selecting a SHORTER set against a
+// post-Horizon agent yields a non-spec error envelope that
+// graphql-request's strict parser rejects (same failure mode as the
+// `ACTION_FIELDS` short-selection bug fixed in 8eb2b63).
+//
+// Keep this in lockstep with the `IndexingRule` interface in
+// src/types/agent.ts so the typed response shape matches what we query.
+const INDEXING_RULE_FIELDS = /* GraphQL */ `
+  identifier
+  identifierType
+  allocationAmount
+  allocationLifetime
+  autoRenewal
+  parallelAllocations
+  maxAllocationPercentage
+  minSignal
+  maxSignal
+  minStake
+  minAverageQueryFees
+  custom
+  decisionBasis
+  requireSupported
+  safety
+  protocolNetwork
+`;
+
 const INDEXING_RULES_QUERY = /* GraphQL */ `
   query IndexingRules($merged: Boolean) {
     indexingRules(merged: $merged) {
-      identifier
-      identifierType
-      allocationAmount
-      allocationLifetime
-      decisionBasis
-      requireSupported
-      safety
-      custom
+      ${INDEXING_RULE_FIELDS}
     }
   }
 `;
@@ -130,14 +150,7 @@ const INDEXING_RULES_QUERY = /* GraphQL */ `
 const SET_INDEXING_RULE_MUTATION = /* GraphQL */ `
   mutation SetIndexingRule($rule: IndexingRuleInput!) {
     setIndexingRule(rule: $rule) {
-      identifier
-      identifierType
-      allocationAmount
-      allocationLifetime
-      decisionBasis
-      requireSupported
-      safety
-      custom
+      ${INDEXING_RULE_FIELDS}
     }
   }
 `;
@@ -309,9 +322,9 @@ export function createIndexerAgentClient(
       rule: Partial<IndexingRule> & { identifier: string },
       callOpts?: IndexerAgentCallOpts,
     ): Promise<IndexingRule> {
-      // TODO: verify against live agent schema — `identifierType` defaults to
-      // `'deployment'` in the agent if omitted; we send what the caller gives
-      // us. `safety` / `custom` are forwarded as-is.
+      // The agent schema's `IndexingRuleInput!` requires `identifier`,
+      // `identifierType`, and `protocolNetwork` — callers (the
+      // set_indexing_rule tool) populate all three before delegating here.
       const res = await gql.request<SetIndexingRuleResponse>(
         SET_INDEXING_RULE_MUTATION,
         { rule },

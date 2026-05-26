@@ -491,9 +491,14 @@ export function fakeAgentClient(): IndexerAgentClient {
         identifier: rule.identifier,
         identifierType: rule.identifierType ?? 'deployment',
         decisionBasis: rule.decisionBasis ?? 'rules',
+        // Required by the agent's schema (IndexingRule.protocolNetwork is
+        // `String!`); echo whatever the caller supplied so tests can assert
+        // on the tool's protocolNetwork-injection contract.
+        protocolNetwork: rule.protocolNetwork ?? 'arbitrum-one',
       };
       if (rule.allocationAmount !== undefined) out.allocationAmount = rule.allocationAmount;
       if (rule.allocationLifetime !== undefined) out.allocationLifetime = rule.allocationLifetime;
+      if (rule.autoRenewal !== undefined) out.autoRenewal = rule.autoRenewal;
       if (rule.requireSupported !== undefined) out.requireSupported = rule.requireSupported;
       if (rule.safety !== undefined) out.safety = rule.safety;
       if (rule.custom !== undefined) out.custom = rule.custom;
