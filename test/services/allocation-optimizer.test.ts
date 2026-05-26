@@ -191,21 +191,24 @@ describe('AllocationOptimizer.run', () => {
     }
   });
 
-  it('keeps healthy deployments that are temporarily behind chainhead (synced=false)', async () => {
-    // User-reported: graph-node flips `synced` to false the moment
-    // latestBlock falls behind chainHead — even by a single block.
-    // Restarts, brief RPC lag, normal pacing all cause transient
-    // synced=false on otherwise healthy deployments. Allocating to a
-    // healthy lagging deployment is correct behavior: it earns future-
-    // epoch rewards once it catches up. Closability for the CURRENT
-    // epoch is the HealthMonitor's concern (latestBlock >=
-    // epochStartBlock), not the optimizer's eligibility check.
+  it('keeps healthy deployments that are slightly behind chainhead (synced=true with lagging latestBlock)', async () => {
+    // Honest graph-node semantic: `synced` means "has reached chain head
+    // at least once; stays true thereafter" — it does NOT flip false on
+    // transient lag. A healthy deployment that has briefly fallen behind
+    // chainhead therefore still has synced=true. Allocating to it is
+    // correct: it'll catch up and earn rewards.
     //
-    // Before the fix: the candidate filter dropped any deployment with
-    // synced=false, so a deployment that was 1 block behind chainHead
-    // would get force-unallocated mid-rebalance.
-    // After the fix: synced is captured on the candidate for diagnostics
-    // but is NOT a gate — only healthy + !paused matter.
+    // Eligibility is governed by latestBlock >= epochStartBlock (the
+    // epoch-position gate), not by synced. This test confirms that a
+    // healthy synced=true deployment with a latestBlock above the
+    // epoch start survives the candidate filter even when slightly
+    // behind chainhead (latestBlock < chainHead).
+    //
+    // History: an earlier version of this test fixture used synced=false
+    // to represent "transient lag" — a hallucinated semantic. The
+    // correct never-indexed case (synced=false AND no latestBlock) is
+    // now hard-rejected as a separate gate; see the
+    // "rejects never-indexed candidates" test.
     const candidate = deployment({
       id: Q.RUNNING,
       signal: GRT(50_000n),
@@ -221,9 +224,13 @@ describe('AllocationOptimizer.run', () => {
         statuses: [
           indexingStatus({
             id: Q.RUNNING,
-            synced: false, // key: behind chainhead
-            health: 'healthy', // but healthy
+            synced: true, // sticky-true per honest graph-node semantic
+            health: 'healthy',
             paused: false,
+            // Latest block above the mainnet epoch start (default
+            // fakeEboClient seeds mainnet at block 500) so the epoch-
+            // position gate doesn't drop us.
+            latestBlock: 1000,
           }),
         ],
       }),
@@ -237,8 +244,9 @@ describe('AllocationOptimizer.run', () => {
     assert.equal(
       result.state.candidatesAfterFilter,
       1,
-      `expected healthy-but-lagging candidate to survive; if 0, the synced ` +
-        `gate has been reintroduced`,
+      `expected healthy synced=true candidate to survive; if 0, the epoch- ` +
+        `position gate is wrongly dropping deployments with latestBlock` +
+        ` present`,
     );
 
     // The candidate gets allocated.
@@ -1826,6 +1834,159 @@ describe('AllocationOptimizer.run', () => {
         (w) => /latestBlock < currentEpochStartBlock/.test(w) && /1 candidate/.test(w),
       ),
       `expected an aggregate "1 candidate(s) filtered" warning; got: ${JSON.stringify(
+        result.warnings,
+      )}`,
+    );
+  });
+
+  it('rejects never-indexed candidates (synced=false && no latestBlock) regardless of EBO data', async () => {
+    // Pick #20 regression: graph-node reports synced=false AND no latestBlock,
+    // meaning the deployment has NEVER processed a block on this index node.
+    // Previously the optimizer would admit this via the "no latestBlock"
+    // fail-open branch — leading to a planned allocation that would earn
+    // 0 POI and 0 rewards. The gate must reject up front.
+    //
+    // We exercise two sub-cases in one run:
+    //   A (Q.OK):   synced=false, no latestBlock — REJECT (never indexed)
+    //   B (Q.RUNNING): synced=true, latestBlock=100, above epoch start — admit
+    // B's presence confirms the rejection is targeted, not blanket.
+    const depA = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const depB = deployment({ id: Q.RUNNING, signal: GRT(50_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [depA, depB],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          // A: never indexed — synced=false AND latestBlock omitted.
+          indexingStatus({ id: Q.OK, chain: 'mainnet', synced: false }),
+          // B: normal, above epoch start.
+          indexingStatus({ id: Q.RUNNING, chain: 'mainnet', latestBlock: 100 }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient({
+        epoch: 100,
+        blockNumbersByNetwork: [{ network: 'mainnet', blockNumber: '50' }],
+      }),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    const ids = result.proposedAllocations.map((p) => p.deploymentId);
+    assert.ok(
+      !ids.includes(Q.OK),
+      `expected never-indexed candidate (Q.OK) to be rejected; got: ${JSON.stringify(ids)}`,
+    );
+    assert.ok(
+      ids.includes(Q.RUNNING),
+      `expected the healthy synced candidate (Q.RUNNING) to remain; got: ${JSON.stringify(ids)}`,
+    );
+    assert.equal(
+      result.state.candidatesAfterFilter,
+      1,
+      `expected exactly 1 of 2 candidates to survive the never-indexed gate; ` +
+        `got ${result.state.candidatesAfterFilter}`,
+    );
+    // Operator-facing warning calls out the failure mode and gives a
+    // remediation hint (assignment / startBlock).
+    assert.ok(
+      result.warnings.some(
+        (w) =>
+          /never processed a block/.test(w) &&
+          /1 candidate/.test(w),
+      ),
+      `expected a "never processed a block" warning; got: ${JSON.stringify(
+        result.warnings,
+      )}`,
+    );
+  });
+
+  it('admits synced=false candidates when latestBlock is present and above epoch start', async () => {
+    // Companion to the never-indexed test: `synced=false` ALONE is NOT a
+    // rejection signal. graph-node sets `synced=true` only after the
+    // deployment has reached chain head at least once; a freshly-syncing
+    // deployment that has written several blocks but hasn't caught up to
+    // head is still `synced=false`, yet `latestBlock` is populated and may
+    // already be past the current epoch's start block — making the
+    // allocation perfectly eligible. The hard-reject must require BOTH
+    // `synced=false` AND `latestBlock=null`; the epoch-position gate alone
+    // should decide otherwise.
+    const dep = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          // synced=false but latestBlock=100 > epoch start 50 — admit.
+          indexingStatus({
+            id: Q.OK,
+            chain: 'mainnet',
+            synced: false,
+            latestBlock: 100,
+          }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient({
+        epoch: 100,
+        blockNumbersByNetwork: [{ network: 'mainnet', blockNumber: '50' }],
+      }),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === Q.OK),
+      `synced=false with latestBlock above epoch start must NOT be rejected; ` +
+        `got: ${JSON.stringify(result.proposedAllocations.map((p) => p.deploymentId))}`,
+    );
+    assert.ok(
+      !result.warnings.some((w) => /never processed a block/.test(w)),
+      `synced=false with a populated latestBlock must NOT trigger the never-indexed warning; ` +
+        `got: ${JSON.stringify(result.warnings)}`,
+    );
+  });
+
+  it('still admits transient bootstrap candidates (synced=true && no latestBlock)', async () => {
+    // The fix for the never-indexed case must NOT regress the genuinely
+    // transient bootstrap state: synced=true (graph-node thinks the
+    // deployment has caught up) but the latestBlock field hasn't been
+    // written yet (very brief window between status writes). HealthMonitor
+    // at close time is authoritative; the optimizer admits.
+    const dep = deployment({ id: Q.OK, signal: GRT(50_000n), staked: GRT(1n) });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(1_000_000n).toString() }),
+        signalledDeployments: [dep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [
+          // synced=true, no latestBlock — transient bootstrap, admit.
+          indexingStatus({ id: Q.OK, chain: 'mainnet', synced: true }),
+        ],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient({
+        epoch: 100,
+        blockNumbersByNetwork: [{ network: 'mainnet', blockNumber: '50' }],
+      }),
+    });
+    const result = await opt.run(baseConfig({ gasEstimateGrt: GRT(0n) }));
+
+    assert.ok(
+      result.proposedAllocations.some((p) => p.deploymentId === Q.OK),
+      `transient bootstrap (synced=true, no latestBlock) must NOT be filtered; ` +
+        `got: ${JSON.stringify(result.proposedAllocations.map((p) => p.deploymentId))}`,
+    );
+    // No "never processed a block" warning should fire.
+    assert.ok(
+      !result.warnings.some((w) => /never processed a block/.test(w)),
+      `transient bootstrap must NOT trigger the never-indexed warning; got: ${JSON.stringify(
         result.warnings,
       )}`,
     );

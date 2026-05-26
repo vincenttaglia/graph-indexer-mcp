@@ -84,7 +84,7 @@ Call these Stage 1 tools (in parallel where possible):
 
 Apply the design §4.1 filters in order:
 
-1. Drop deployments where \`get_indexing_statuses\` reports unhealthy (\`health != 'healthy'\`). Then drop deployments whose \`latestBlock < currentEpochStartBlock\` for their chain (can't earn current-epoch rewards). Do NOT use graph-node's \`synced\` flag for eligibility — it means "has reached chain head at least once; stays true thereafter" and is the wrong gate. Use \`get_current_epoch\` to obtain the per-chain epoch start block. Fail open per-candidate if either input (chain alias or latest block) is missing — the close-time HealthMonitor gate is authoritative.
+1. Drop deployments where \`get_indexing_statuses\` reports unhealthy (\`health != 'healthy'\`). Then drop deployments whose \`latestBlock < currentEpochStartBlock\` for their chain (can't earn current-epoch rewards). Do NOT use graph-node's \`synced\` flag for eligibility — it means "has reached chain head at least once; stays true thereafter" and is the wrong gate. Use \`get_current_epoch\` to obtain the per-chain epoch start block. Fail open per-candidate if either input (chain alias or latest block) is missing — the close-time HealthMonitor gate is authoritative. **Exception:** hard-reject candidates whose graph-node status is \`synced=false\` with no \`latestBlock\` — that combination means the deployment has never started indexing, not "missing data", and there is nothing to fail open about.
 2. Drop deployments with \`deniedAt != 0\` (rewards denied) — surfaced by \`get_all_signalled_deployments\`.
 3. Drop deployments below \`min_signal\` from \`indexer://config\`.
 4. Drop blacklisted deployments. Keep frozenlist allocations as-is (do not propose changes to them).

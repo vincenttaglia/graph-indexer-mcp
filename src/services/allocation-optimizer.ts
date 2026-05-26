@@ -871,14 +871,16 @@ export class AllocationOptimizer {
 
     // Bookkeeping for the epoch-position gate. We track each disposition
     // separately so the aggregate warnings can distinguish "real drops"
-    // (belowEpochCount) from "fail-open bypasses" (the bypassed* counters).
-    // A silent fail-open across every candidate — usually a chain-naming
-    // mismatch between graph-node and EBO — would otherwise hide the fact
-    // that the gate is effectively disabled for the run.
+    // (belowEpochCount, neverIndexedCount) from "fail-open bypasses" (the
+    // bypassed* counters). A silent fail-open across every candidate —
+    // usually a chain-naming mismatch between graph-node and EBO — would
+    // otherwise hide the fact that the gate is effectively disabled for
+    // the run.
     let belowEpochCount = 0;
     let aboveEpochCount = 0;
+    let neverIndexedCount = 0; // synced=false && latestBlock=null → has NEVER processed a block
     let bypassedNoChainData = 0; // chain known to graph-node but not in EBO map
-    let bypassedNoLatest = 0; // no latestBlock on the status row
+    let bypassedNoLatest = 0; // latestBlock missing but synced=true (transient bootstrap)
     let bypassedEboMissing = 0; // EBO returned nothing (epochStartByChain empty)
 
     const candidates: OptimizationCandidate[] = [];
@@ -942,18 +944,39 @@ export class AllocationOptimizer {
       // track) we admit the candidate — HealthMonitor.classify() is the
       // authoritative gate at close time, so the optimizer being
       // permissive here doesn't risk an unrecoverable bad close.
+      //
+      // EXCEPTION (never-indexed hard reject): when graph-node reports
+      // `synced=false && latestBlock=null`, the deployment has NEVER
+      // processed a block on this graph-node — `synced` is "has reached
+      // chain head at least once; stays true thereafter", so synced=false
+      // definitively means never-reached-head; combined with no latestBlock
+      // it means no block has been written. Allocating here guarantees
+      // 0 POI and 0 rewards regardless of EBO or chain data, so we reject
+      // up front even when the rest of the gate would have failed open.
+      // This was the failure mode in operator pick #20 — the optimizer
+      // happily admitted a deployment with entityCount=0 and no
+      // latestBlock because the fail-open branch swallowed it.
       const chain = pickChainFromStatus(status);
       const chainEpochStart =
         chain !== null ? epochStartByChain.get(chain.toLowerCase()) : undefined;
       const latestBlock = pickLatestBlockFromStatus(status, chain);
+      if (!synced && latestBlock === null) {
+        neverIndexedCount++;
+        continue;
+      }
       // Record the disposition for aggregate warnings. The runtime behavior
-      // is unchanged: the gate still only fires when all three inputs are
-      // present and latestBlock is short of the chain's epoch start.
+      // for the below branches is unchanged: the gate still only rejects
+      // when all three inputs are present and latestBlock is short of the
+      // chain's epoch start; everything else fails open.
       if (epochStartByChain.size === 0) {
         bypassedEboMissing++;
       } else if (chain === null || chainEpochStart === undefined) {
         bypassedNoChainData++;
       } else if (latestBlock === null) {
+        // synced=true && latestBlock=null — genuinely transient bootstrap;
+        // a status row exists and graph-node thinks it has caught up, but
+        // hasn't written a latestBlock yet. Admit; HealthMonitor at close
+        // time is authoritative.
         bypassedNoLatest++;
       } else if (latestBlock < chainEpochStart) {
         belowEpochCount++;
@@ -999,6 +1022,16 @@ export class AllocationOptimizer {
       );
     }
 
+    if (neverIndexedCount > 0) {
+      warnings.push(
+        `${neverIndexedCount} candidate(s) filtered: synced=false AND no ` +
+          `latestBlock — graph-node has never processed a block for this ` +
+          `deployment. Allocating would earn 0 rewards. Check whether the ` +
+          `deployment is assigned to an index node (graphman info / reassign) ` +
+          `or whether its manifest's startBlock is ahead of chainhead.`,
+      );
+    }
+
     // Global-mismatch warning: when EBO succeeded (map non-empty) but no
     // candidate's chain alias from graph-node matched any EBO key, every
     // surviving candidate bypassed the gate. The optimizer is then running
@@ -1027,10 +1060,14 @@ export class AllocationOptimizer {
       );
     }
     if (bypassedNoLatest > 0) {
+      // After the never-indexed reject above, this branch only fires when
+      // graph-node returns synced=true with no latestBlock — a status the
+      // optimizer can't interpret as eligibility. HealthMonitor.classify()
+      // at close time is authoritative.
       warnings.push(
         `${bypassedNoLatest} candidate(s) bypassed the epoch-position gate ` +
-          `because graph-node reported no latestBlock for their chain ` +
-          `(status row missing or chain still bootstrapping).`,
+          `because graph-node returned synced=true but no latestBlock. ` +
+          `HealthMonitor will gate at close time.`,
       );
     }
     // Note: `bypassedEboMissing` is intentionally not surfaced here — the
