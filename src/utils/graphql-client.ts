@@ -36,6 +36,33 @@ export interface TypedGraphqlClient {
 const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 /**
+ * Substrings of error messages thrown by `graphql-request`'s
+ * `parseExecutionResult` (see node_modules/graphql-request/build/lib/graphql.js
+ * and the legacy mirror at .../legacy/lib/graphql.js). These indicate the
+ * upstream returned a non-spec-compliant response envelope (e.g. `errors`
+ * as a string instead of an array) — the parser then throws and the parsed
+ * body is discarded before we can see what the server actually said.
+ *
+ * When we detect one of these, we re-fetch the same query as a one-shot
+ * diagnostic recovery and embed the raw body in the thrown error so the
+ * operator can see the actual upstream response.
+ */
+const GRAPHQL_PARSE_ERROR_FRAGMENTS = [
+  'Invalid execution result: errors is not plain object OR array',
+  'Invalid execution result: errors is not array of formatted errors',
+  'Invalid execution result: result is not object',
+  'Invalid execution result: result is not object or array',
+  'Invalid execution result: data is not plain object',
+  'Invalid execution result: extensions is not plain object',
+];
+
+/** Test whether `err` is a graphql-request response-envelope parse failure. */
+export function isGraphqlParseError(err: unknown): err is Error {
+  if (!(err instanceof Error)) return false;
+  return GRAPHQL_PARSE_ERROR_FRAGMENTS.some((frag) => err.message.includes(frag));
+}
+
+/**
  * Produce a log-safe version of an endpoint URL.
  * Strips credentials, query string, hash, and known credential-bearing path
  * segments (e.g. The Graph gateway's `/api/<key>/...`).
@@ -215,6 +242,70 @@ export function createGraphqlClient(opts: GraphqlClientOptions): TypedGraphqlCli
         } catch (err) {
           lastErr = err;
           const elapsed = Date.now() - start;
+
+          // Defensive handling for `graphql-request`'s strict response-envelope
+          // parser. When the upstream returns a non-spec body (e.g. indexer-agent
+          // emitting `errors` as a string instead of an array), the parser
+          // throws with a generic message and the body is discarded — leaving
+          // the operator with no clue what was actually returned. Recover by
+          // re-fetching the same query and surfacing the raw body in the error.
+          //
+          // This recovery is NON-RETRIABLE: a parse error of this class is a
+          // schema mismatch, not a transient blip. Surface and stop.
+          if (isGraphqlParseError(err)) {
+            const externallyAborted = Boolean(reqOpts?.signal?.aborted);
+            if (externallyAborted) {
+              process.stderr.write(
+                `[gql ${label}] fail ${elapsed}ms (attempt ${
+                  attempt + 1
+                }): ${sanitizeMessage(err.message)}\n`,
+              );
+              reqOpts!.signal!.throwIfAborted();
+            }
+            let recovered: { status: number; body: string } | undefined;
+            let recoveryFailure: string | undefined;
+            try {
+              const recover = await fetch(opts.endpoint, {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                  ...headers,
+                },
+                body: JSON.stringify({ query, variables }),
+                signal: reqOpts?.signal,
+              });
+              const text = await recover.text();
+              recovered = { status: recover.status, body: text };
+            } catch (recoverErr) {
+              recoveryFailure =
+                recoverErr instanceof Error
+                  ? recoverErr.message
+                  : String(recoverErr);
+            }
+            const originalMsg = err.message;
+            let composed: string;
+            if (recovered) {
+              const preview =
+                recovered.body.length > 2000
+                  ? recovered.body.slice(0, 2000) + '…(truncated)'
+                  : recovered.body;
+              composed =
+                `[${label}] GraphQL parse failure (${originalMsg}); ` +
+                `HTTP ${recovered.status} body: ${preview}`;
+            } else {
+              composed =
+                `[${label}] GraphQL parse failure (${originalMsg}); ` +
+                `recovery fetch failed: ${recoveryFailure ?? 'unknown error'}`;
+            }
+            const sanitized = sanitizeMessage(composed);
+            process.stderr.write(
+              `[gql ${label}] fail ${elapsed}ms (attempt ${
+                attempt + 1
+              }): ${sanitizeMessage(originalMsg)} (recovered body surfaced)\n`,
+            );
+            throw new Error(sanitized);
+          }
+
           // Distinguish EXTERNAL cancellation (caller's AbortSignal) from
           // the INTERNAL per-request timeout controller. Both surface as
           // AbortError, but they have different retry semantics:
