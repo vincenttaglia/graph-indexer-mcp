@@ -55,6 +55,7 @@ import type { EboSubgraphClient } from '../clients/ebo-subgraph.js';
 import type { GraphNodeClient } from '../clients/graph-node.js';
 import type { GraphmanClient } from '../clients/graphman.js';
 import type { IndexerAgentClient } from '../clients/indexer-agent.js';
+import { toQmDeploymentId } from '../utils/ipfs.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -202,6 +203,23 @@ const PROTOCOL_CHAIN_SECONDS_PER_BLOCK = 0.25;
 
 /** Default urgency threshold per spec. */
 const DEFAULT_URGENCY_THRESHOLD_HOURS = 6;
+
+/**
+ * Convert a deployment ID to the Qm (IPFS CIDv0) canonical form for
+ * output. Network subgraph allocations always carry bytes32 IDs, so this
+ * call never throws on real production input. For tests and other code
+ * paths that may supply arbitrary deployment identifiers, fall back to
+ * the raw input rather than crashing — the report should still emit
+ * something the operator can correlate to their fixture even when the
+ * shape doesn't match the production contract.
+ */
+function safeToQm(id: string): string {
+  try {
+    return toQmDeploymentId(id);
+  } catch {
+    return id;
+  }
+}
 
 /** Large-allocation threshold for risk escalation: 100k GRT (in wei). */
 const LARGE_ALLOCATION_WEI = 100_000n * 10n ** 18n;
@@ -460,7 +478,14 @@ export class HealthMonitor {
         // marked as `none` closability pending operator review.
         allocationHealths.push({
           allocationId: alloc.id,
-          deploymentId: alloc.subgraphDeployment.id,
+          // Output `deploymentId` is always Qm canonical form. The network
+          // subgraph returns bytes32; converting at the emission point keeps
+          // this entire MCP surface consistent with graph-node + graphman +
+          // indexer-agent, all of which use Qm natively. `safeToQm` falls
+          // back to the raw id only when the input doesn't match either
+          // canonical encoding (e.g. test fixtures), so production data is
+          // always normalized.
+          deploymentId: safeToQm(alloc.subgraphDeployment.id),
           allocatedTokens: safeToBigInt(alloc.allocatedTokens),
           health: 'failed',
           synced: false,
@@ -607,7 +632,8 @@ export class HealthMonitor {
     if (!status) {
       return {
         allocationId: alloc.id,
-        deploymentId: alloc.subgraphDeployment.id,
+        // Always emit Qm canonical form (see safeToQm doc above).
+        deploymentId: safeToQm(alloc.subgraphDeployment.id),
         allocatedTokens: safeToBigInt(alloc.allocatedTokens),
         health: 'failed',
         synced: false,
@@ -647,7 +673,8 @@ export class HealthMonitor {
 
     return {
       allocationId: alloc.id,
-      deploymentId: alloc.subgraphDeployment.id,
+      // Always emit Qm canonical form (see safeToQm doc above).
+      deploymentId: safeToQm(alloc.subgraphDeployment.id),
       allocatedTokens: safeToBigInt(alloc.allocatedTokens),
       health: status.health,
       synced: status.synced,

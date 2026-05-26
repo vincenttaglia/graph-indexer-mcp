@@ -532,6 +532,123 @@ describe('HealthMonitor missing-status distinction (Option B: statusMissing flag
     );
   });
 
+  it('always emits deployment IDs in Qm form on every output field (regression: MCP surface consistency)', async () => {
+    // The network subgraph returns deployment IDs in bytes32 form
+    // (Solidity storage); graph-node + graphman + indexer-agent all
+    // use Qm IPFS form natively. HealthMonitor must emit Qm on every
+    // user-facing output — allocations[].deploymentId,
+    // closePlan[].deploymentId, recoveryPlan[].deploymentId,
+    // blockedFromClose[].deploymentId — so MCP clients see a single
+    // consistent encoding regardless of the network-subgraph format.
+    //
+    // Two parallel allocations exercise the full closability matrix:
+    //   - bytes32A: failed + deterministic + above epoch start → Path B
+    //     closePlan + recoveryPlan entry (manual_review since the
+    //     fatalError message doesn't match any heuristic).
+    //   - bytes32B: failed + non-deterministic + below epoch start →
+    //     closability:'none' + blockedFromClose entry.
+    const bytes32A =
+      '0xebdb70ab2e968fc325eb22feb042217cd8b8ee325c80a5f5f9ac43a9abbd459c';
+    const qmA = 'QmeDLbKHYypURMRigRxSspUm8w5zrDfXc3Skw2PiDxqCFu';
+    const bytes32B =
+      '0x0000000000000000000000000000000000000000000000000000000000000001';
+    const { toQmDeploymentId } = await import('../../src/utils/ipfs.js');
+    const qmB = toQmDeploymentId(bytes32B);
+
+    const allocA = allocation({
+      id: 'liveA',
+      deploymentId: bytes32A,
+      allocatedTokens: GRT(50_000n),
+    });
+    const allocB = allocation({
+      id: 'liveB',
+      deploymentId: bytes32B,
+      allocatedTokens: GRT(50_000n),
+    });
+    const statusA = indexingStatus({
+      id: bytes32A,
+      health: 'failed',
+      synced: false,
+      chain: CHAIN,
+      latestBlock: EPOCH_START_BLOCK + 100,
+      fatalError: { message: 'mystery boom', deterministic: true, blockNumber: 1050 },
+      lastHealthyBlock: 1049,
+    });
+    const statusB = indexingStatus({
+      id: bytes32B,
+      health: 'failed',
+      synced: false,
+      chain: CHAIN,
+      latestBlock: EPOCH_START_BLOCK - 50,
+      fatalError: { message: 'rpc flaky', deterministic: false, blockNumber: 900 },
+    });
+
+    const monitor = new HealthMonitor({
+      networkClient: fakeNetworkClient({
+        activeAllocations: [allocA, allocB],
+        networkParams: networkParams({ epochLength: 6646 }),
+      }),
+      eboClient: fakeEboClient({
+        epoch: EPOCH,
+        blockNumbersByNetwork: [{ network: CHAIN, blockNumber: String(EPOCH_START_BLOCK) }],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statusById: { [bytes32A]: statusA, [bytes32B]: statusB },
+      }),
+      graphmanClient: fakeGraphmanClient(),
+      agentClient: fakeAgentClient(),
+    });
+    const res = await monitor.run({
+      indexerAddress: INDEXER,
+      urgencyThresholdHours: 6,
+    });
+
+    // Every allocation row's deploymentId must be Qm.
+    for (const ah of res.allocations) {
+      assert.ok(
+        ah.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on allocations[], got ${ah.deploymentId}`,
+      );
+    }
+    // Every closePlan entry's deploymentId must be Qm.
+    for (const cp of res.closePlan) {
+      assert.ok(
+        cp.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on closePlan[], got ${cp.deploymentId}`,
+      );
+    }
+    // Every blockedFromClose entry's deploymentId must be Qm.
+    for (const bf of res.blockedFromClose) {
+      assert.ok(
+        bf.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on blockedFromClose[], got ${bf.deploymentId}`,
+      );
+    }
+    // Every recoveryPlan entry's deploymentId must be Qm.
+    for (const rp of res.recoveryPlan) {
+      assert.ok(
+        rp.deploymentId.startsWith('Qm'),
+        `expected Qm-form deployment ID on recoveryPlan[], got ${rp.deploymentId}`,
+      );
+    }
+
+    // Sanity: the canonical Qm conversions match what we computed
+    // upfront — proves the normalization is the canonical one, not
+    // just any Qm-shaped string.
+    assert.ok(
+      res.allocations.some((ah) => ah.deploymentId === qmA),
+      `expected canonical Qm id ${qmA} in allocations; got: ${JSON.stringify(
+        res.allocations.map((a) => a.deploymentId),
+      )}`,
+    );
+    assert.ok(
+      res.allocations.some((ah) => ah.deploymentId === qmB),
+      `expected canonical Qm id ${qmB} in allocations; got: ${JSON.stringify(
+        res.allocations.map((a) => a.deploymentId),
+      )}`,
+    );
+  });
+
   it('passes bytes32-form deployment IDs through to graph-node (client normalizes)', async () => {
     // Simulates the live-indexer scenario that motivated the fix: the
     // network subgraph reports allocations with bytes32 deployment IDs

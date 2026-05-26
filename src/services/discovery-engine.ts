@@ -509,12 +509,14 @@ export class DiscoveryEngine {
     const cleanup: CleanupAction[] = [];
 
     for (const status of indexingStatuses) {
-      const deploymentId = status.subgraph;
-      // Normalize for membership checks: indexingStatuses come from
-      // graph-node in Qm form; allocated/signalled/frozenlist/whitelist
-      // sets are normalized to Qm at the gather boundary. Using the raw
-      // `deploymentId` directly works only when both sides happen to be
-      // Qm — `normalizeDeploymentId` makes that explicit and idempotent.
+      // Normalize for membership checks AND for the output `deploymentId`:
+      // indexingStatuses come from graph-node in Qm form; the allocated /
+      // signalled / frozenlist / whitelist sets are normalized to Qm at the
+      // gather boundary; the user-facing output is always Qm so MCP
+      // clients see one consistent encoding. `normalizeDeploymentId` is
+      // idempotent on Qm so this is effectively `status.subgraph` when
+      // graph-node behaves; if it ever returned bytes32 the conversion
+      // still produces the canonical Qm we want to surface.
       //
       // graph-node should always emit Qm here; if it doesn't, we already
       // recorded an error during the syncingIds build above. Skip the
@@ -522,10 +524,11 @@ export class DiscoveryEngine {
       // Qm-keyed lookup sets anyway.
       let idKey: string;
       try {
-        idKey = normalizeDeploymentId(deploymentId);
+        idKey = normalizeDeploymentId(status.subgraph);
       } catch {
         continue;
       }
+      const deploymentId = idKey;
 
       // Pause comes from the indexing-status fetch itself.
       const paused = status.paused;
@@ -842,6 +845,15 @@ export class DiscoveryEngine {
     await mapPool(candidates, FANOUT_CONCURRENCY, async (dep) => {
       throwIfAborted(signal);
 
+      // Output `deploymentId` is always Qm canonical form regardless of
+      // what the network subgraph returned (it returns bytes32). MCP
+      // clients consistently see Qm across every service / tool surface.
+      // Pre-compute the Qm form once and reuse it for the lookup key.
+      // The bytes32-only candidates have already been filtered above
+      // (any `dep.id` that fails normalization was skipped during the
+      // signalledIds build), so the conversion is guaranteed to succeed.
+      const qmId = normalizeDeploymentId(dep.id);
+
       let totalStakedTokens = 0n;
       let indexerCount = 0;
       try {
@@ -861,16 +873,15 @@ export class DiscoveryEngine {
         // remaining candidate after the abort.
         throwIfAborted(signal);
         warnings.push(
-          `network subgraph: getDeploymentAllocations(${dep.id}) failed ` +
+          `network subgraph: getDeploymentAllocations(${qmId}) failed ` +
             `(${describeError(err)}); totalStake / indexerCount default to 0.`,
         );
       }
 
-      // Normalize the lookup key — queryVolumeById is keyed by Qm and
-      // dep.id comes from the network subgraph in bytes32 form.
-      const volKey = normalizeDeploymentId(dep.id);
-      const queryVolume30d = queryVolumeById.has(volKey)
-        ? (queryVolumeById.get(volKey) ?? null)
+      // queryVolumeById is keyed by Qm canonical form — same as our
+      // output id, so this lookup uses qmId directly.
+      const queryVolume30d = queryVolumeById.has(qmId)
+        ? (queryVolumeById.get(qmId) ?? null)
         : null;
 
       // entityCount: best-effort. graph-node returns null when the
@@ -906,7 +917,7 @@ export class DiscoveryEngine {
       }
 
       opportunities.push({
-        deploymentId: dep.id,
+        deploymentId: qmId,
         signalledTokens: safeBigInt(dep.signalledTokens),
         totalStakedTokens,
         indexerCount,
