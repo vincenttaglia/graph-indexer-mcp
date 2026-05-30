@@ -2313,5 +2313,75 @@ describe('AllocationOptimizer.run', () => {
       )}`,
     );
   });
+
+  it('action plan emits amount as GRT decimal string, not wei (regression: 10^18× over-allocation)', async () => {
+    // The indexer-agent's `ActionInput.amount` is GRT decimal (see
+    // indexer-tools-v4 wizardStore.ts: `amount: String(amountGrt)` where
+    // `amountGrt` is `parseFloat`-ed GRT). An earlier MCP version sent the
+    // optimizer's wei `bigint` straight through, which the agent then read
+    // as 10^18× the intended allocation — astronomical sizes were
+    // submitted on-chain. This test pins the diff boundary at GRT decimal.
+    //
+    // Single saturated candidate, no current allocation → diffActions
+    // produces an `allocate` action; we assert `amount` is the
+    // GRT-decimal form of the proposed wei size.
+    const dep = deployment({
+      id: Q.OK,
+      signal: GRT(50_000n),
+      staked: GRT(10n),
+    });
+    const opt = new AllocationOptimizer({
+      networkClient: fakeNetworkClient({
+        indexer: indexer({ stakedTokens: GRT(100_000n).toString() }),
+        signalledDeployments: [dep],
+      }),
+      graphNodeClient: fakeGraphNodeClient({
+        statuses: [indexingStatus({ id: Q.OK })],
+      }),
+      qosClient: fakeQosClient(),
+      agentClient: fakeAgentClient(),
+      eboClient: fakeEboClient(),
+    });
+    const result = await opt.run(
+      baseConfig({ maxAllocations: 1, gasEstimateGrt: GRT(0n) }),
+    );
+    const allocateActions = result.actions.filter((a) => a.type === 'allocate');
+    assert.equal(
+      allocateActions.length,
+      1,
+      `expected exactly one allocate action; got ${allocateActions.length}`,
+    );
+    const action = allocateActions[0]!;
+    const proposed = result.proposedAllocations.find(
+      (p) => p.deploymentId === action.deploymentId,
+    );
+    assert.ok(proposed, 'allocate action must correspond to a proposed allocation');
+    // The amount field on AgentActionPlan is a string — bigint would
+    // serialize as a wei value via JSON's bigIntReplacer and re-introduce
+    // the 10^18× bug.
+    assert.equal(
+      typeof action.amount,
+      'string',
+      `action.amount must be a string (GRT decimal); got ${typeof action.amount}`,
+    );
+    // The numeric value must equal the wei proposal divided by 10^18 —
+    // i.e. whole GRT, not wei.
+    const amountStr = action.amount as string;
+    const WEI_PER_GRT = 10n ** 18n;
+    const expectedIntGrt = proposed.allocatedTokens / WEI_PER_GRT;
+    const observedIntGrt = BigInt(amountStr.split('.')[0] ?? '0');
+    assert.equal(
+      observedIntGrt,
+      expectedIntGrt,
+      `action.amount (${amountStr}) must match proposal/${WEI_PER_GRT} as GRT integer; ` +
+        `proposal wei=${proposed.allocatedTokens.toString()}, expected GRT int=${expectedIntGrt}`,
+    );
+    // Belt: explicitly NOT the wei value.
+    assert.notEqual(
+      amountStr,
+      proposed.allocatedTokens.toString(),
+      `action.amount must NOT be the raw wei string — that's the 10^18× regression`,
+    );
+  });
 });
 

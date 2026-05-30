@@ -400,7 +400,8 @@ describe('agent-tools: queue_reallocate POI handling', () => {
     const result = await invokeTool(server, 'queue_reallocate', {
       deployment_id: VALID_DEPLOYMENT,
       allocation_id: VALID_ALLOCATION,
-      new_amount: '1000000000000000000',
+      // GRT decimal, NOT wei — see ActionInput.amount docstring.
+      new_amount: '100',
     });
     assert.ok(result);
     assert.equal((result as { isError?: boolean }).isError, undefined);
@@ -409,7 +410,7 @@ describe('agent-tools: queue_reallocate POI handling', () => {
     assert.equal(action.type, 'reallocate');
     assert.equal(action.deploymentID, VALID_DEPLOYMENT);
     assert.equal(action.allocationID, VALID_ALLOCATION);
-    assert.equal(action.amount, '1000000000000000000');
+    assert.equal(action.amount, '100');
     for (const field of ['poi', 'publicPOI', 'poiBlockNumber', 'force'] as const) {
       assert.equal(
         Object.prototype.hasOwnProperty.call(action, field),
@@ -425,14 +426,14 @@ describe('agent-tools: queue_reallocate POI handling', () => {
       deployment_id: VALID_DEPLOYMENT,
       allocation_id: VALID_ALLOCATION,
       force_zero_poi: true,
-      new_amount: '1000000000000000000',
+      new_amount: '100',
     });
     const action = client.queuedActions[0]![0]!;
     assert.equal(action.poi, ZERO_POI);
     assert.equal(action.publicPOI, ZERO_POI);
     assert.equal(action.poiBlockNumber, 0);
     assert.equal(action.force, true);
-    assert.equal(action.amount, '1000000000000000000');
+    assert.equal(action.amount, '100');
     assert.match(action.reason ?? '', /force_zero_poi/);
   });
 });
@@ -461,7 +462,8 @@ describe('agent-tools: required wire fields (status / protocolNetwork / isLegacy
     const { server, client } = setupTools();
     await invokeTool(server, 'queue_allocate', {
       deployment_id: VALID_DEPLOYMENT,
-      amount: '1000000000000000000',
+      // GRT decimal, NOT wei — see ActionInput.amount docstring.
+      amount: '100',
     });
     const action = client.queuedActions[0]![0]!;
     assert.equal(action.status, 'queued');
@@ -499,7 +501,8 @@ describe('agent-tools: required wire fields (status / protocolNetwork / isLegacy
     await invokeTool(server, 'queue_reallocate', {
       deployment_id: VALID_DEPLOYMENT,
       allocation_id: VALID_ALLOCATION,
-      new_amount: '1000000000000000000',
+      // GRT decimal, NOT wei — see ActionInput.amount docstring.
+      new_amount: '100',
     });
     const action = client.queuedActions[0]![0]!;
     assert.equal(action.status, 'queued');

@@ -128,8 +128,16 @@ export interface ProposedAllocation {
 export interface AgentActionPlan {
   type: 'allocate' | 'unallocate' | 'reallocate';
   deploymentId: string;
-  /** For allocate / reallocate: new allocation size in wei. */
-  amount?: bigint;
+  /**
+   * For allocate / reallocate: new allocation size as a **GRT decimal
+   * string** ("100", "0.5") — the unit the indexer-agent's
+   * `ActionInput.amount` expects on the wire. Internally the optimizer
+   * computes in wei (bigint); the conversion happens in `diffActions`
+   * so the LLM can forward this value directly to `queue_allocate` /
+   * `queue_reallocate` without further scaling. See `grtDecimal` in
+   * `src/tools/agent-tools.ts` for the unit rationale.
+   */
+  amount?: string;
   /** For unallocate / reallocate: id of the existing on-chain allocation. */
   allocationId?: string;
   reason: string;
@@ -1705,7 +1713,7 @@ export class AllocationOptimizer {
           actions.push({
             type: 'allocate',
             deploymentId: p.deploymentId,
-            amount: p.allocatedTokens,
+            amount: weiToGrtDecimalString(p.allocatedTokens),
             reason: p.rationale,
           });
         }
@@ -1721,12 +1729,14 @@ export class AllocationOptimizer {
           reason: 'optimizer dropped deployment from plan',
         });
       } else {
+        const fromGrt = weiToGrtDecimalString(currentAmount);
+        const toGrt = weiToGrtDecimalString(p.allocatedTokens);
         actions.push({
           type: 'reallocate',
           deploymentId: p.deploymentId,
           allocationId: current.id,
-          amount: p.allocatedTokens,
-          reason: `resize from ${currentAmount.toString()} to ${p.allocatedTokens.toString()} wei: ${p.rationale}`,
+          amount: toGrt,
+          reason: `resize from ${fromGrt} GRT to ${toGrt} GRT: ${p.rationale}`,
         });
       }
     }
@@ -1763,5 +1773,27 @@ function shareLabel(part: bigint, whole: bigint): string {
   if (whole === 0n) return '0%';
   const ratio = bigintRatioToNumber(part * 10_000n, whole);
   return `${(ratio / 100).toFixed(2)}%`;
+}
+
+/**
+ * Convert a wei `bigint` to a GRT decimal string (1 GRT = 10^18 wei). The
+ * indexer-agent's `ActionInput.amount` is GRT decimal on the wire (see
+ * `grtDecimal` in `src/tools/agent-tools.ts`); the optimizer works in wei
+ * internally and uses this helper at the AgentActionPlan boundary.
+ *
+ * Trailing zeros in the fractional part are stripped; integers come back
+ * without a decimal point ("100" not "100.0"). Negative inputs throw —
+ * allocation amounts are always non-negative in this codebase.
+ */
+function weiToGrtDecimalString(wei: bigint): string {
+  if (wei < 0n) {
+    throw new Error(`weiToGrtDecimalString: negative input ${wei.toString()}`);
+  }
+  const WEI_PER_GRT = 10n ** 18n;
+  const intPart = wei / WEI_PER_GRT;
+  const fracPart = wei % WEI_PER_GRT;
+  if (fracPart === 0n) return intPart.toString();
+  const fracStr = fracPart.toString().padStart(18, '0').replace(/0+$/, '');
+  return `${intPart.toString()}.${fracStr}`;
 }
 

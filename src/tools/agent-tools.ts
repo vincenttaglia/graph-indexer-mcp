@@ -50,10 +50,23 @@ const DEFAULT_PRIORITY = 0;
 // Shared input validators
 // ---------------------------------------------------------------------------
 
-/** Non-empty decimal digit string — GRT wei amount. */
-const wei = z
+/**
+ * Non-negative GRT amount as a decimal string ("100", "0.5", "1234.567").
+ *
+ * IMPORTANT: the indexer-agent's `ActionInput.amount` is **GRT decimal**, not
+ * wei — see indexer-tools-v4's `wizardStore.ts` where `amount: String(amountGrt)`
+ * is sent directly from a `parseFloat` value, and `WizardStepExecute.vue` reads
+ * it back via `parseFloat` → "X GRT" with no scaling. Sending the wei
+ * representation here would over-allocate by 10^18× (the symptom that
+ * prompted this fix).
+ *
+ * Distinct from `IndexingRule.allocationAmount`, which IS wei (per the
+ * indexer-cli convention with `parseGRT()` — see the rule_params shape on
+ * set_indexing_rule).
+ */
+const grtDecimal = z
   .string()
-  .regex(/^[0-9]+$/, 'must be a non-negative decimal wei string');
+  .regex(/^\d+(\.\d+)?$/, 'must be a non-negative decimal GRT amount');
 
 /**
  * Sentinel all-zero POI (`0x` + 64 zeros). Submitted in place of a real Proof
@@ -181,13 +194,16 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     permissionClass: 'agent_queue',
     description:
       'Queue an allocate action on the indexer agent: opens a new allocation ' +
-      'against the given deployment for `amount` GRT (wei, decimal string). ' +
-      'The action is added to the agent queue in `queued` status and must be ' +
-      'approved (via approve_actions or by an operator) before execution.',
+      'against the given deployment for `amount` GRT (decimal string of whole ' +
+      'GRT, e.g. "100" or "0.5"). The action is added to the agent queue in ' +
+      '`queued` status and must be approved (via approve_actions or by an ' +
+      'operator) before execution.',
     inputSchema: {
       deployment_id: z.string().describe('Subgraph deployment IPFS hash (Qm…).'),
-      amount: wei.describe(
-        'GRT amount in wei as a decimal string (BigInt-as-string).',
+      amount: grtDecimal.describe(
+        'GRT amount as a decimal string ("100", "0.5"). NOT wei — the agent ' +
+          'treats this field as whole-token GRT; passing wei over-allocates ' +
+          'by 10^18×.',
       ),
     },
     handler: async (args, extra) => {
@@ -288,12 +304,13 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
     description:
       'Queue a reallocate action: atomically closes the given allocation and ' +
       'opens a fresh allocation on the same deployment for `new_amount` GRT ' +
-      'wei. Executed as a single multicall on-chain. `deployment_id`, ' +
-      '`allocation_id`, and `new_amount` are required; the caller must supply ' +
-      'the deployment the allocation belongs to. Proof of Indexing is NOT a ' +
-      'tool input — see `force_zero_poi`: false (default) lets the agent ' +
-      'compute a real POI at close time and claim indexing rewards, true ' +
-      'submits an all-zero POI and forfeits the rewards for the closing leg.',
+      '(decimal string of whole GRT, e.g. "100" or "0.5"). Executed as a ' +
+      'single multicall on-chain. `deployment_id`, `allocation_id`, and ' +
+      '`new_amount` are required; the caller must supply the deployment the ' +
+      'allocation belongs to. Proof of Indexing is NOT a tool input — see ' +
+      '`force_zero_poi`: false (default) lets the agent compute a real POI ' +
+      'at close time and claim indexing rewards, true submits an all-zero POI ' +
+      'and forfeits the rewards for the closing leg.',
     inputSchema: {
       deployment_id: z
         .string()
@@ -314,8 +331,10 @@ export function registerAgentTools(server: McpServer, deps: AgentToolDeps): void
             'publicPOI=0x00…, poiBlockNumber=0, force=true), forfeiting the ' +
             'closing rewards. Use only when graph-node cannot produce a valid POI.',
         ),
-      new_amount: wei.describe(
-        'GRT amount in wei (decimal string) for the new allocation.',
+      new_amount: grtDecimal.describe(
+        'GRT amount as a decimal string ("100", "0.5") for the new ' +
+          'allocation. NOT wei — the agent treats this field as whole-token ' +
+          'GRT; passing wei over-allocates by 10^18×.',
       ),
     },
     handler: async (args, extra) => {

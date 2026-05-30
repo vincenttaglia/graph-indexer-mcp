@@ -6,8 +6,16 @@
  * indexing rules and cost models. These types mirror the subset of the agent
  * schema we surface as MCP tools.
  *
- * Token amounts are represented as decimal strings (BigInt-as-string) to avoid
- * JS number precision loss for GRT wei values.
+ * Token amounts on the wire use different units depending on the field:
+ *   - `ActionInput.amount` / `Action.amount` — **GRT decimal string** ("100",
+ *     "0.5"). Confirmed against indexer-tools-v4's wizardStore.ts which sends
+ *     `String(amountGrt)` directly and displays via `parseFloat → "X GRT"`.
+ *   - `IndexingRule.allocationAmount` and other BigInt schema fields
+ *     (`minSignal`, `maxSignal`, `minStake`, `minAverageQueryFees`) — **wei
+ *     decimal string** (BigInt-as-string), per the indexer-cli `parseGRT()`
+ *     convention used by the agent's `IndexingRuleInput` resolver.
+ * Mixing the two — e.g. sending wei in `ActionInput.amount` — over-allocates
+ * by 10^18× and was the symptom that prompted this dual-unit documentation.
  */
 
 // ---------------------------------------------------------------------------
@@ -52,7 +60,10 @@ export interface Action {
   deploymentID: string;
   /** On-chain allocation id (0x…); present for unallocate/reallocate. */
   allocationID?: string | null;
-  /** GRT amount in wei, as a decimal string. */
+  /**
+   * GRT amount as a **decimal string** of whole GRT ("100", "0.5") — NOT
+   * wei. See the file-header note on dual-unit fields.
+   */
   amount?: string | null;
   /** Proof of Indexing (32-byte hex string). */
   poi?: string | null;
@@ -99,8 +110,12 @@ export interface ActionInput {
   deploymentID: string;
   allocationID?: string;
   /**
-   * Decimal string of GRT wei. Required even on `unallocate` (set to
-   * `'0'`) — the agent's schema treats `amount` as a required string.
+   * Decimal string of **whole GRT** (e.g. `'100'`, `'0.5'`) — NOT wei.
+   * Required even on `unallocate` (set to `'0'`) — the agent's schema
+   * treats `amount` as a required string. The indexer-agent reads this
+   * field with `parseFloat`-equivalent semantics (see indexer-tools-v4
+   * `wizardStore.ts`/`WizardStepExecute.vue`), so passing the wei value
+   * over-allocates by 10^18×.
    */
   amount: string;
   /**

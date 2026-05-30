@@ -187,10 +187,10 @@ Source: `src/tools/agent-tools.ts`. Backed by the indexer-agent Management API. 
 ### `queue_allocate`
 
 - **Permission:** `agent_queue`
-- **Description:** Queue an `allocate` action: opens a new allocation for `amount` GRT (wei). Lands in the agent queue as `queued`; must be approved before execution.
+- **Description:** Queue an `allocate` action: opens a new allocation for `amount` GRT (decimal string of whole GRT, e.g. `"100"` or `"0.5"`). Lands in the agent queue as `queued`; must be approved before execution. **Unit gotcha:** the agent's `ActionInput.amount` is GRT decimal, NOT wei — passing the wei representation over-allocates by 10^18×. Distinct from `IndexingRule.allocationAmount` (wei) and `calculate_deployment_apr.allocation_amount` (wei).
 - **Args:**
   - `deployment_id` (string, required).
-  - `amount` (string, required) — wei, decimal digits only.
+  - `amount` (string, required) — GRT decimal (e.g. `"100"`, `"0.5"`). NOT wei.
 - **Returns:** JSON agent response.
 
 ### `queue_unallocate`
@@ -210,7 +210,7 @@ Source: `src/tools/agent-tools.ts`. Backed by the indexer-agent Management API. 
 - **Args:**
   - `deployment_id` (string, required).
   - `allocation_id` (string, required) — hex.
-  - `new_amount` (string, required) — wei for the new allocation.
+  - `new_amount` (string, required) — GRT decimal (e.g. `"100"`, `"0.5"`) for the new allocation. NOT wei.
   - `force_zero_poi` (boolean, optional, default `false`) — `true` to submit the four-field zero-POI bundle for the closing leg and forfeit rewards.
 - **Returns:** JSON agent response. Same error semantics as `queue_unallocate` for missing allocations.
 

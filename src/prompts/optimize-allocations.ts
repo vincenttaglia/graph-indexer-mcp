@@ -48,8 +48,8 @@ Call \`run_allocation_optimization\`. Optional overrides: \`indexer_address\`, \
 It returns an \`OptimizationResult\` with:
 
 - \`state\` — totalStake, availableStake, candidate counts.
-- \`proposedAllocations\` — deploymentId, allocatedTokens (wei), projectedAprFraction, rationale.
-- \`actions\` — concrete \`{type: 'allocate' | 'unallocate' | 'reallocate', deploymentId, amount?, allocationId?, reason}\` entries.
+- \`proposedAllocations\` — deploymentId, allocatedTokens (wei BigInt-as-string), projectedAprFraction, rationale.
+- \`actions\` — concrete \`{type: 'allocate' | 'unallocate' | 'reallocate', deploymentId, amount?, allocationId?, reason}\` entries. NOTE: \`amount\` here is a **GRT decimal string** (e.g. \`"100"\`, \`"0.5"\`), matching the unit \`queue_allocate\` / \`queue_reallocate\` expect — forward it through verbatim without converting to wei.
 - \`warnings\` and \`errors\` — surface these prominently.
 
 Present \`actions\` as a markdown table and \`proposedAllocations\` as a per-deployment summary. **STOP and wait for explicit operator approval before executing any action via the individual \`queue_allocate\` / \`queue_unallocate\` / \`queue_reallocate\` tools.** \`approve_actions\` is operator-only — never call it without explicit instruction.
