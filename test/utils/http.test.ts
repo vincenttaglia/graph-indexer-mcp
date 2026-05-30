@@ -183,3 +183,32 @@ describe('httpPostJson', () => {
     );
   });
 });
+
+describe('credential hygiene on fetch errors', () => {
+  // Node's fetch rejects a URL with userinfo with a message that embeds the
+  // FULL URL ("...includes credentials: <url>"). The helper must not surface
+  // that message — only the safe label + a coarse, URL-free code.
+  const creds = 'http://user:s3cr3t-token@127.0.0.1:1/path?key=SUPERSECRET';
+
+  it('httpGetText never leaks a credentialed URL from the fetch error', async () => {
+    try {
+      await httpGetText(creds, { timeoutMs: 1000, maxBytes: 1000, label: 'ipfs' });
+      assert.fail('expected httpGetText to throw');
+    } catch (err) {
+      const msg = (err as Error).message;
+      assert.match(msg, /^\[ipfs\] request failed/);
+      assert.doesNotMatch(msg, /s3cr3t-token|SUPERSECRET|user:|@127\.0\.0\.1/);
+    }
+  });
+
+  it('httpPostJson never leaks a credentialed URL from the fetch error', async () => {
+    try {
+      await httpPostJson(creds, {}, { timeoutMs: 1000, maxBytes: 1000, label: 'rpc:eth:local' });
+      assert.fail('expected httpPostJson to throw');
+    } catch (err) {
+      const msg = (err as Error).message;
+      assert.match(msg, /^\[rpc:eth:local\] request failed/);
+      assert.doesNotMatch(msg, /s3cr3t-token|SUPERSECRET|user:|@127\.0\.0\.1/);
+    }
+  });
+});

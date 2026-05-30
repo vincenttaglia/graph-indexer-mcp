@@ -44,6 +44,28 @@ function safeRef(url: string, label: string | undefined): string {
 }
 
 /**
+ * A credential-safe descriptor for a thrown `fetch`/runtime error. We must NOT
+ * surface `err.message` verbatim: Node's `fetch` puts the full URL into the
+ * message for some errors (e.g. a URL with userinfo →
+ * "Request cannot be constructed from a URL that includes credentials: <url>"),
+ * which would leak a configured endpoint's credentials past the `label` guard.
+ * Instead we report only a coarse, URL-free code: the underlying system error
+ * code (ECONNREFUSED, ENOTFOUND, …) when present, else the error's class name.
+ */
+function safeErrDetail(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const cause = (err as { cause?: unknown }).cause;
+    if (cause && typeof cause === 'object') {
+      const code = (cause as { code?: unknown }).code;
+      if (typeof code === 'string' && code) return code;
+    }
+    const name = (err as { name?: unknown }).name;
+    if (typeof name === 'string' && name) return name;
+  }
+  return 'unknown error';
+}
+
+/**
  * Compose the caller's external signal with an internal timeout controller,
  * mirroring `timedFetch` in `graphql-client.ts`. Returns the combined signal
  * (or `undefined` when neither source exists) plus a `clear()` to cancel the
@@ -136,8 +158,7 @@ export async function httpGetText(url: string, opts: HttpOptions): Promise<strin
     clear();
     if (opts.signal?.aborted) opts.signal.throwIfAborted();
     if (timedOut()) throw new Error(`[${ref}] request timed out after ${opts.timeoutMs}ms`);
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`[${ref}] request failed: ${detail}`);
+    throw new Error(`[${ref}] request failed (${safeErrDetail(err)})`);
   }
   try {
     if (!res.ok) {
@@ -174,8 +195,7 @@ export async function httpPostJson(
     clear();
     if (opts.signal?.aborted) opts.signal.throwIfAborted();
     if (timedOut()) throw new Error(`[${ref}] request timed out after ${opts.timeoutMs}ms`);
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`[${ref}] request failed: ${detail}`);
+    throw new Error(`[${ref}] request failed (${safeErrDetail(err)})`);
   }
   let text: string;
   try {
@@ -188,8 +208,9 @@ export async function httpPostJson(
   }
   try {
     return JSON.parse(text) as unknown;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`[${ref}] response was not valid JSON: ${detail}`);
+  } catch {
+    // Don't echo the parser's message: it can embed a snippet of the response
+    // body, which may contain endpoint-side secrets.
+    throw new Error(`[${ref}] response was not valid JSON`);
   }
 }

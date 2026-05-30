@@ -82,6 +82,51 @@ function resolveEndpoint(
   throw new Error(`no usable endpoint for chain "${chain}"`);
 }
 
+/**
+ * Build a redactor that strips a configured endpoint URL (and its credential-
+ * bearing parts) out of any string. A JSON-RPC `error` envelope is produced by
+ * the upstream provider — it is NOT under our control and may echo the request
+ * URL, an API key in the path/query, or userinfo. We relay the error faithfully
+ * but scrub the endpoint identity first, so the URL never reaches the caller.
+ */
+function buildRedactor(url: string): (s: string) => string {
+  const needles: string[] = [url];
+  try {
+    const u = new URL(url);
+    needles.push(u.origin, u.host, u.hostname);
+    if (u.username) needles.push(u.username);
+    if (u.password) needles.push(u.password);
+    if (u.pathname && u.pathname !== '/') needles.push(u.pathname);
+    if (u.search) needles.push(u.search);
+  } catch {
+    /* non-URL string: fall back to the raw needle only */
+  }
+  // Longest first so the full URL is replaced before its substrings; drop tiny
+  // (<4 char) needles to avoid over-redacting incidental text.
+  const uniq = [...new Set(needles.filter((n) => n && n.length >= 4))].sort(
+    (a, b) => b.length - a.length,
+  );
+  return (s: string): string => {
+    let out = s;
+    for (const n of uniq) out = out.split(n).join('[redacted]');
+    // Defense-in-depth: scrub any `scheme://user:pass@` userinfo we didn't enumerate.
+    out = out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s"']+@/gi, '$1[redacted]@');
+    return out;
+  };
+}
+
+/** Recursively apply the redactor to every string in a relayed error value. */
+function redactDeep(value: unknown, redact: (s: string) => string): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map((v) => redactDeep(v, redact));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = redactDeep(v, redact);
+    return out;
+  }
+  return value;
+}
+
 export function createRpcClient(cfg: {
   endpoints: Config['rpcEndpoints'];
   allowRemote: boolean;
@@ -111,7 +156,9 @@ export function createRpcClient(cfg: {
       // transport-level failures (non-2xx, timeout, oversize, bad JSON) throw,
       // and those propagate to the caller fail-closed.
       if (resp && typeof resp === 'object' && 'error' in resp && resp.error !== undefined) {
-        return { endpointKind, error: resp.error };
+        // The provider-supplied error may echo the request URL / API key; scrub
+        // the endpoint identity before relaying it to the caller.
+        return { endpointKind, error: redactDeep(resp.error, buildRedactor(url)) };
       }
       return { endpointKind, result: resp?.result };
     },

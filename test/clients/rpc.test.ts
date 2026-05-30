@@ -179,6 +179,33 @@ describe('createRpcClient: POST + envelope relay', () => {
     assert.equal(out.result, undefined);
   });
 
+  it('redacts the endpoint URL/secrets echoed back inside a JSON-RPC error', async () => {
+    // A hostile/misbehaving provider echoes the request URL (with its API key)
+    // into the error payload. The relayed error must be scrubbed.
+    handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          error: {
+            code: -32000,
+            message: `bad request to ${secretUrl}`,
+            data: { upstream: secretUrl, host: '127.0.0.1' },
+          },
+        }),
+      );
+    };
+    const out = await client({ x: { remote: secretUrl } }).call('x', 'eth_call', [], 'remote');
+    const serialized = JSON.stringify(out);
+    assert.doesNotMatch(serialized, /SUPERSECRETKEY/);
+    assert.doesNotMatch(serialized, /topsecret/);
+    assert.doesNotMatch(serialized, /127\.0\.0\.1/);
+    // The error is still relayed (code preserved, message present but scrubbed).
+    assert.equal((out.error as { code: number }).code, -32000);
+    assert.match(serialized, /\[redacted\]/);
+  });
+
   it('forwards the JSON-RPC request body { jsonrpc, id, method, params }', async () => {
     let received: unknown;
     handler = (req, res) => {
