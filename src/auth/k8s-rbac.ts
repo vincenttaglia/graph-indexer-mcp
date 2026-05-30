@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import * as https from 'node:https';
+import { createHash } from 'node:crypto';
 import type { Config } from '../config.js';
 import type { Authorizer, RequestContext } from './authorizer.js';
 import type { PermissionClass } from '../access-control.js';
@@ -47,7 +48,31 @@ const TOKEN_REVIEW_TTL_MS = 30_000;
 const SAR_TTL_MS = 10_000;
 const MAX_CACHE_ENTRIES = 1000;
 
-/** Result of a TokenReview, cached by caller token. */
+/**
+ * Per-request timeout for apiserver calls. On fire we destroy the request and
+ * fail closed (deny in `authorize`, throw in `init`). Short on purpose: these
+ * are in-cluster control-plane calls on the hot path of every tool invocation.
+ */
+const REQUEST_TIMEOUT_MS = 5_000;
+
+/**
+ * Hard cap on the buffered response body from the apiserver. A TokenReview /
+ * SubjectAccessReview response is a few hundred bytes; 1 MiB is generous while
+ * preventing a hostile or compromised endpoint from exhausting memory. Over the
+ * cap → destroy the request and fail closed.
+ */
+const MAX_RESPONSE_BYTES = 1024 * 1024;
+
+/**
+ * Hash a secret (caller token / app-SA token) for safe use as a Map key. We
+ * NEVER use a raw token as a key or log it; a SHA-256 hex digest is a stable,
+ * non-reversible binding to the exact token bytes.
+ */
+function hashToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+/** Result of a TokenReview, cached by a hash of the caller token. */
 interface TokenReviewResult {
   authenticated: boolean;
   user?: string;
@@ -146,9 +171,15 @@ function readApiServerBase(): string {
 function makeHttpsPost(deps: {
   readFile: (path: string) => string;
   base: string;
+  /** Override the request timeout (ms). Defaults to REQUEST_TIMEOUT_MS. Tests only. */
+  timeoutMs?: number;
+  /** Override the response body cap (bytes). Defaults to MAX_RESPONSE_BYTES. Tests only. */
+  maxResponseBytes?: number;
 }): (apiPath: string, body: unknown) => Promise<PostResult> {
   const ca = deps.readFile(CA_PATH);
   const url = new URL(deps.base);
+  const timeoutMs = deps.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const maxResponseBytes = deps.maxResponseBytes ?? MAX_RESPONSE_BYTES;
 
   return (apiPath, body) =>
     new Promise<PostResult>((resolve, reject) => {
@@ -163,6 +194,20 @@ function makeHttpsPost(deps: {
       }
 
       const payload = Buffer.from(JSON.stringify(body), 'utf8');
+      // Guard so the timeout and error/oversize paths each settle the promise at
+      // most once, and so a late event never double-settles.
+      let settled = false;
+      const fail = (err: Error): void => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
+      const succeed = (result: PostResult): void => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+
       const req = https.request(
         {
           protocol: url.protocol,
@@ -171,6 +216,7 @@ function makeHttpsPost(deps: {
           path: apiPath,
           method: 'POST',
           ca,
+          timeout: timeoutMs,
           headers: {
             'content-type': 'application/json',
             accept: 'application/json',
@@ -180,23 +226,44 @@ function makeHttpsPost(deps: {
         },
         (res) => {
           const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
+          let received = 0;
+          res.on('data', (c: Buffer) => {
+            received += c.length;
+            if (received > maxResponseBytes) {
+              // Hostile/compromised endpoint streaming an oversize body. Stop
+              // reading, destroy the request, and fail closed.
+              req.destroy();
+              fail(
+                new Error(
+                  `response body exceeded ${maxResponseBytes} bytes (status ${res.statusCode ?? 0})`,
+                ),
+              );
+              return;
+            }
+            chunks.push(c);
+          });
           res.on('end', () => {
+            if (settled) return;
             const text = Buffer.concat(chunks).toString('utf8');
             let parsed: unknown = undefined;
             if (text.length > 0) {
               try {
                 parsed = JSON.parse(text);
               } catch {
-                reject(new Error(`non-JSON response (status ${res.statusCode}): ${text.slice(0, 200)}`));
+                fail(new Error(`non-JSON response (status ${res.statusCode}): ${text.slice(0, 200)}`));
                 return;
               }
             }
-            resolve({ status: res.statusCode ?? 0, body: parsed });
+            succeed({ status: res.statusCode ?? 0, body: parsed });
           });
         },
       );
-      req.on('error', reject);
+      // `timeout` only emits the event; we must destroy the socket ourselves.
+      req.on('timeout', () => {
+        req.destroy();
+        fail(new Error(`request timed out after ${timeoutMs}ms`));
+      });
+      req.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))));
       req.write(payload);
       req.end();
     });
@@ -247,7 +314,9 @@ export function makeK8sRbacAuthorizerWithDeps(
    * the caller fails closed.
    */
   async function cachedTokenReview(token: string): Promise<TokenReviewResult> {
-    const cached = tokenReviewCache.get(token);
+    // Key by a hash of the token — never use the raw token as a Map key.
+    const tokenKey = hashToken(token);
+    const cached = tokenReviewCache.get(tokenKey);
     if (cached) return cached;
 
     let res: PostResult;
@@ -274,7 +343,7 @@ export function makeK8sRbacAuthorizerWithDeps(
       // failures aggressively — but a confirmed "not authenticated" is a stable
       // answer for this token, so caching it for the TTL is fine and cheap.
       const result: TokenReviewResult = { authenticated: false };
-      tokenReviewCache.set(token, result);
+      tokenReviewCache.set(tokenKey, result);
       return result;
     }
 
@@ -283,20 +352,29 @@ export function makeK8sRbacAuthorizerWithDeps(
       user: obj.status.user.username,
       groups: obj.status.user.groups ?? [],
     };
-    tokenReviewCache.set(token, result);
+    tokenReviewCache.set(tokenKey, result);
     return result;
   }
 
   /**
    * Ask the apiserver whether `subject` may perform `verb` on
-   * `mcp.thegraph.io/tools`. Cached by `username|verb` (~10s). Fails closed.
+   * `mcp.thegraph.io/tools`. Cached by `sha256(token)|verb` (~10s). Fails closed.
+   *
+   * The cache key is bound to the CALLER TOKEN, not the resolved username. The
+   * SAR authorizes `user + groups`, so two distinct tokens that happen to map to
+   * the same username but DIFFERENT groups must not share a cached ALLOW —
+   * keying by username alone would let a less-privileged token inherit a more
+   * privileged token's cached verb (e.g. `agent_approve`). Binding to the token
+   * captures the complete resolved subject with no group/uid canonicalization to
+   * get wrong. `tokenKey` is already a SHA-256 hex digest — never the raw token.
    */
   async function cachedSar(
+    tokenKey: string,
     user: string,
     groups: string[] | undefined,
     verb: PermissionClass,
   ): Promise<boolean> {
-    const key = `${user}|${verb}`;
+    const key = `${tokenKey}|${verb}`;
     const cached = sarCache.get(key);
     if (cached !== undefined) return cached;
 
@@ -344,19 +422,25 @@ export function makeK8sRbacAuthorizerWithDeps(
       const review = await cachedTokenReview(token);
       if (!review.authenticated || !review.user) return false;
 
-      return cachedSar(review.user, review.groups, permissionClass);
+      // Bind the SAR cache to the caller token (hashed), not the username, so
+      // tokens sharing a username but differing in groups never share a result.
+      return cachedSar(hashToken(token), review.user, review.groups, permissionClass);
     },
 
     /**
      * Startup self-check. Confirms:
      *   - the in-cluster SA token + CA files are present and readable, and
-     *   - the app's SA can actually create a SubjectAccessReview (i.e. it holds
-     *     `system:auth-delegator`).
+     *   - the app's SA can actually create a TokenReview AND a
+     *     SubjectAccessReview (i.e. it holds `system:auth-delegator`, which
+     *     grants create on BOTH tokenreviews and subjectaccessreviews).
      *
-     * We issue a trivial SAR for a synthetic subject. We do NOT require
-     * `allowed === true` (the synthetic subject has no bindings); we only
-     * require the apiserver to ACCEPT the SAR create (HTTP 2xx). A 403 here
-     * means the pod's SA lacks `system:auth-delegator` and we fail fast with an
+     * Both subresources are exercised because a misconfigured RBAC setup could
+     * grant one without the other; if we only checked the SAR, an SA that lacks
+     * TokenReview-create would pass readiness then deny every real call (every
+     * `authorize()` begins with a TokenReview). For each we issue a throwaway
+     * request and require only that the apiserver ACCEPT the create (HTTP 2xx) —
+     * we do NOT require `authenticated`/`allowed` to be true (the synthetic
+     * token/subject have no validity/bindings). A 401/403 → fail fast with an
      * actionable message rather than silently denying every request at runtime.
      */
     async init(): Promise<void> {
@@ -380,7 +464,42 @@ export function makeK8sRbacAuthorizerWithDeps(
         );
       }
 
-      // 2. Issue a trivial SAR and require the apiserver to accept it (2xx).
+      // 2. Issue a throwaway TokenReview and require the apiserver to accept the
+      //    create (2xx). The synthetic token is invalid, so `authenticated:false`
+      //    in the RESULT is expected and fine; what we verify is that the SA may
+      //    CREATE tokenreviews at all. Every real `authorize()` starts here.
+      let trRes: PostResult;
+      try {
+        trRes = await deps.post('/apis/authentication.k8s.io/v1/tokenreviews', {
+          apiVersion: 'authentication.k8s.io/v1',
+          kind: 'TokenReview',
+          spec: { token: 'mcp-k8s-rbac-self-check-invalid-token', audiences },
+        });
+      } catch (err) {
+        throw new Error(
+          `k8s-rbac self-check failed: could not reach the apiserver to create a TokenReview ` +
+            `(${err instanceof Error ? err.message : String(err)}). Check network/TLS to the apiserver.`,
+        );
+      }
+
+      if (trRes.status === 401 || trRes.status === 403) {
+        const obj = trRes.body as K8sStatusObject | undefined;
+        throw new Error(
+          `k8s-rbac self-check failed: the pod's ServiceAccount is not allowed to create ` +
+            `TokenReviews (HTTP ${trRes.status}${obj?.message ? `: ${obj.message}` : ''}). ` +
+            "Bind the ServiceAccount to the built-in 'system:auth-delegator' ClusterRole " +
+            '(it grants create on tokenreviews).',
+        );
+      }
+      if (trRes.status < 200 || trRes.status >= 300) {
+        const obj = trRes.body as K8sStatusObject | undefined;
+        throw new Error(
+          `k8s-rbac self-check failed: unexpected HTTP ${trRes.status} creating a TokenReview` +
+            `${obj?.message ? `: ${obj.message}` : ''}.`,
+        );
+      }
+
+      // 3. Issue a trivial SAR and require the apiserver to accept it (2xx).
       let res: PostResult;
       try {
         res = await deps.post('/apis/authorization.k8s.io/v1/subjectaccessreviews', {
@@ -432,4 +551,12 @@ export async function makeK8sRbacAuthorizer(config: Config): Promise<Authorizer>
 }
 
 // Internal exports for tests.
-export const __testing = { TtlMap, TOKEN_PATH, CA_PATH };
+export const __testing = {
+  TtlMap,
+  TOKEN_PATH,
+  CA_PATH,
+  makeHttpsPost,
+  hashToken,
+  REQUEST_TIMEOUT_MS,
+  MAX_RESPONSE_BYTES,
+};
