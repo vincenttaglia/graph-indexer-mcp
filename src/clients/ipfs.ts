@@ -6,6 +6,8 @@
  * `get_subgraph_manifest` (see plan §6.1).
  */
 
+import { httpGetText } from '../utils/http.js';
+
 export interface IpfsClient {
   /**
    * Fetch the content at `cid` from the configured gateway and return it as
@@ -20,15 +22,32 @@ export function createIpfsClient(cfg: {
   maxBytes: number;
   timeoutMs?: number;
 }): IpfsClient {
-  // TODO(leaf-A): implement per plan §6.1.
-  //   - `cat(cid, opts)` → `GET {cfg.gatewayUrl}/ipfs/{cid}` via
-  //     `httpGetText(url, { signal: opts?.signal, timeoutMs: cfg.timeoutMs ?? 30_000,
-  //     maxBytes: cfg.maxBytes, label: 'ipfs' })`.
-  //   - Normalize gatewayUrl trailing slash so the path is exactly
-  //     `/ipfs/{cid}` (no double slash, no traversal).
-  //   - Fail-closed (httpGetText already throws on non-2xx/oversize/timeout);
-  //     do NOT leak the full URL (which may carry credentials) — httpGetText's
-  //     `label` keeps errors credential-safe.
-  void cfg;
-  throw new Error('ipfs client not implemented yet');
+  // Normalize the gateway base once: strip any trailing slashes so the join
+  // below produces exactly `{base}/ipfs/{cid}` with no double slash and no
+  // path traversal regardless of whether the operator's URL ends in `/`.
+  const base = cfg.gatewayUrl.replace(/\/+$/, '');
+  const timeoutMs = cfg.timeoutMs ?? 30_000;
+
+  return {
+    async cat(cid, opts) {
+      const url = `${base}/ipfs/${cid}`;
+      try {
+        return await httpGetText(url, {
+          signal: opts?.signal,
+          timeoutMs,
+          maxBytes: cfg.maxBytes,
+          // `label: 'ipfs'` keeps thrown errors credential-safe — the raw
+          // gateway URL (which may carry an `/api/<key>/...` path) never leaks.
+          label: 'ipfs',
+        });
+      } catch (err) {
+        // httpGetText already fails closed on non-2xx / oversize / timeout and
+        // scrubs the URL. Re-wrap with the CID (NOT the gateway URL) so the
+        // caller can correlate the failure to a deployment without exposing
+        // gateway credentials.
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`failed to fetch IPFS content for CID ${cid}: ${detail}`);
+      }
+    },
+  };
 }
