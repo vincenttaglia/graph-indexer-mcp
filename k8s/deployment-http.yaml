@@ -1,0 +1,146 @@
+# =============================================================================
+# graph-indexer-mcp Deployment — HTTP profile (MCP_TRANSPORT=http)
+#
+# When to use THIS vs the stdio deployment.yaml:
+#   - deployment.yaml (stdio): single operator attaches with `kubectl exec`;
+#     no network listener; replicas: 1; ACCESS_LEVEL governs authorization for
+#     the whole process. Default, simplest path.
+#   - deployment-http.yaml (this file): the server hosts a Streamable HTTP
+#     listener so remote MCP clients connect over the network, and per-caller
+#     authorization is delegated to Kubernetes RBAC (MCP_AUTHZ=k8s-rbac). Use
+#     this when multiple identities (humans via OIDC, machines via projected SA
+#     tokens) need DIFFERENT permission tiers against one server.
+#
+# This variant differs from deployment.yaml in:
+#   - containerPort 8080 + httpGet probes on /healthz (live) and /readyz (ready)
+#   - env MCP_TRANSPORT=http and MCP_AUTHZ=k8s-rbac
+#   - replicas: 2 + RollingUpdate (stateless per request — safe to scale)
+#   - automountServiceAccountToken stays true: the k8s-rbac authorizer uses the
+#     pod's SA token to call TokenReview/SubjectAccessReview (the SA must be
+#     bound to system:auth-delegator — see clusterrolebinding-auth-delegator.yaml).
+#
+# Prerequisites for this profile:
+#   - clusterrolebinding-auth-delegator.yaml applied (TokenReview + SAR access)
+#   - clusterrole-mcp-roles.yaml applied + subjects bound to a tier
+#   - service.yaml applied to expose port 8080
+#   - TLS/ingress in front (bearer tokens must not travel in plaintext)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graph-indexer-mcp
+  namespace: graph-indexer-mcp
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: 2
+  strategy:
+    # RollingUpdate is safe here: the HTTP transport is stateless per request
+    # (identity rides on each call's bearer token), so a second replica can
+    # serve while the first drains.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: graph-indexer-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: graph-indexer-mcp
+        app.kubernetes.io/component: mcp-server
+    spec:
+      serviceAccountName: graph-indexer-mcp
+      # The k8s-rbac authorizer authenticates callers by POSTing TokenReview /
+      # SubjectAccessReview to the apiserver using the pod's mounted SA token.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          # Operators must set this to their registry-hosted image reference
+          # (e.g. ghcr.io/<your-org>/graph-indexer-mcp:0.1.0). The placeholder
+          # is intentional — there is no canonical upstream registry for this
+          # image. Pin per release; avoid :latest in production.
+          image: REPLACE_IMAGE:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: graph-indexer-mcp-config
+            - secretRef:
+                name: graph-indexer-mcp-secrets
+          # HTTP-profile overrides. These take precedence over any same-named
+          # key in the ConfigMap (envFrom is applied first, then env), so the
+          # stdio ConfigMap default stays untouched while this Deployment opts
+          # into the http + k8s-rbac axes.
+          env:
+            - name: MCP_TRANSPORT
+              value: "http"
+            - name: MCP_AUTHZ
+              value: "k8s-rbac"
+            - name: MCP_HTTP_PORT
+              value: "8080"
+            - name: MCP_HTTP_HOST
+              value: "0.0.0.0"
+            # If callers present audience-scoped projected SA tokens, set the
+            # matching audience so TokenReview validation succeeds. Leave unset
+            # to accept the apiserver's default audience.
+            # - name: K8S_API_AUDIENCE
+            #   value: "graph-indexer-mcp"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Writable scratch for node / kubectl temp files.
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/mcp
+          # HTTP transport exposes real probe endpoints. /healthz = process is
+          # up and the HTTP server is listening; /readyz returns 200 only after
+          # server.connect succeeds and, in k8s-rbac mode, the authorizer's
+          # startup self-SAR confirms the pod can reach TokenReview/SAR.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 16Mi
+      terminationGracePeriodSeconds: 15

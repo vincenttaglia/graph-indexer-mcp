@@ -60,7 +60,7 @@ Restart Claude Desktop after editing the config. Server logs appear on stderr.
 
 ## 2. Remote HTTP
 
-Run the server as a long-lived process. The remote-HTTP entrypoint, container image, and Compose file are produced by the deploy track (`Dockerfile`, `docker-compose.yml` in the repo root).
+Run the server as a long-lived process. Set `MCP_TRANSPORT=http` to start the Streamable HTTP listener (implemented; see [HTTP profile / in-cluster RBAC](#http-profile--in-cluster-rbac) below for the transport details and the `MCP_AUTHZ` axis). The container image and Compose file live in the repo root (`Dockerfile`, `docker-compose.yml`).
 
 **Required:**
 
@@ -80,7 +80,7 @@ Connect a remote MCP-aware client by pointing it at the HTTP endpoint. Keep the 
 
 ## 3. In-cluster (Kubernetes)
 
-The recommended production pattern. Run the MCP as a pod in the same namespace as graph-node. The deploy track produces manifests under `k8s/` (Deployment, Service, ConfigMap, Secret, ServiceAccount, Role, RoleBinding).
+The recommended production pattern. Run the MCP as a pod in the same namespace as graph-node. Manifests live under `k8s/`: ConfigMap, Secret, ServiceAccount, Role, RoleBinding, and a choice of Deployment — `deployment.yaml` (stdio profile) or `deployment-http.yaml` + `service.yaml` (HTTP profile). For per-caller Kubernetes RBAC authorization see [HTTP profile / in-cluster RBAC](#http-profile--in-cluster-rbac).
 
 **Required:**
 
@@ -115,6 +115,105 @@ rules:
 ```
 
 Bound to the MCP server's ServiceAccount via a RoleBinding in the same namespace.
+
+---
+
+## HTTP profile / in-cluster RBAC
+
+The stdio profile bakes a single `ACCESS_LEVEL` into the process: every caller
+shares it. The HTTP profile instead lets the server authenticate each caller and
+delegate the per-call grant decision to Kubernetes RBAC, so different identities
+get different permission tiers against one server.
+
+### The two orthogonal axes
+
+Authorization is configured along two independent axes (see
+[config-reference.md](config-reference.md)):
+
+| Axis | Env var | Values | Default |
+| --- | --- | --- | --- |
+| Transport | `MCP_TRANSPORT` | `stdio`, `http` | `stdio` |
+| Authorizer | `MCP_AUTHZ` | `static`, `k8s-rbac` | `static` |
+
+They combine freely with one constraint: **`k8s-rbac` requires `http`** —
+per-caller identity only exists on the HTTP transport (stdio has no bearer
+token), so `MCP_AUTHZ=k8s-rbac` with `MCP_TRANSPORT=stdio` is rejected at
+startup. The default `stdio` + `static` is byte-for-byte the legacy behavior.
+
+| `MCP_TRANSPORT` | `MCP_AUTHZ` | Result |
+| --- | --- | --- |
+| `stdio` | `static` | Default. `kubectl exec` sessions, one `ACCESS_LEVEL`. |
+| `http` | `static` | Networked listener, still one `ACCESS_LEVEL` for all callers. Put auth in front. |
+| `http` | `k8s-rbac` | Networked listener, per-caller authorization via Kubernetes RBAC. |
+| `stdio` | `k8s-rbac` | Rejected at startup (no identity on stdio). |
+
+### Manifests
+
+The HTTP / k8s-rbac profile adds these manifests on top of the base set
+(ConfigMap, Secret, ServiceAccount, Role, RoleBinding):
+
+| File | Purpose |
+| --- | --- |
+| `k8s/deployment-http.yaml` | HTTP-profile Deployment (port 8080, `httpGet` probes, `replicas: 2`, RollingUpdate). Apply **instead of** `deployment.yaml`. |
+| `k8s/service.yaml` | ClusterIP Service exposing port 8080. |
+| `k8s/clusterrolebinding-auth-delegator.yaml` | Binds the SA to `system:auth-delegator` (TokenReview + SubjectAccessReview). |
+| `k8s/clusterrole-mcp-roles.yaml` | Synthetic-resource ClusterRoles (`mcp-readonly`, `mcp-operator`, `mcp-admin`) + example bindings. |
+
+Apply:
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml -f k8s/secret.yaml
+kubectl apply -f k8s/serviceaccount.yaml -f k8s/role.yaml -f k8s/rolebinding.yaml
+# HTTP / k8s-rbac additions:
+kubectl apply -f k8s/clusterrolebinding-auth-delegator.yaml
+kubectl apply -f k8s/clusterrole-mcp-roles.yaml
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/deployment-http.yaml      # NOT deployment.yaml
+```
+
+Then bind a subject (user, OIDC group, or ServiceAccount) to one of the tiers —
+see the commented `ClusterRoleBinding` example in `k8s/clusterrole-mcp-roles.yaml`.
+
+### The `system:auth-delegator` requirement
+
+The k8s-rbac authorizer makes two apiserver calls per (uncached) request:
+
+1. **TokenReview** — resolve the caller's bearer token to a user + groups.
+2. **SubjectAccessReview** — ask "may this subject perform `<permission class>`
+   on `tools.mcp.thegraph.io`?".
+
+Both require the pod's ServiceAccount to hold the built-in
+`system:auth-delegator` ClusterRole, which
+`k8s/clusterrolebinding-auth-delegator.yaml` grants. Without it the calls 403 and
+the authorizer **fails closed** — every tool call is denied. The pod's readiness
+self-check confirms this access on startup, so a missing binding surfaces as a
+pod that never becomes ready.
+
+### Token types
+
+The authorizer accepts any token the cluster can validate via TokenReview:
+
+- **Machine clients** — projected ServiceAccount tokens
+  (`serviceAccountToken` projected volume, or `kubectl create token <sa>`). Bind
+  the SA to a tier with a `ClusterRoleBinding`.
+- **Humans** — OIDC tokens issued by the cluster's configured identity provider.
+  Bind the OIDC user or group (`oidc:<group>`) to a tier.
+
+### Audience caveat
+
+Projected SA tokens are **audience-scoped**: a token minted for audience `A` is
+rejected by TokenReview unless the review names that audience. If your clients
+present audience-scoped tokens, set `K8S_API_AUDIENCE` (env on
+`deployment-http.yaml`) to the matching audience. Leave it unset to accept the
+apiserver's default audience. A mismatch presents as `authenticated: false` and
+the call is denied even though the token is otherwise valid.
+
+### TLS
+
+The HTTP transport does not terminate TLS and the bearer token rides on every
+request, so this profile must sit behind TLS (ingress / service mesh / sidecar).
+`k8s-rbac` authenticates the caller; TLS protects the token in transit.
 
 ---
 

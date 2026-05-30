@@ -1,0 +1,31 @@
+# =============================================================================
+# ClusterIP Service for the HTTP-transport profile (MCP_TRANSPORT=http).
+#
+# NOT used by the stdio profile (deployment.yaml) — stdio has no listening
+# socket, so there is nothing to put a Service in front of. Apply this only
+# alongside deployment-http.yaml.
+#
+# Exposes the Streamable HTTP transport on port 8080 (the MCP_HTTP_PORT
+# default). The /healthz and /readyz probe endpoints are served on the same
+# port. Keep this in-cluster (ClusterIP) and put TLS + ingress in front of it;
+# the MCP transport does not terminate TLS itself, and k8s-rbac authenticates
+# callers by bearer token which must be protected in transit.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: graph-indexer-mcp
+  namespace: graph-indexer-mcp
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+    app.kubernetes.io/component: mcp-server
+spec:
+  type: ClusterIP
+  selector:
+    # Must match the pod template labels in deployment-http.yaml.
+    app.kubernetes.io/name: graph-indexer-mcp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

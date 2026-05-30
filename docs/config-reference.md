@@ -130,6 +130,62 @@ See [access-control.md](access-control.md) for semantics.
 
 ---
 
+## Transport and authorizer
+
+The transport and the authorizer are two independent axes. See
+[deployment.md](deployment.md#http-profile--in-cluster-rbac) for the full
+profile matrix and [access-control.md](access-control.md) for the authorizer
+model. The default (`stdio` + `static`) reproduces the legacy behavior exactly.
+
+### `MCP_TRANSPORT`
+
+- **Type:** enum (`stdio` | `http`)
+- **Default:** `stdio`
+- **Purpose:** How clients connect. `stdio` blocks on stdin (the `kubectl exec`
+  pattern); `http` starts a Streamable HTTP listener on `MCP_HTTP_HOST:MCP_HTTP_PORT`
+  with `/healthz` and `/readyz` probe endpoints.
+
+### `MCP_AUTHZ`
+
+- **Type:** enum (`static` | `k8s-rbac`)
+- **Default:** `static`
+- **Constraint:** `k8s-rbac` requires `MCP_TRANSPORT=http`; the combination
+  `k8s-rbac` + `stdio` is rejected at `loadConfig()` (stdio carries no per-caller
+  identity).
+- **Purpose:** Selects the grant authorizer. `static` uses `ACCESS_LEVEL` +
+  `ACCESS_OVERRIDES_ALLOW` for every caller. `k8s-rbac` resolves each caller's
+  identity (TokenReview) and asks Kubernetes RBAC whether that identity is granted
+  the tool's permission class (SubjectAccessReview). In both modes the deny-list
+  (`ACCESS_OVERRIDES_DENY`) and the unknown-tool floor are enforced in-app as
+  invariants.
+
+### `MCP_HTTP_PORT`
+
+- **Type:** integer (coerced from string), positive
+- **Default:** `8080`
+- **Purpose:** Listen port for the HTTP transport. Ignored when
+  `MCP_TRANSPORT=stdio`. Matches the `containerPort` and Service port in
+  `k8s/deployment-http.yaml` / `k8s/service.yaml`.
+
+### `MCP_HTTP_HOST`
+
+- **Type:** `string`
+- **Default:** `0.0.0.0`
+- **Purpose:** Bind address for the HTTP transport. Ignored when
+  `MCP_TRANSPORT=stdio`. `0.0.0.0` is appropriate inside a pod that sits behind a
+  Service + TLS ingress.
+
+### `K8S_API_AUDIENCE`
+
+- **Type:** `string` (optional)
+- **Default:** unset (accept the apiserver's default audience)
+- **Purpose:** Expected audience for caller projected ServiceAccount tokens,
+  passed to TokenReview. Projected SA tokens are audience-scoped; if your clients
+  present tokens minted for a specific audience, set this to match or validation
+  fails (`authenticated: false`). Only consulted under `MCP_AUTHZ=k8s-rbac`.
+
+---
+
 ## Optimization parameters
 
 These supply defaults for `run_allocation_optimization` / `run_discovery` / `run_health_check`. Per-invocation overrides on the composite tools take precedence.

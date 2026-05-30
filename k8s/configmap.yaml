@@ -38,6 +38,30 @@ data:
   ACCESS_OVERRIDES_ALLOW: ""
   ACCESS_OVERRIDES_DENY: "graphman_drop_deployment,graphman_rewind_deployment"
 
+  # --- Transport + authorization (optional; stdio defaults shown commented) ---
+  # These are unset here so the default stdio profile (deployment.yaml) keeps
+  # behaving exactly as before. The HTTP profile (deployment-http.yaml) sets
+  # MCP_TRANSPORT/MCP_AUTHZ via the pod's `env:` block, which overrides envFrom.
+  # Uncomment + edit here only if you want every Deployment that consumes this
+  # ConfigMap to flip to the HTTP / k8s-rbac profile.
+  #
+  # MCP_TRANSPORT: stdio | http              (default: stdio)
+  # MCP_TRANSPORT: "stdio"
+  #
+  # MCP_AUTHZ: static | k8s-rbac             (default: static)
+  #   k8s-rbac REQUIRES MCP_TRANSPORT=http (identity only exists over HTTP).
+  # MCP_AUTHZ: "static"
+  #
+  # MCP_HTTP_PORT: listen port for the http transport (default: 8080)
+  # MCP_HTTP_PORT: "8080"
+  #
+  # MCP_HTTP_HOST: bind address for the http transport (default: 0.0.0.0)
+  # MCP_HTTP_HOST: "0.0.0.0"
+  #
+  # K8S_API_AUDIENCE: expected audience for caller projected SA tokens, passed
+  #   to TokenReview. Leave unset to accept the apiserver default audience.
+  # K8S_API_AUDIENCE: "graph-indexer-mcp"
+
   # --- Optimization parameters ---
   MAX_ALLOCATIONS: "15"
   MAX_ALLOCATION_PCT: "0.25"

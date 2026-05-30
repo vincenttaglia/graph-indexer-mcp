@@ -90,6 +90,52 @@ Result:
 - `graphman_pause_deployment` → allowed by override despite the level not granting `graphman_safe`.
 - All other writes → denied.
 
+## Pluggable authorizers (`MCP_AUTHZ`)
+
+The resolver above is split into two parts so the grant decision can be swapped
+without weakening the floor:
+
+- **Invariants** (always enforced, in every mode, in the `checkAccess` wrapper
+  itself): unknown tool → deny; deny-list (`ACCESS_OVERRIDES_DENY`) → deny. An
+  authorizer can only grant *within* this floor — it can never re-enable a
+  denied or unregistered tool.
+- **Grants** (pluggable): "does this caller get this permission class?" — handled
+  by the configured `Authorizer`. Selected with `MCP_AUTHZ`.
+
+| `MCP_AUTHZ` | Transport | Grant decision |
+| --- | --- | --- |
+| `static` (default) | stdio or http | `ACCESS_OVERRIDES_ALLOW` lists the tool, OR the active `ACCESS_LEVEL` grants its class. Identical to the model documented above; identity is ignored. |
+| `k8s-rbac` | http only | Per-caller. The caller's bearer token is resolved to a user + groups via a Kubernetes **TokenReview**, then a **SubjectAccessReview** asks the apiserver whether that subject is allowed the permission class. |
+
+`k8s-rbac` requires `MCP_TRANSPORT=http` — stdio has no per-caller identity.
+See [deployment.md](deployment.md#http-profile--in-cluster-rbac) for the manifests
+and the `system:auth-delegator` requirement.
+
+### Permission class → RBAC verb
+
+Under `k8s-rbac` each permission class is checked as a SubjectAccessReview verb
+on the synthetic resource `tools.mcp.thegraph.io`:
+
+| Permission class | SAR verb | apiGroup / resource |
+| --- | --- | --- |
+| `read` | `read` | `mcp.thegraph.io` / `tools` |
+| `agent_queue` | `agent_queue` | `mcp.thegraph.io` / `tools` |
+| `agent_approve` | `agent_approve` | `mcp.thegraph.io` / `tools` |
+| `graphman_safe` | `graphman_safe` | `mcp.thegraph.io` / `tools` |
+| `graphman_destructive` | `graphman_destructive` | `mcp.thegraph.io` / `tools` |
+
+The shipped tiers (`k8s/clusterrole-mcp-roles.yaml`) mirror the static levels:
+`mcp-readonly` ≈ `read_only`, `mcp-operator` ≈ `read_write`, `mcp-admin` ≈
+`full` (the only tier with `agent_approve` + `graphman_destructive`).
+
+### The deny-list is an in-app invariant in both modes
+
+Kubernetes RBAC is **allow-only** — there is no "deny" rule, so binding a subject
+to a higher tier purely adds verbs. The deny-list (`ACCESS_OVERRIDES_DENY`)
+therefore remains the **only** "deny" mechanism, and it is enforced in-app as an
+invariant *before* the authorizer runs — independent of `MCP_AUTHZ`. A tool on
+the deny-list is unreachable no matter which ClusterRole a caller holds.
+
 ## Programmatic registration
 
 The wrappers in `src/server/register.ts` (`registerIndexerTool`, `registerIndexerResource`, `registerIndexerPrompt`) are the only path through which tools are added. They:
