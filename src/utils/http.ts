@@ -162,7 +162,9 @@ export async function httpGetText(url: string, opts: HttpOptions): Promise<strin
   }
   try {
     if (!res.ok) {
-      throw new Error(`[${ref}] HTTP ${res.status} ${res.statusText}`.trimEnd());
+      // Only the numeric status — `res.statusText` is the provider-controlled
+      // HTTP reason phrase and a hostile upstream could plant a secret there.
+      throw new Error(`[${ref}] HTTP ${res.status}`);
     }
     return await readCapped(res, opts.maxBytes, ref);
   } finally {
@@ -200,7 +202,9 @@ export async function httpPostJson(
   let text: string;
   try {
     if (!res.ok) {
-      throw new Error(`[${ref}] HTTP ${res.status} ${res.statusText}`.trimEnd());
+      // Only the numeric status — `res.statusText` is the provider-controlled
+      // HTTP reason phrase and a hostile upstream could plant a secret there.
+      throw new Error(`[${ref}] HTTP ${res.status}`);
     }
     text = await readCapped(res, opts.maxBytes, ref);
   } finally {
