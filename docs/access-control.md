@@ -21,13 +21,15 @@ A tool's class is declared at registration via `registerIndexerTool({ ..., permi
 
 | Class | Gates |
 | --- | --- |
-| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `graphman_check_blocks`. |
+| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `graphman_check_blocks`, `get_subgraph_manifest`, `rpc_call`. |
 | `agent_queue` | Adds entries to the indexer-agent action queue: `queue_allocate`, `queue_unallocate`, `queue_reallocate`, `set_indexing_rule`, `set_cost_model`. Queued actions still require approval before execution. |
 | `agent_approve` | Approves or cancels queued agent actions: `approve_actions`, `cancel_actions`. Granted only at `full` because approval triggers on-chain transactions. |
 | `graphman_safe` | Non-destructive graphman writes: `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`, `graphman_reassign_deployment`. |
 | `graphman_destructive` | Destructive graphman ops: `graphman_rewind_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache`. Most also require an explicit `confirm: true` arg. |
 
 The exact class for any tool is in [tool-catalog.md](tool-catalog.md) under the **Permission** field. Tool descriptions are auto-annotated with `[Requires permission: <class>]` so clients can surface it.
+
+> **Note on `rpc_call`.** The RPC passthrough is `read`-classed because it is read-only *by construction*: a fixed in-code method allowlist permits only read methods, and state-changing methods (`eth_sendRawTransaction`, `eth_sendTransaction`, `personal_*`, `eth_sign*`, …) are refused before the call is dispatched. The server holds no signer, so no transaction can be submitted regardless. The agent selects a chain **alias** (never a URL), and third-party (`remote`) endpoints can be disabled entirely with `RPC_ALLOW_REMOTE=false` — see [config-reference.md](config-reference.md).
 
 ## Overrides
 

@@ -438,6 +438,39 @@ Source: `src/tools/composite-tools.ts`. Wrap the Stage 3 workflow services (`All
 
 ---
 
+## Subgraph manifest (1 tool)
+
+Source: `src/tools/manifest-tools.ts`. Fetches the subgraph manifest from IPFS (the network subgraph does not store manifest content; the deployment ID *is* the manifest's IPFS CID).
+
+### `get_subgraph_manifest`
+
+- **Permission:** `read`
+- **Description:** Fetch a subgraph deployment's manifest from IPFS by deployment ID (accepts `Qm…` or `0x…bytes32` form), returning the parsed manifest plus the raw text.
+- **Args:**
+  - `deployment_id` (string, required, min length 1) — `Qm…` CIDv0 or `0x`-prefixed 32-byte hex; normalized to the IPFS CID via `src/utils/ipfs.ts`.
+- **Returns:** JSON `{ deployment_id, manifest, manifest_raw, parse_error? }`. `manifest` is the YAML parsed to JSON; on a parse failure it is `null`, `parse_error` is set, and `manifest_raw` still carries the bytes.
+- **Config:** `IPFS_GATEWAY_URL` (gateway to fetch from), `IPFS_MAX_BYTES` (response cap). See [config-reference.md](config-reference.md).
+
+---
+
+## RPC passthrough (1 tool)
+
+Source: `src/tools/rpc-tools.ts`. A **read-only** JSON-RPC passthrough to operator-configured endpoints. Registered only when `RPC_ENDPOINTS` is non-empty; otherwise the tool is absent.
+
+### `rpc_call`
+
+- **Permission:** `read`
+- **Description:** Make a read-only JSON-RPC call to a configured chain. The method must be in a fixed read-only allowlist; state-changing methods (`eth_sendRawTransaction`, `eth_sendTransaction`, `personal_*`, `eth_sign*`, …) are refused. The agent selects a chain **alias** (never a URL) and a source (local / remote / auto).
+- **Args:**
+  - `chain` (string, required) — a configured chain alias (e.g. `arbitrum-one`); must match `^[a-z0-9][a-z0-9-]*$` and exist in `RPC_ENDPOINTS`.
+  - `method` (string, required) — must be in the allowlist: `eth_chainId`, `eth_blockNumber`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_call`, `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount`, `eth_getLogs`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_estimateGas`, `net_version`, `web3_clientVersion`.
+  - `params` (array, optional, default `[]`) — JSON-RPC params, passed through.
+  - `source` (`'local' | 'remote' | 'auto'`, optional, default `auto`) — `local` = the indexer's own node (trusted/private); `remote` = third-party/public (requires `RPC_ALLOW_REMOTE`); `auto` = prefer local, else remote.
+- **Returns:** JSON `{ chain, endpoint_kind, result }` or `{ chain, endpoint_kind, error }` (the JSON-RPC error relayed verbatim). The endpoint **URL is never returned** (it may embed API keys).
+- **Config:** `RPC_ENDPOINTS` (alias→{local,remote} map), `RPC_ALLOW_REMOTE`, `RPC_TIMEOUT_MS`, `RPC_MAX_BYTES`. See [config-reference.md](config-reference.md).
+
+---
+
 ## Resources (3)
 
 Source: `src/resources/*.ts`. Registered via `registerIndexerResource`.
