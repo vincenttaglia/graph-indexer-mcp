@@ -75,7 +75,11 @@ export function registerIndexerTool<TSchema extends ZodRawShape | undefined = un
     rawArgs: unknown,
     extra: ToolExtra,
   ): Promise<CallToolResult> => {
-    const check = checkAccess(def.name);
+    const ctx = {
+      identity: extra.authInfo ? { token: extra.authInfo.token } : null,
+      sessionId: extra.sessionId,
+    };
+    const check = await checkAccess(def.name, ctx);
     if (!check.allowed) {
       return {
         content: [

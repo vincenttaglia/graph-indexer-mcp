@@ -1,4 +1,9 @@
 import type { AccessLevel } from './config.js';
+import {
+  StaticAuthorizer,
+  type Authorizer,
+  type RequestContext,
+} from './auth/authorizer.js';
 
 export type PermissionClass =
   | 'read'
@@ -6,24 +11,6 @@ export type PermissionClass =
   | 'agent_approve'
   | 'graphman_safe'
   | 'graphman_destructive';
-
-const LEVEL_CLASSES: Record<AccessLevel, ReadonlySet<PermissionClass>> = {
-  read_only: new Set(['read']),
-  read_write: new Set(['read', 'agent_queue', 'graphman_safe']),
-  read_write_destructive: new Set([
-    'read',
-    'agent_queue',
-    'graphman_safe',
-    'graphman_destructive',
-  ]),
-  full: new Set([
-    'read',
-    'agent_queue',
-    'agent_approve',
-    'graphman_safe',
-    'graphman_destructive',
-  ]),
-};
 
 export interface AccessControlConfig {
   level: AccessLevel;
@@ -37,11 +24,34 @@ export interface AccessCheckResult {
   permissionClass?: PermissionClass;
 }
 
-const toolPermissions = new Map<string, PermissionClass>();
-let activeConfig: AccessControlConfig | null = null;
+interface AccessControlState {
+  authorizer: Authorizer | null;
+  hardDeny: ReadonlySet<string>;
+}
 
+const toolPermissions = new Map<string, PermissionClass>();
+const state: AccessControlState = { authorizer: null, hardDeny: new Set() };
+
+/**
+ * Backward-compatible init for the static (level-based) path. Constructs a
+ * `StaticAuthorizer` from `{ level, allow }` and stores `deny` as the
+ * always-enforced `hardDeny` invariant.
+ */
 export function initAccessControl(config: AccessControlConfig): void {
-  activeConfig = config;
+  state.authorizer = new StaticAuthorizer(config.level, config.allow);
+  state.hardDeny = config.deny;
+}
+
+/**
+ * Pluggable init: install any `Authorizer` as the grant strategy while keeping
+ * the `deny` list as an always-enforced invariant.
+ */
+export function initAccessControlWith(
+  authorizer: Authorizer,
+  opts: { deny: ReadonlySet<string> },
+): void {
+  state.authorizer = authorizer;
+  state.hardDeny = opts.deny;
 }
 
 export function registerToolPermission(
@@ -69,18 +79,21 @@ export function listRegisteredTools(): ReadonlyMap<string, PermissionClass> {
  * Decide whether a tool call is allowed.
  *
  * Resolution order (default-deny):
- *   1. `deny` override → always deny.
- *   2. Tool must have a registered permission class → otherwise deny (unknown tools cannot be allowed by override).
- *   3. `allow` override → grant even if the level wouldn't.
- *   4. Permission class is in the active level's class set → allow.
- *   5. Otherwise → deny.
+ *   1. `deny` override → always deny.            (invariant)
+ *   2. Tool must have a registered permission class → otherwise deny
+ *      (unknown tools cannot be granted by any authorizer).   (invariant)
+ *   3. Grant: delegate to the active authorizer. For the static authorizer
+ *      this is `allow.has(tool) || level grants the class`.
  */
-export function checkAccess(toolName: string): AccessCheckResult {
-  if (!activeConfig) {
+export async function checkAccess(
+  toolName: string,
+  ctx?: RequestContext,
+): Promise<AccessCheckResult> {
+  if (!state.authorizer) {
     throw new Error('Access control not initialized — call initAccessControl() first.');
   }
 
-  if (activeConfig.deny.has(toolName)) {
+  if (state.hardDeny.has(toolName)) {
     return {
       allowed: false,
       reason: `Tool "${toolName}" is explicitly denied by access_overrides.deny.`,
@@ -96,35 +109,43 @@ export function checkAccess(toolName: string): AccessCheckResult {
     };
   }
 
-  if (activeConfig.allow.has(toolName)) {
-    return { allowed: true, permissionClass };
-  }
-
-  if (LEVEL_CLASSES[activeConfig.level].has(permissionClass)) {
+  const granted = await state.authorizer.authorize(
+    ctx ?? { identity: null },
+    permissionClass,
+    toolName,
+  );
+  if (granted) {
     return { allowed: true, permissionClass };
   }
 
   return {
     allowed: false,
-    reason: `Tool "${toolName}" requires permission class "${permissionClass}". Current access_level "${activeConfig.level}" does not grant it. Raise access_level or add this tool to access_overrides.allow.`,
+    reason: `Tool "${toolName}" requires permission class "${permissionClass}", which the active authorizer does not grant for this caller. Raise access_level or add this tool to access_overrides.allow.`,
     permissionClass,
   };
 }
 
 /**
- * Validate that every name in allow/deny overrides corresponds to a registered tool.
- * Returns a list of unknown names; callers can warn or fail.
+ * Validate that every name in allow/deny overrides corresponds to a registered
+ * tool. Returns a list of unknown names; callers can warn or fail.
+ *
+ * The deny-list is a wrapper-level invariant and is always validated. The
+ * allow-list lives inside the authorizer; it can only be inspected when the
+ * active authorizer is a `StaticAuthorizer`. For other authorizers there is no
+ * static allow-list to validate, so `unknownAllow` is empty.
  */
 export function validateOverrides(): { unknownAllow: string[]; unknownDeny: string[] } {
-  if (!activeConfig) {
+  if (!state.authorizer) {
     throw new Error('Access control not initialized — call initAccessControl() first.');
   }
   const unknownAllow: string[] = [];
-  for (const name of activeConfig.allow) {
-    if (!toolPermissions.has(name)) unknownAllow.push(name);
+  if (state.authorizer instanceof StaticAuthorizer) {
+    for (const name of state.authorizer.getAllow()) {
+      if (!toolPermissions.has(name)) unknownAllow.push(name);
+    }
   }
   const unknownDeny: string[] = [];
-  for (const name of activeConfig.deny) {
+  for (const name of state.hardDeny) {
     if (!toolPermissions.has(name)) unknownDeny.push(name);
   }
   return { unknownAllow, unknownDeny };
@@ -132,5 +153,6 @@ export function validateOverrides(): { unknownAllow: string[]; unknownDeny: stri
 
 export function resetForTests(): void {
   toolPermissions.clear();
-  activeConfig = null;
+  state.authorizer = null;
+  state.hardDeny = new Set();
 }

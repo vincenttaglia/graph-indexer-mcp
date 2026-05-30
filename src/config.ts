@@ -45,6 +45,26 @@ export const configSchema = z.object({
   accessLevel: accessLevelSchema.default('read_write'),
   accessOverrides: accessOverridesSchema.default({ allow: [], deny: [] }),
 
+  /**
+   * Transport substrate. `stdio` (default) is the existing single-client path;
+   * `http` hosts the StreamableHTTP transport for network-reachable, per-request
+   * authenticated deployments. Orthogonal to `authz`.
+   */
+  transport: z.enum(['stdio', 'http']).default('stdio'),
+
+  /**
+   * Authorization strategy. `static` (default) is the level-based model;
+   * `k8s-rbac` delegates per-tool grants to Kubernetes RBAC and requires
+   * `transport === 'http'` (identity only exists on http).
+   */
+  authz: z.enum(['static', 'k8s-rbac']).default('static'),
+
+  httpPort: z.coerce.number().int().positive().default(8080),
+  httpHost: z.string().default('0.0.0.0'),
+
+  /** TokenReview audience for projected service-account tokens (k8s-rbac). */
+  k8sApiAudience: z.string().optional(),
+
   maxAllocations: z.coerce.number().int().positive().default(15),
   maxAllocationPct: z.coerce.number().min(0).max(1).default(0.25),
   riskyDeploymentCapPct: z.coerce.number().min(0).max(1).default(0.05),
@@ -92,6 +112,10 @@ export const configSchema = z.object({
   blacklist: z.array(z.string()).default([]),
   frozenlist: z.array(z.string()).default([]),
   riskyDeployments: z.array(z.string()).default([]),
+}).refine((c) => !(c.authz === 'k8s-rbac' && c.transport !== 'http'), {
+  message:
+    "authz='k8s-rbac' requires transport='http' (identity is only available on the http transport). Set MCP_TRANSPORT=http or use MCP_AUTHZ=static.",
+  path: ['authz'],
 });
 
 export type Config = z.infer<typeof configSchema>;
@@ -125,6 +149,11 @@ function envToConfigInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
       allow: csv(env.ACCESS_OVERRIDES_ALLOW),
       deny: csv(env.ACCESS_OVERRIDES_DENY),
     },
+    transport: env.MCP_TRANSPORT,
+    authz: env.MCP_AUTHZ,
+    httpPort: env.MCP_HTTP_PORT,
+    httpHost: env.MCP_HTTP_HOST,
+    k8sApiAudience: env.K8S_API_AUDIENCE,
     maxAllocations: env.MAX_ALLOCATIONS,
     maxAllocationPct: env.MAX_ALLOCATION_PCT,
     riskyDeploymentCapPct: env.RISKY_DEPLOYMENT_CAP_PCT,

@@ -2,7 +2,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
-import { initAccessControl, validateOverrides } from './access-control.js';
+import { initAccessControlWith, validateOverrides } from './access-control.js';
+import { StaticAuthorizer, type Authorizer } from './auth/authorizer.js';
 import { loadConfig } from './config.js';
 import { createGraphqlClient } from './utils/graphql-client.js';
 import type { KubectlContext } from './utils/kubectl.js';
@@ -29,11 +30,20 @@ import { registerPrompts } from './prompts/index.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  initAccessControl({
-    level: config.accessLevel,
-    allow: new Set(config.accessOverrides.allow),
+
+  // Build the grant strategy. Static is the default level-based model; k8s-rbac
+  // is lazily imported so the k8s code path only loads when selected.
+  const authorizer: Authorizer =
+    config.authz === 'k8s-rbac'
+      ? await (await import('./auth/k8s-rbac.js')).makeK8sRbacAuthorizer(config)
+      : new StaticAuthorizer(
+          config.accessLevel,
+          new Set(config.accessOverrides.allow),
+        );
+  initAccessControlWith(authorizer, {
     deny: new Set(config.accessOverrides.deny),
   });
+  await authorizer.init?.();
 
   const server = new McpServer(
     {
@@ -140,8 +150,17 @@ async function main(): Promise<void> {
   // Graceful shutdown: close the pg pool so node can exit cleanly.
   // ---------------------------------------------------------------------------
 
+  // Holds the http transport handle (if any) so shutdown can close it.
+  let httpHandle: { close(): Promise<void> } | null = null;
+
   const shutdown = async (signal: string): Promise<void> => {
     process.stderr.write(`[mcp] received ${signal}, shutting down\n`);
+    try {
+      await httpHandle?.close();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[mcp] http close error: ${detail}\n`);
+    }
     try {
       await postgresClient?.close();
     } catch (err) {
@@ -153,10 +172,15 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  if (config.transport === 'http') {
+    const { startHttpTransport } = await import('./transport/http.js');
+    httpHandle = await startHttpTransport(server, config);
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  }
   process.stderr.write(
-    `[mcp] graph-indexer-mcp started (access_level=${config.accessLevel}, indexer=${config.indexerAddress})\n`,
+    `[mcp] graph-indexer-mcp started (transport=${config.transport}, authz=${config.authz}, access_level=${config.accessLevel}, indexer=${config.indexerAddress})\n`,
   );
 }
 

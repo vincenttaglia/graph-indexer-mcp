@@ -14,7 +14,7 @@ describe('access-control', () => {
   });
 
   describe('level → permission-class mapping', () => {
-    it('read_only allows only "read"', () => {
+    it('read_only allows only "read"', async () => {
       initAccessControl({
         level: 'read_only',
         allow: new Set(),
@@ -26,14 +26,14 @@ describe('access-control', () => {
       registerToolPermission('s1', 'graphman_safe');
       registerToolPermission('d1', 'graphman_destructive');
 
-      assert.equal(checkAccess('r1').allowed, true);
-      assert.equal(checkAccess('q1').allowed, false);
-      assert.equal(checkAccess('a1').allowed, false);
-      assert.equal(checkAccess('s1').allowed, false);
-      assert.equal(checkAccess('d1').allowed, false);
+      assert.equal((await checkAccess('r1')).allowed, true);
+      assert.equal((await checkAccess('q1')).allowed, false);
+      assert.equal((await checkAccess('a1')).allowed, false);
+      assert.equal((await checkAccess('s1')).allowed, false);
+      assert.equal((await checkAccess('d1')).allowed, false);
     });
 
-    it('read_write allows read + agent_queue + graphman_safe', () => {
+    it('read_write allows read + agent_queue + graphman_safe', async () => {
       initAccessControl({
         level: 'read_write',
         allow: new Set(),
@@ -45,14 +45,14 @@ describe('access-control', () => {
       registerToolPermission('s1', 'graphman_safe');
       registerToolPermission('d1', 'graphman_destructive');
 
-      assert.equal(checkAccess('r1').allowed, true);
-      assert.equal(checkAccess('q1').allowed, true);
-      assert.equal(checkAccess('a1').allowed, false);
-      assert.equal(checkAccess('s1').allowed, true);
-      assert.equal(checkAccess('d1').allowed, false);
+      assert.equal((await checkAccess('r1')).allowed, true);
+      assert.equal((await checkAccess('q1')).allowed, true);
+      assert.equal((await checkAccess('a1')).allowed, false);
+      assert.equal((await checkAccess('s1')).allowed, true);
+      assert.equal((await checkAccess('d1')).allowed, false);
     });
 
-    it('read_write_destructive adds graphman_destructive', () => {
+    it('read_write_destructive adds graphman_destructive', async () => {
       initAccessControl({
         level: 'read_write_destructive',
         allow: new Set(),
@@ -64,14 +64,14 @@ describe('access-control', () => {
       registerToolPermission('s1', 'graphman_safe');
       registerToolPermission('d1', 'graphman_destructive');
 
-      assert.equal(checkAccess('r1').allowed, true);
-      assert.equal(checkAccess('q1').allowed, true);
-      assert.equal(checkAccess('a1').allowed, false);
-      assert.equal(checkAccess('s1').allowed, true);
-      assert.equal(checkAccess('d1').allowed, true);
+      assert.equal((await checkAccess('r1')).allowed, true);
+      assert.equal((await checkAccess('q1')).allowed, true);
+      assert.equal((await checkAccess('a1')).allowed, false);
+      assert.equal((await checkAccess('s1')).allowed, true);
+      assert.equal((await checkAccess('d1')).allowed, true);
     });
 
-    it('full allows everything (incl. agent_approve)', () => {
+    it('full allows everything (incl. agent_approve)', async () => {
       initAccessControl({
         level: 'full',
         allow: new Set(),
@@ -83,77 +83,79 @@ describe('access-control', () => {
       registerToolPermission('s1', 'graphman_safe');
       registerToolPermission('d1', 'graphman_destructive');
 
-      assert.equal(checkAccess('r1').allowed, true);
-      assert.equal(checkAccess('q1').allowed, true);
-      assert.equal(checkAccess('a1').allowed, true);
-      assert.equal(checkAccess('s1').allowed, true);
-      assert.equal(checkAccess('d1').allowed, true);
+      assert.equal((await checkAccess('r1')).allowed, true);
+      assert.equal((await checkAccess('q1')).allowed, true);
+      assert.equal((await checkAccess('a1')).allowed, true);
+      assert.equal((await checkAccess('s1')).allowed, true);
+      assert.equal((await checkAccess('d1')).allowed, true);
     });
   });
 
   describe('resolution order', () => {
-    it('deny override beats permClass + allow + level', () => {
+    it('deny override beats permClass + allow + level', async () => {
       initAccessControl({
         level: 'full',
         allow: new Set(['tool_x']),
         deny: new Set(['tool_x']),
       });
       registerToolPermission('tool_x', 'read');
-      const res = checkAccess('tool_x');
+      const res = await checkAccess('tool_x');
       assert.equal(res.allowed, false);
       assert.ok(res.reason?.includes('explicitly denied'));
     });
 
-    it('unregistered tools are denied regardless of allow override', () => {
+    it('unregistered tools are denied regardless of allow override', async () => {
       initAccessControl({
         level: 'full',
         allow: new Set(['unknown_tool']),
         deny: new Set(),
       });
-      const res = checkAccess('unknown_tool');
+      const res = await checkAccess('unknown_tool');
       assert.equal(res.allowed, false);
       assert.ok(res.reason?.includes('no registered permission class'));
       assert.equal(res.permissionClass, undefined);
     });
 
-    it('allow override grants access when level would forbid', () => {
+    it('allow override grants access when level would forbid', async () => {
       initAccessControl({
         level: 'read_only',
         allow: new Set(['destructive_tool']),
         deny: new Set(),
       });
       registerToolPermission('destructive_tool', 'graphman_destructive');
-      const res = checkAccess('destructive_tool');
+      const res = await checkAccess('destructive_tool');
       assert.equal(res.allowed, true);
       assert.equal(res.permissionClass, 'graphman_destructive');
     });
 
-    it('level grants access without allow override when class is in scope', () => {
+    it('level grants access without allow override when class is in scope', async () => {
       initAccessControl({
         level: 'read_only',
         allow: new Set(),
         deny: new Set(),
       });
       registerToolPermission('read_tool', 'read');
-      const res = checkAccess('read_tool');
+      const res = await checkAccess('read_tool');
       assert.equal(res.allowed, true);
       assert.equal(res.permissionClass, 'read');
     });
 
-    it('level denies when class is out of scope and no allow override', () => {
+    it('level denies when class is out of scope and no allow override', async () => {
       initAccessControl({
         level: 'read_only',
         allow: new Set(),
         deny: new Set(),
       });
       registerToolPermission('queue_tool', 'agent_queue');
-      const res = checkAccess('queue_tool');
+      const res = await checkAccess('queue_tool');
       assert.equal(res.allowed, false);
       assert.ok(res.reason?.includes('agent_queue'));
-      assert.ok(res.reason?.includes('read_only'));
+      // The grant step now lives in the authorizer; the wrapper's deny reason
+      // no longer names the level, only the ungranted permission class.
+      assert.ok(res.reason?.includes('does not grant'));
     });
 
-    it('tool name lookup is case-sensitive (whitespace does not match)', () => {
+    it('tool name lookup is case-sensitive (whitespace does not match)', async () => {
       initAccessControl({
         level: 'full',
         allow: new Set(),
@@ -161,7 +163,7 @@ describe('access-control', () => {
       });
       registerToolPermission('exact_name', 'read');
       // A lookup with trailing whitespace is NOT the same registered tool.
-      const res = checkAccess('exact_name ');
+      const res = await checkAccess('exact_name ');
       assert.equal(res.allowed, false);
       assert.ok(res.reason?.includes('no registered permission class'));
     });
@@ -181,8 +183,9 @@ describe('access-control', () => {
     });
   });
 
-  it('checkAccess throws when not initialized', () => {
-    // resetForTests was called by beforeEach hook above.
-    assert.throws(() => checkAccess('anything'), /not initialized/);
+  it('checkAccess throws when not initialized', async () => {
+    // resetForTests was called by beforeEach hook above. checkAccess is async,
+    // so the "not initialized" guard surfaces as a rejected promise.
+    await assert.rejects(() => checkAccess('anything'), /not initialized/);
   });
 });
