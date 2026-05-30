@@ -1,0 +1,35 @@
+# =============================================================================
+# Binds the graph-indexer-mcp ServiceAccount to the built-in
+# `system:auth-delegator` ClusterRole.
+#
+# REQUIRED ONLY for MCP_AUTHZ=k8s-rbac. The static (default) authorizer does
+# not contact the apiserver and does not need this binding.
+#
+# `system:auth-delegator` grants `create` on:
+#   - tokenreviews.authentication.k8s.io   (validate caller bearer tokens)
+#   - subjectaccessreviews.authorization.k8s.io  (ask "may this subject do X?")
+#
+# The k8s-rbac authorizer uses TokenReview to resolve a caller's identity from
+# their bearer token, then SubjectAccessReview to ask the apiserver whether that
+# identity is allowed the requested permission class (see
+# clusterrole-mcp-roles.yaml). Without this binding both calls return 403 and
+# the authorizer fails closed (every tool call is denied).
+#
+# This is a ClusterRoleBinding (not namespaced) because TokenReview and
+# SubjectAccessReview are cluster-scoped, non-namespaced subresources.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: graph-indexer-mcp-auth-delegator
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+    app.kubernetes.io/component: mcp-server
+subjects:
+  - kind: ServiceAccount
+    name: graph-indexer-mcp
+    namespace: graph-indexer-mcp
+roleRef:
+  kind: ClusterRole
+  name: system:auth-delegator
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,109 @@
+# =============================================================================
+# Synthetic-resource ClusterRoles for MCP_AUTHZ=k8s-rbac.
+#
+# These roles do NOT grant access to any real Kubernetes object. They exist so
+# the MCP server can ask the apiserver, via SubjectAccessReview, "is this caller
+# allowed permission class <X>?" — phrased as a SAR against the synthetic
+# resource `tools.mcp.thegraph.io` with the permission class as the `verb`.
+#
+# The verbs below map 1:1 to the MCP server's permission classes:
+#   read                 — all read-only tools (get_*, *_info, run_* composites)
+#   agent_queue          — queue indexer-agent actions (queue_allocate, ...)
+#   agent_approve        — approve/cancel queued actions (on-chain GRT) — rare
+#   graphman_safe        — non-destructive graphman writes (pause/resume/...)
+#   graphman_destructive — destructive graphman ops (rewind/drop/...)
+# See docs/access-control.md for the full class -> tool mapping.
+#
+# The three tiers mirror the static ACCESS_LEVEL ladder:
+#   mcp-readonly  ~ read_only
+#   mcp-operator  ~ read_write
+#   mcp-admin     ~ full  (the only tier with agent_approve + graphman_destructive)
+#
+# IMPORTANT: Kubernetes RBAC is ALLOW-ONLY — there is no "deny" rule. Binding a
+# subject to a higher tier purely adds verbs. The server's deny-list
+# (ACCESS_OVERRIDES_DENY) remains the ONLY "deny" mechanism and is enforced
+# in-app as an invariant, BEFORE the authorizer runs, in EVERY authz mode. A
+# tool on the deny-list is unreachable no matter which ClusterRole a caller
+# holds.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-readonly
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+    app.kubernetes.io/component: mcp-authz
+rules:
+  - apiGroups: ["mcp.thegraph.io"]
+    resources: ["tools"]
+    verbs: ["read"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-operator
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+    app.kubernetes.io/component: mcp-authz
+rules:
+  - apiGroups: ["mcp.thegraph.io"]
+    resources: ["tools"]
+    # read_write equivalent: may queue agent actions and run safe graphman
+    # writes, but may NOT approve queued actions or run destructive graphman ops.
+    verbs: ["read", "agent_queue", "graphman_safe"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-admin
+  labels:
+    app.kubernetes.io/name: graph-indexer-mcp
+    app.kubernetes.io/component: mcp-authz
+rules:
+  - apiGroups: ["mcp.thegraph.io"]
+    resources: ["tools"]
+    # full equivalent: includes agent_approve (commits GRT on-chain) and
+    # graphman_destructive. Bind sparingly — to a human break-glass identity,
+    # not to a long-lived machine client.
+    verbs:
+      - "read"
+      - "agent_queue"
+      - "agent_approve"
+      - "graphman_safe"
+      - "graphman_destructive"
+# =============================================================================
+# Example bindings (commented out — operators uncomment + edit subjects).
+#
+# Bind a subject to a tier so the server's SubjectAccessReview returns allowed
+# for that tier's verbs. Subjects can be:
+#   - a (projected) ServiceAccount token  -> machine clients
+#   - an OIDC user or group               -> human operators via the cluster IdP
+#
+# A ClusterRoleBinding grants the tier cluster-wide; a namespaced RoleBinding is
+# pointless here because the synthetic resource is virtual (there is nothing to
+# scope to a namespace), so use ClusterRoleBinding.
+# =============================================================================
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata:
+#   name: mcp-operator-team
+#   labels:
+#     app.kubernetes.io/name: graph-indexer-mcp
+# subjects:
+#   # An OIDC group from the cluster identity provider (human operators):
+#   - kind: Group
+#     name: "oidc:indexer-operators"
+#     apiGroup: rbac.authorization.k8s.io
+#   # ...or a single OIDC user:
+#   # - kind: User
+#   #   name: "oidc:alice@example.com"
+#   #   apiGroup: rbac.authorization.k8s.io
+#   # ...or a machine client's ServiceAccount (projected SA token):
+#   # - kind: ServiceAccount
+#   #   name: ci-allocator
+#   #   namespace: automation
+# roleRef:
+#   kind: ClusterRole
+#   name: mcp-operator
+#   apiGroup: rbac.authorization.k8s.io
