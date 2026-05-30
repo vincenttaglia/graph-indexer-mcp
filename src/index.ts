@@ -15,6 +15,8 @@ import { createGraphNodeClient } from './clients/graph-node.js';
 import { createPostgresClient } from './clients/postgres.js';
 import { createIndexerAgentClient } from './clients/indexer-agent.js';
 import { createGraphmanClient } from './clients/graphman.js';
+import { createIpfsClient } from './clients/ipfs.js';
+import { createRpcClient } from './clients/rpc.js';
 
 import { registerNetworkTools } from './tools/network-tools.js';
 import { registerEboTools } from './tools/ebo-tools.js';
@@ -24,6 +26,8 @@ import { registerPostgresTools } from './tools/postgres-tools.js';
 import { registerAgentTools } from './tools/agent-tools.js';
 import { registerGraphmanTools } from './tools/graphman-tools.js';
 import { registerCompositeTools } from './tools/composite-tools.js';
+import { registerManifestTools } from './tools/manifest-tools.js';
+import { registerRpcTools } from './tools/rpc-tools.js';
 
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
@@ -109,6 +113,27 @@ async function main(): Promise<void> {
   registerPostgresTools(server, { client: postgresClient });
   registerAgentTools(server, { client: agentClient, networkClient, config });
   registerGraphmanTools(server, { client: graphmanClient });
+
+  // Manifest tool: always registers (IPFS gateway has a default).
+  const ipfsClient = createIpfsClient({
+    gatewayUrl: config.ipfsGatewayUrl,
+    maxBytes: config.ipfsMaxBytes,
+  });
+  registerManifestTools(server, { client: ipfsClient });
+
+  // RPC passthrough: registers ONLY when at least one chain endpoint is
+  // configured, so the tool never appears unconfigured. Off-by-default.
+  if (Object.keys(config.rpcEndpoints).length > 0) {
+    const rpcClient = createRpcClient({
+      endpoints: config.rpcEndpoints,
+      allowRemote: config.rpcAllowRemote,
+      timeoutMs: config.rpcTimeoutMs,
+      maxBytes: config.rpcMaxBytes,
+    });
+    registerRpcTools(server, { client: rpcClient, config });
+  } else {
+    process.stderr.write('[mcp] rpc_call disabled (no RPC_ENDPOINTS configured)\n');
+  }
 
   // Stage 3: composite tools wrapping the three workflow services.
   registerCompositeTools(server, {

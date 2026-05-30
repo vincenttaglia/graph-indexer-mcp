@@ -104,6 +104,64 @@ Comma-separated lists trim whitespace and drop empty entries (`csv()` helper in 
 
 ---
 
+## IPFS (manifest tool)
+
+Backs the `get_subgraph_manifest` tool (permission class: `read`), which fetches a deployment's manifest from IPFS (the deployment ID **is** the manifest's CID) and returns it parsed (YAML→JSON) plus raw.
+
+### `IPFS_GATEWAY_URL`
+
+- **Type:** URL
+- **Default:** `https://ipfs.network.thegraph.com`
+- **Example:** `http://localhost:5001` (a local IPFS node's gateway)
+- **Purpose:** IPFS gateway used to `GET {IPFS_GATEWAY_URL}/ipfs/{cid}`. The default points at The Graph's gateway; operators running a local IPFS node should point this at it for guaranteed-pinned, low-latency reads. Credentials embedded in this URL are never echoed in tool output or error messages.
+
+### `IPFS_MAX_BYTES`
+
+- **Type:** integer (coerced from string), positive
+- **Default:** `5000000` (5 MB)
+- **Purpose:** Hard cap on a fetched manifest's size. The response body is streamed and byte-counted; an over-cap read is aborted and fails closed (the tool returns an error rather than buffering unbounded data).
+
+---
+
+## RPC passthrough (read-only)
+
+Backs the `rpc_call` tool (permission class: `read`) — a read-only JSON-RPC passthrough so the agent can query chain state across the chains the indexer serves. **The tool is omitted entirely when `RPC_ENDPOINTS` is empty (the default), so it never appears unconfigured.** Only a fixed allowlist of read methods is permitted; state-changing methods are hard-refused in code, and the server holds no signer. See [access-control.md](access-control.md).
+
+### `RPC_ENDPOINTS`
+
+- **Type:** JSON object string — `chain alias → { local?, remote? }` (each entry needs at least one of `local`/`remote`)
+- **Default:** `{}` (RPC tool not registered)
+- **Example:**
+  ```
+  RPC_ENDPOINTS={"arbitrum-one":{"local":"http://arb-node:8545","remote":"https://arb1.arbitrum.io/rpc"},"mainnet":{"remote":"https://eth.example/rpc"}}
+  ```
+- **Purpose:** Operator-supplied map of chain aliases to endpoint URLs. The agent selects a chain **alias** (never a raw URL — this is the SSRF guard) and may prefer:
+  - **`local`** — the indexer's own node: trusted, private, fast.
+  - **`remote`** — a third-party/public endpoint: may rate-limit, log queries, or require an API key.
+
+  Tool results label which kind was used (`local`/`remote`); the raw URL is **never** returned or logged (it may embed an API key). A malformed JSON value fails boot with a clear `RPC_ENDPOINTS must be valid JSON: <detail>` error.
+
+### `RPC_ALLOW_REMOTE`
+
+- **Type:** boolean-from-env (see note)
+- **Default:** `true`
+- **Purpose:** Kill-switch for third-party (`remote`) RPC egress. When `false`, any `rpc_call` resolving to a `remote` endpoint is refused, fully disabling third-party egress (privacy-sensitive setups may want this).
+- **Note:** Parsed robustly — `false`, `0`, `no`, `off` (case-insensitive) → `false`; unset or any other value → `true`. (A plain `Boolean(string)` coercion would wrongly turn `"false"` into `true`.)
+
+### `RPC_TIMEOUT_MS`
+
+- **Type:** integer (coerced from string), positive
+- **Default:** `10000`
+- **Purpose:** Per-request timeout for an RPC call. Bounds resource use (e.g. a wide `eth_getLogs` range).
+
+### `RPC_MAX_BYTES`
+
+- **Type:** integer (coerced from string), positive
+- **Default:** `2000000` (2 MB)
+- **Purpose:** Hard cap on an RPC response body's size. Streamed and byte-counted; an over-cap response is aborted and fails closed.
+
+---
+
 ## Access control
 
 See [access-control.md](access-control.md) for semantics.
