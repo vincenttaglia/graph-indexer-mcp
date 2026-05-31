@@ -308,9 +308,29 @@ export function fakeGraphmanClient(opts: FakeGraphmanClientOpts = {}): GraphmanC
     async getExecutionStatus(id) {
       return { id, state: 'SUCCEEDED' };
     },
-    // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs
-    // remote from graph-node). The 9 CLI methods are no longer on GraphmanClient;
-    // restore their stubs here when reimplemented against the graphman GraphQL API. =====
+    // ---- deployment mutations ----
+    async rewindDeployment(_id, _args) {
+      return { executionId: 'fake-rewind-exec-id' };
+    },
+    async dropDeployment(_id, _all) {
+      return { deletedLocators: ['sgd1'] };
+    },
+    async reassignDeployment(_id, _node) {
+      return { success: true };
+    },
+    async unassignDeployment(_id) {
+      return ack;
+    },
+    // ---- chain mutations ----
+    async checkBlocks(_args) {
+      return { kind: 'result', result: { diverged: 0, blocks: [] } };
+    },
+    async truncateChainCache(_chain) {
+      return ack;
+    },
+    async clearCallCache(_args) {
+      return { kind: 'empty', success: true };
+    },
   };
 }
 

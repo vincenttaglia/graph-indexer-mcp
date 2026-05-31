@@ -1,11 +1,8 @@
 /**
- * Type definitions for the dual-mode graphman client. Field names mirror
- * the graphman GraphQL schema's `deployment.info` shape where possible;
- * fields we're not yet sure of are marked optional so the client can return
- * partial data without misrepresenting state.
- *
- * TODO: verify against live graphman schema — the GraphQL surface is still
- * young and the exact response shape may differ across graph-node versions.
+ * Type definitions for the graphman GraphQL client. Field names mirror the
+ * graphman GraphQL schema (graph-node `graphman-api-expand` branch); fields
+ * the API marks optional are optional here so the client can return partial
+ * data without misrepresenting state.
  */
 
 export interface DeploymentInfo {
@@ -36,18 +33,6 @@ export interface ExecutionStatus {
   error?: string;
 }
 
-/**
- * Raw result of a graphman CLI invocation. Returned by every CLI-fallback
- * method on GraphmanClient so handlers can choose how to present output.
- */
-export interface GraphmanCliResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  /** Full argv of the underlying graphman invocation, for logging/debugging. */
-  command: string[];
-}
-
 /** One stream (stdout or stderr) after size-capping for MCP transport. */
 export interface CappedStream {
   /** Possibly-truncated text (tail kept — errors typically appear at the end). */
@@ -55,3 +40,87 @@ export interface CappedStream {
   /** True if the original was longer than the cap and bytes were dropped. */
   truncated: boolean;
 }
+
+// =============================================================================
+// Mutation result shapes
+// =============================================================================
+
+/**
+ * Result of `deployment.reassign`, which returns a `ReassignResponse` union:
+ * `Ok { success }` or `CompletedWithWarnings { success, warnings }`. We flatten
+ * both into a single discriminated-by-presence result.
+ */
+export interface ReassignResult {
+  success: boolean;
+  /** Present only when the server completed the reassignment with warnings. */
+  warnings?: string[];
+}
+
+/**
+ * Result of `deployment.deleteDeployment` (our "drop"): the list of deployment
+ * locator strings that were deleted.
+ */
+export interface DropResult {
+  deletedLocators: string[];
+}
+
+/** Outcome kind for a single block checked by `chain.checkBlocks`. */
+export type CheckBlockOutcomeKind =
+  | 'Matched'
+  | 'Diverged'
+  | 'NotFound'
+  | 'DuplicatesDeleted'
+  | 'DuplicatesSkipped';
+
+/** A single block outcome returned by a synchronous `checkBlocks` call. */
+export interface CheckedBlock {
+  /** The block number that was checked, when known. */
+  number?: number;
+  /** The outcome of the check. */
+  outcome: CheckBlockOutcomeKind;
+  /** Block hashes involved in the outcome (e.g. conflicting duplicate hashes). */
+  hashes: string[];
+  /** Human-readable diff, present only when the block diverged. */
+  diff?: string;
+}
+
+/**
+ * The synchronous result of `chain.checkBlocks` (by-hash / by-number). The
+ * `diverged` count is the number of cache entries deleted because they
+ * diverged from the provider.
+ */
+export interface CheckBlocksResult {
+  diverged: number;
+  blocks: CheckedBlock[];
+}
+
+/**
+ * Discriminated result of `chain.checkBlocks`. by-hash / by-number return a
+ * synchronous `result`; by-range runs in the background and returns an
+ * `executionId`.
+ */
+export type CheckBlocksResponse =
+  | { kind: 'result'; result: CheckBlocksResult }
+  | { kind: 'execution'; executionId: string };
+
+/**
+ * Statistics returned by `chain.clearCallCache` in its stale-eviction
+ * (`ttlDays`) mode.
+ */
+export interface StaleCallCacheStats {
+  /** Effective TTL in days actually used for deletion. */
+  effectiveTtlDays: number;
+  /** Number of cache entries deleted from the call cache. */
+  cacheEntriesDeleted: number;
+  /** Number of contract entries deleted from the call meta. */
+  contractsDeleted: number;
+}
+
+/**
+ * Discriminated result of `chain.clearCallCache`. Range / removeEntireCache
+ * modes return `empty`; the stale-eviction (`ttlDays`) mode returns `stale`
+ * statistics.
+ */
+export type ClearCallCacheResponse =
+  | { kind: 'empty'; success: boolean }
+  | { kind: 'stale'; stats: StaleCallCacheStats };
