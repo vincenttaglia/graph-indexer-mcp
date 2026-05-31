@@ -3,11 +3,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { registerIndexerTool } from '../server/register.js';
-import type { GraphmanClient } from '../clients/graphman.js';
-// ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
-// TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
-// import type { CappedStream, GraphmanCliResult } from '../types/graphman.js';
-// ===== end disabled CLI imports =====
+import type {
+  CheckBlocksArgs,
+  ClearCallCacheArgs,
+  GraphmanClient,
+  RewindArgs,
+} from '../clients/graphman.js';
 
 export interface GraphmanToolDeps {
   client: GraphmanClient;
@@ -22,50 +23,6 @@ function asJsonResult(value: unknown): CallToolResult {
     content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
   };
 }
-
-// ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
-// TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
-//
-// /** Max bytes preserved per CLI stream in the MCP CallToolResult payload. */
-// const CLI_STREAM_CAP_BYTES = 32 * 1024;
-//
-// /**
-//  * Truncate a CLI stream to `max` bytes, preserving the TAIL (graphman errors
-//  * and exit summaries appear at the end of output, so keeping the head would
-//  * usually drop the most useful diagnostics).
-//  */
-// function capStream(s: string, max = CLI_STREAM_CAP_BYTES): CappedStream {
-//   if (s.length <= max) return { text: s, truncated: false };
-//   return { text: s.slice(-max), truncated: true };
-// }
-//
-// /**
-//  * Render a graphman CLI result. Non-zero exit codes are surfaced as MCP
-//  * tool errors so Claude can decide whether to retry or report — but the
-//  * full stdout/stderr/exitCode are always included for diagnostics.
-//  *
-//  * stdout/stderr are capped at `CLI_STREAM_CAP_BYTES`; when truncated, only
-//  * the tail is preserved and a `truncated: true` marker is added so callers
-//  * can flag the elision.
-//  */
-// function asCliResult(result: GraphmanCliResult): CallToolResult {
-//   const stdout = capStream(result.stdout);
-//   const stderr = capStream(result.stderr);
-//   const body = {
-//     command: result.command,
-//     exitCode: result.exitCode,
-//     stdout: stdout.text,
-//     stdout_truncated: stdout.truncated,
-//     stderr: stderr.text,
-//     stderr_truncated: stderr.truncated,
-//   };
-//   const payload: CallToolResult = {
-//     content: [{ type: 'text', text: JSON.stringify(body, null, 2) }],
-//   };
-//   if (result.exitCode !== 0) payload.isError = true;
-//   return payload;
-// }
-// ===== end disabled CLI helpers =====
 
 // =============================================================================
 // Input schemas
@@ -85,155 +42,178 @@ const executionIdSchema = z
   .min(1)
   .refine((s) => !s.startsWith('-'), 'execution_id cannot start with -');
 
+/** 32-byte hex block hash with 0x prefix. */
+const blockHashSchema = z
+  .string()
+  .regex(/^0x[0-9a-fA-F]{64}$/, 'block_hash must be 32-byte hex (0x + 64 chars)');
+
+/**
+ * Chain names and graph-node identifiers — alnum + `_` + `-`, must NOT start
+ * with `-`. Retained as an injection guard even though values now flow as
+ * GraphQL variables, not CLI argv.
+ */
+const chainSchema = z
+  .string()
+  .regex(
+    /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/,
+    'chain must be alphanumeric / _ / -, and may not start with -',
+  );
+
+const nodeSchema = z
+  .string()
+  .regex(
+    /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/,
+    'node must be alphanumeric / _ / -, and may not start with -',
+  );
+
 const deploymentIdShape = { deployment_id: deploymentIdSchema };
 const executionIdShape = { execution_id: executionIdSchema };
 
-// ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
-// TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
-//
-// String inputs that were forwarded as positional arguments to the graphman
-// CLI are pattern-restricted to defeat leading-`-` injection (execa blocks
-// shell injection, but graphman's own argv parser would still treat a value
-// like `--foo` as a flag).
-//
-// /** 32-byte hex block hash with 0x prefix. */
-// const blockHashSchema = z
-//   .string()
-//   .regex(/^0x[0-9a-fA-F]{64}$/, 'block_hash must be 32-byte hex (0x + 64 chars)');
-//
-// /**
-//  * Chain names and graph-node identifiers — alnum + `_` + `-`, must NOT start
-//  * with `-` (which graphman would interpret as a flag).
-//  */
-// const chainSchema = z
-//   .string()
-//   .regex(
-//     /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/,
-//     'chain must be alphanumeric / _ / -, and may not start with -',
-//   );
-//
-// const targetNodeSchema = z
-//   .string()
-//   .regex(
-//     /^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/,
-//     'target_node must be alphanumeric / _ / -, and may not start with -',
-//   );
-//
-// const rewindShape = {
-//   deployment_id: deploymentIdSchema,
-//   block_number: z.coerce.number().int().nonnegative(),
-//   block_hash: blockHashSchema,
-// };
-//
-// const reassignShape = {
-//   deployment_id: deploymentIdSchema,
-//   target_node: targetNodeSchema,
-// };
-//
-// const dropShape = {
-//   deployment_id: deploymentIdSchema,
-//   confirm: z.literal(true),
-// };
-//
-// const unusedRemoveShape = {
-//   older_than_minutes: z.coerce.number().int().nonnegative().optional(),
-//   count: z.coerce.number().int().positive().optional(),
-//   confirm: z.literal(true),
-// };
-//
-// /**
-//  * `check_blocks` accepts either a single block_number, OR a complete
-//  * from/to range with `to >= from`. Anything else (both forms, partial range,
-//  * empty) is rejected at validation time so we never silently pass a malformed
-//  * invocation to the CLI.
-//  *
-//  * The MCP SDK's `inputSchema` only takes a ZodRawShape, so we keep `*Shape`
-//  * for registration and re-validate via the matching `*Refined` object inside
-//  * the handler. The refined parse throws a ZodError on violation, which the
-//  * tool wrapper surfaces as a normal MCP error.
-//  */
-// const checkBlocksShape = {
-//   chain: chainSchema,
-//   block_number: z.coerce.number().int().nonnegative().optional(),
-//   from: z.coerce.number().int().nonnegative().optional(),
-//   to: z.coerce.number().int().nonnegative().optional(),
-// };
-// const checkBlocksRefined = z
-//   .object(checkBlocksShape)
-//   .refine(
-//     (v) => {
-//       const hasSingle = v.block_number !== undefined;
-//       const hasRange = v.from !== undefined || v.to !== undefined;
-//       return hasSingle !== hasRange; // XOR: exactly one form
-//     },
-//     {
-//       message:
-//         'check_blocks requires EITHER block_number OR a from/to range, not both and not neither',
-//     },
-//   )
-//   .refine(
-//     (v) => {
-//       if (v.from === undefined && v.to === undefined) return true;
-//       return v.from !== undefined && v.to !== undefined;
-//     },
-//     { message: 'when using a range, BOTH from and to must be provided' },
-//   )
-//   .refine(
-//     (v) => v.from === undefined || v.to === undefined || v.to >= v.from,
-//     { message: 'check_blocks requires to >= from' },
-//   );
-//
-// const truncateChainCacheShape = {
-//   chain: chainSchema,
-//   confirm: z.literal(true),
-// };
-//
-// /**
-//  * `clear_call_cache` is destructive. Requires `confirm: true`, AND requires
-//  * exactly one of:
-//  *   - remove_all: true (alone, no from/to)
-//  *   - a complete from/to range with `to >= from`
-//  *
-//  * A bare invocation (no remove_all, no range) would have made graphman remove
-//  * the entire call cache implicitly — refuse it.
-//  */
-// const clearCallCacheShape = {
-//   chain: chainSchema,
-//   from: z.coerce.number().int().nonnegative().optional(),
-//   to: z.coerce.number().int().nonnegative().optional(),
-//   remove_all: z.boolean().optional(),
-//   confirm: z.literal(true),
-// };
-// const clearCallCacheRefined = z
-//   .object(clearCallCacheShape)
-//   .refine(
-//     (v) => {
-//       const usesAll = v.remove_all === true;
-//       const usesRange = v.from !== undefined || v.to !== undefined;
-//       return usesAll !== usesRange; // XOR
-//     },
-//     {
-//       message:
-//         'clear_call_cache requires EITHER remove_all=true OR a from/to range, not both and not neither',
-//     },
-//   )
-//   .refine(
-//     (v) => {
-//       if (v.remove_all === true) {
-//         return v.from === undefined && v.to === undefined;
-//       }
-//       return v.from !== undefined && v.to !== undefined;
-//     },
-//     {
-//       message:
-//         'when remove_all=true, omit from/to; when using a range, BOTH from and to must be provided',
-//     },
-//   )
-//   .refine(
-//     (v) => v.from === undefined || v.to === undefined || v.to >= v.from,
-//     { message: 'clear_call_cache requires to >= from' },
-//   );
-// ===== end disabled CLI input schemas =====
+// ---- rewind --------------------------------------------------------------
+const rewindShape = {
+  deployment_id: deploymentIdSchema,
+  start_block: z.boolean().optional(),
+  block_hash: blockHashSchema.optional(),
+  block_number: z.coerce.number().int().nonnegative().optional(),
+  force: z.boolean().optional(),
+  delay_seconds: z.coerce.number().int().nonnegative().optional(),
+  confirm: z.literal(true),
+};
+const rewindRefined = z
+  .object(rewindShape)
+  .refine(
+    (v) => {
+      const usesStart = v.start_block === true;
+      const usesTarget = v.block_hash !== undefined && v.block_number !== undefined;
+      // XOR: exactly one of (start_block) or (block_hash AND block_number).
+      return usesStart !== usesTarget;
+    },
+    {
+      message:
+        'rewind requires EITHER start_block=true OR both block_hash and block_number, not both and not neither',
+    },
+  )
+  .refine(
+    (v) => {
+      // When not rewinding to start, hash and number must be paired (no partial).
+      if (v.start_block === true) return v.block_hash === undefined && v.block_number === undefined;
+      return v.block_hash !== undefined && v.block_number !== undefined;
+    },
+    {
+      message:
+        'when start_block=true, omit block_hash/block_number; otherwise BOTH block_hash and block_number are required',
+    },
+  );
+
+// ---- drop ----------------------------------------------------------------
+const dropShape = {
+  deployment_id: deploymentIdSchema,
+  all: z.boolean().optional(),
+  confirm: z.literal(true),
+};
+
+// ---- reassign ------------------------------------------------------------
+const reassignShape = {
+  deployment_id: deploymentIdSchema,
+  node: nodeSchema,
+};
+
+// ---- unassign ------------------------------------------------------------
+const unassignShape = {
+  deployment_id: deploymentIdSchema,
+  confirm: z.literal(true),
+};
+
+// ---- check_blocks --------------------------------------------------------
+const checkBlocksShape = {
+  chain: chainSchema,
+  by_hash: blockHashSchema.optional(),
+  by_number: z
+    .object({
+      number: z.coerce.number().int().nonnegative(),
+      delete_duplicates: z.boolean().optional(),
+    })
+    .optional(),
+  by_range: z
+    .object({
+      from: z.coerce.number().int().nonnegative().optional(),
+      to: z.coerce.number().int().nonnegative().optional(),
+      delete_duplicates: z.boolean().optional(),
+    })
+    .optional(),
+};
+const checkBlocksRefined = z
+  .object(checkBlocksShape)
+  .refine(
+    (v) => {
+      const n =
+        (v.by_hash !== undefined ? 1 : 0) +
+        (v.by_number !== undefined ? 1 : 0) +
+        (v.by_range !== undefined ? 1 : 0);
+      return n === 1;
+    },
+    {
+      message:
+        'check_blocks requires EXACTLY ONE of by_hash, by_number, or by_range',
+    },
+  )
+  .refine(
+    (v) =>
+      v.by_range === undefined ||
+      v.by_range.from === undefined ||
+      v.by_range.to === undefined ||
+      v.by_range.to >= v.by_range.from,
+    { message: 'check_blocks by_range requires to >= from' },
+  );
+
+// ---- truncate_chain_cache ------------------------------------------------
+const truncateChainCacheShape = {
+  chain: chainSchema,
+  confirm: z.literal(true),
+};
+
+// ---- clear_call_cache ----------------------------------------------------
+const clearCallCacheShape = {
+  chain: chainSchema,
+  from: z.coerce.number().int().nonnegative().optional(),
+  to: z.coerce.number().int().nonnegative().optional(),
+  remove_entire_cache: z.boolean().optional(),
+  ttl_days: z.coerce.number().int().positive().optional(),
+  max_contracts: z.coerce.number().int().positive().optional(),
+  confirm: z.literal(true),
+};
+const clearCallCacheRefined = z
+  .object(clearCallCacheShape)
+  .refine(
+    (v) => {
+      const usesRange = v.from !== undefined || v.to !== undefined;
+      const usesAll = v.remove_entire_cache === true;
+      const usesTtl = v.ttl_days !== undefined;
+      // Exactly one of the three modes.
+      const modes = (usesRange ? 1 : 0) + (usesAll ? 1 : 0) + (usesTtl ? 1 : 0);
+      return modes === 1;
+    },
+    {
+      message:
+        'clear_call_cache requires EXACTLY ONE mode: a from/to range, remove_entire_cache=true, or ttl_days',
+    },
+  )
+  .refine(
+    (v) => {
+      // Range mode must supply BOTH from and to.
+      const usesRange = v.from !== undefined || v.to !== undefined;
+      if (!usesRange) return true;
+      return v.from !== undefined && v.to !== undefined;
+    },
+    { message: 'clear_call_cache range mode requires BOTH from and to' },
+  )
+  .refine(
+    (v) => v.from === undefined || v.to === undefined || v.to >= v.from,
+    { message: 'clear_call_cache requires to >= from' },
+  )
+  .refine((v) => v.max_contracts === undefined || v.ttl_days !== undefined, {
+    message: 'clear_call_cache max_contracts requires ttl_days',
+  });
 
 // =============================================================================
 // Registration
@@ -245,7 +225,7 @@ export function registerGraphmanTools(
 ): void {
   const { client } = deps;
 
-  // ---- GraphQL-backed tools ------------------------------------------------
+  // ---- read / lifecycle tools ----------------------------------------------
 
   registerIndexerTool(server, {
     name: 'graphman_deployment_info',
@@ -322,173 +302,157 @@ export function registerGraphmanTools(
     },
   });
 
-  // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
-  // TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
-  // These 9 tools no longer register; restore the `client` CLI methods,
-  // `asCliResult` helper, and `*Shape`/`*Refined` schemas (all commented above)
-  // when reimplementing.
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_rewind_deployment',
-  //   permissionClass: 'graphman_destructive',
-  //   description:
-  //     'Rewind a deployment to a specific block via graphman. Clears indexed data after the target block — preserves the deployment but is destructive to indexed state.',
-  //   inputSchema: rewindShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     const result = await client.rewindDeployment(
-  //       args.deployment_id,
-  //       args.block_number,
-  //       args.block_hash,
-  //       { signal: extra.signal },
-  //     );
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_reassign_deployment',
-  //   permissionClass: 'graphman_safe',
-  //   description:
-  //     'Move a deployment to a different graph-node instance via graphman. Safe operation — no data is lost.',
-  //   inputSchema: reassignShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     const result = await client.reassignDeployment(
-  //       args.deployment_id,
-  //       args.target_node,
-  //       { signal: extra.signal },
-  //     );
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_unassign_deployment',
-  //   permissionClass: 'graphman_destructive',
-  //   description:
-  //     'Stop indexing a deployment permanently via graphman. Data is preserved; the deployment is detached from its current graph-node instance.',
-  //   inputSchema: deploymentIdShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     const result = await client.unassignDeployment(args.deployment_id, {
-  //       signal: extra.signal,
-  //     });
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_drop_deployment',
-  //   permissionClass: 'graphman_destructive',
-  //   description:
-  //     'IRREVERSIBLE: Full removal of a deployment via graphman — unassigns, removes the name binding, and deletes indexed data. Requires confirm=true.',
-  //   inputSchema: dropShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     const result = await client.dropDeployment(args.deployment_id, {
-  //       signal: extra.signal,
-  //     });
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_unused_record',
-  //   permissionClass: 'graphman_destructive',
-  //   description:
-  //     'Scan shards and mark unused deployments via graphman. First step in disk-reclamation; pairs with graphman_unused_remove.',
-  //   handler: async (_args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     const result = await client.unusedRecord({ signal: extra.signal });
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_unused_remove',
-  //   permissionClass: 'graphman_destructive',
-  //   description:
-  //     'IRREVERSIBLE: Delete data for deployments previously marked unused via graphman. Optional filters: older_than_minutes, count. Requires confirm=true.',
-  //   inputSchema: unusedRemoveShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     const opts: { olderThanMinutes?: number; count?: number } = {};
-  //     if (args.older_than_minutes !== undefined) {
-  //       opts.olderThanMinutes = args.older_than_minutes;
-  //     }
-  //     if (args.count !== undefined) opts.count = args.count;
-  //     const result = await client.unusedRemove(opts, { signal: extra.signal });
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_check_blocks',
-  //   permissionClass: 'read',
-  //   description:
-  //     'Compare cached blocks against the RPC provider via graphman. Provide EITHER block_number (single block) OR both from and to (range, to>=from). Read-only diagnostic.',
-  //   inputSchema: checkBlocksShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     // Cross-field validation can't be expressed in the raw shape — re-parse
-  //     // through the refined object schema; a refinement failure throws a
-  //     // ZodError that registerIndexerTool surfaces as an MCP tool error.
-  //     const validated = checkBlocksRefined.parse(args);
-  //     const argsForCli: {
-  //       chain: string;
-  //       blockNumber?: number;
-  //       from?: number;
-  //       to?: number;
-  //     } = { chain: validated.chain };
-  //     if (validated.block_number !== undefined) {
-  //       argsForCli.blockNumber = validated.block_number;
-  //     }
-  //     if (validated.from !== undefined) argsForCli.from = validated.from;
-  //     if (validated.to !== undefined) argsForCli.to = validated.to;
-  //     const result = await client.checkBlocks(argsForCli, { signal: extra.signal });
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_truncate_chain_cache',
-  //   permissionClass: 'graphman_destructive',
-  //   description:
-  //     'IRREVERSIBLE: Clear the entire block cache for a chain via graphman. Use only after confirmed cache corruption. Requires confirm=true.',
-  //   inputSchema: truncateChainCacheShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     const result = await client.truncateChainCache(args.chain, {
-  //       signal: extra.signal,
-  //     });
-  //     return asCliResult(result);
-  //   },
-  // });
-  //
-  // registerIndexerTool(server, {
-  //   name: 'graphman_clear_call_cache',
-  //   permissionClass: 'graphman_destructive',
-  //   description:
-  //     'IRREVERSIBLE: Remove call cache entries for a chain via graphman. Requires confirm=true AND exactly one of: remove_all=true (alone) OR a complete from/to range (to>=from). A bare invocation is REJECTED to prevent accidental full-cache wipes.',
-  //   inputSchema: clearCallCacheShape,
-  //   handler: async (args, extra) => {
-  //     extra.signal.throwIfAborted();
-  //     // Cross-field validation (XOR remove_all vs range, range completeness,
-  //     // to>=from) lives in the refined schema — re-parse to enforce it.
-  //     const validated = clearCallCacheRefined.parse(args);
-  //     const cliArgs: {
-  //       chain: string;
-  //       from?: number;
-  //       to?: number;
-  //       removeAll?: boolean;
-  //     } = { chain: validated.chain };
-  //     if (validated.from !== undefined) cliArgs.from = validated.from;
-  //     if (validated.to !== undefined) cliArgs.to = validated.to;
-  //     if (validated.remove_all !== undefined) cliArgs.removeAll = validated.remove_all;
-  //     const result = await client.clearCallCache(cliArgs, { signal: extra.signal });
-  //     return asCliResult(result);
-  //   },
-  // });
-  // ===== end disabled CLI tool registrations =====
+  // ---- deployment mutations ------------------------------------------------
+
+  registerIndexerTool(server, {
+    name: 'graphman_rewind_deployment',
+    permissionClass: 'graphman_destructive',
+    description:
+      'Rewind a deployment to a specific block (block_hash + block_number), OR truncate it to its own start block (start_block=true), via the graphman GraphQL API. Destructive: discards indexed entity state after the target. Runs asynchronously — returns an execution_id to poll with graphman_get_execution_status. Requires confirm=true.',
+    inputSchema: rewindShape,
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      // Cross-field validation (start_block XOR hash+number) lives in the
+      // refined schema — re-parse so a violation throws a ZodError that
+      // registerIndexerTool surfaces as an MCP tool error.
+      const v = rewindRefined.parse(args);
+      const rewindArgs: RewindArgs = {};
+      if (v.start_block !== undefined) rewindArgs.startBlock = v.start_block;
+      if (v.block_hash !== undefined) rewindArgs.blockHash = v.block_hash;
+      if (v.block_number !== undefined) rewindArgs.blockNumber = v.block_number;
+      if (v.force !== undefined) rewindArgs.force = v.force;
+      if (v.delay_seconds !== undefined) rewindArgs.delaySeconds = v.delay_seconds;
+      const result = await client.rewindDeployment(v.deployment_id, rewindArgs, {
+        signal: extra.signal,
+      });
+      return asJsonResult({
+        execution_id: result.executionId,
+        hint: 'poll graphman_get_execution_status',
+      });
+    },
+  });
+
+  registerIndexerTool(server, {
+    name: 'graphman_drop_deployment',
+    permissionClass: 'graphman_destructive',
+    description:
+      'IRREVERSIBLE: Force-delete a deployment via the graphman GraphQL API (deleteDeployment) — auto-unassigns, then deletes all indexed data and metadata. This is the sole deletion path. A Qm hash matching multiple deployments FAILS unless all=true; the deleted locators are returned. Requires confirm=true.',
+    inputSchema: dropShape,
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      const result = await client.dropDeployment(args.deployment_id, args.all ?? false, {
+        signal: extra.signal,
+      });
+      return asJsonResult({ deleted_locators: result.deletedLocators });
+    },
+  });
+
+  registerIndexerTool(server, {
+    name: 'graphman_reassign_deployment',
+    permissionClass: 'graphman_safe',
+    description:
+      'Assign or reassign a deployment to a different graph-node instance via the graphman GraphQL API. Safe — no data is lost. May complete with warnings (surfaced in the result).',
+    inputSchema: reassignShape,
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      const result = await client.reassignDeployment(args.deployment_id, args.node, {
+        signal: extra.signal,
+      });
+      const out: { success: boolean; warnings?: string[] } = { success: result.success };
+      if (result.warnings) out.warnings = result.warnings;
+      return asJsonResult(out);
+    },
+  });
+
+  registerIndexerTool(server, {
+    name: 'graphman_unassign_deployment',
+    permissionClass: 'graphman_destructive',
+    description:
+      'Stop indexing a deployment via the graphman GraphQL API (unassign). Data is preserved; the deployment is detached from its graph-node instance. Requires confirm=true.',
+    inputSchema: unassignShape,
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      const ack = await client.unassignDeployment(args.deployment_id, {
+        signal: extra.signal,
+      });
+      return asJsonResult(ack);
+    },
+  });
+
+  // ---- chain mutations -----------------------------------------------------
+
+  registerIndexerTool(server, {
+    name: 'graphman_check_blocks',
+    permissionClass: 'graphman_safe',
+    description:
+      'Compare cached blocks against the RPC provider via the graphman GraphQL API and delete cache entries that diverge (re-fetchable, hence safe). Provide EXACTLY ONE method: by_hash, by_number{number, delete_duplicates?}, or by_range{from?, to?, delete_duplicates?}. by_hash/by_number run synchronously and return per-block results; by_range runs asynchronously and returns an execution_id to poll with graphman_get_execution_status.',
+    inputSchema: checkBlocksShape,
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      // Cross-field validation (exactly-one method, to>=from) lives in the
+      // refined schema — re-parse to enforce it.
+      const v = checkBlocksRefined.parse(args);
+      const callArgs: CheckBlocksArgs = { chain: v.chain };
+      if (v.by_hash !== undefined) {
+        callArgs.byHash = v.by_hash;
+      } else if (v.by_number !== undefined) {
+        callArgs.byNumber = { number: v.by_number.number };
+        if (v.by_number.delete_duplicates !== undefined) {
+          callArgs.byNumber.deleteDuplicates = v.by_number.delete_duplicates;
+        }
+      } else if (v.by_range !== undefined) {
+        callArgs.byRange = {};
+        if (v.by_range.from !== undefined) callArgs.byRange.from = v.by_range.from;
+        if (v.by_range.to !== undefined) callArgs.byRange.to = v.by_range.to;
+        if (v.by_range.delete_duplicates !== undefined) {
+          callArgs.byRange.deleteDuplicates = v.by_range.delete_duplicates;
+        }
+      }
+      const result = await client.checkBlocks(callArgs, { signal: extra.signal });
+      if (result.kind === 'execution') {
+        return asJsonResult({
+          execution_id: result.executionId,
+          hint: 'poll graphman_get_execution_status',
+        });
+      }
+      return asJsonResult(result.result);
+    },
+  });
+
+  registerIndexerTool(server, {
+    name: 'graphman_truncate_chain_cache',
+    permissionClass: 'graphman_destructive',
+    description:
+      'IRREVERSIBLE: Delete the entire block cache for a chain via the graphman GraphQL API. Use only after confirmed cache corruption. Requires confirm=true.',
+    inputSchema: truncateChainCacheShape,
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      const ack = await client.truncateChainCache(args.chain, {
+        signal: extra.signal,
+      });
+      return asJsonResult(ack);
+    },
+  });
+
+  registerIndexerTool(server, {
+    name: 'graphman_clear_call_cache',
+    permissionClass: 'graphman_destructive',
+    description:
+      'Remove entries from a chain\'s call cache via the graphman GraphQL API. Requires confirm=true AND EXACTLY ONE mode: a from/to range (to>=from), remove_entire_cache=true, or ttl_days (stale-eviction, optional max_contracts). remove_entire_cache can significantly reduce indexing performance.',
+    inputSchema: clearCallCacheShape,
+    handler: async (args, extra) => {
+      extra.signal.throwIfAborted();
+      // Cross-field validation (exactly-one mode, range completeness, to>=from,
+      // max_contracts requires ttl_days) lives in the refined schema.
+      const v = clearCallCacheRefined.parse(args);
+      const callArgs: ClearCallCacheArgs = { chain: v.chain };
+      if (v.from !== undefined) callArgs.from = v.from;
+      if (v.to !== undefined) callArgs.to = v.to;
+      if (v.remove_entire_cache !== undefined) callArgs.removeEntireCache = v.remove_entire_cache;
+      if (v.ttl_days !== undefined) callArgs.ttlDays = v.ttl_days;
+      if (v.max_contracts !== undefined) callArgs.maxContracts = v.max_contracts;
+      const result = await client.clearCallCache(callArgs, { signal: extra.signal });
+      return asJsonResult(result);
+    },
+  });
 }
