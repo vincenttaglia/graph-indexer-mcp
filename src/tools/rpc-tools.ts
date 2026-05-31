@@ -78,7 +78,8 @@ export function registerRpcTools(server: McpServer, deps: RpcToolDeps): void {
       '(third-party — may rate-limit/log), or "auto" (prefers local). ' +
       'State-changing or signing methods (eth_sendRawTransaction, ' +
       'eth_sendTransaction, personal_*, eth_sign*) are NOT permitted. ' +
-      'Endpoint URLs are never returned.',
+      'Endpoint URLs are never returned. Call `list_rpc_chains` first to see ' +
+      'which chain aliases are configured and which endpoint kinds exist.',
     inputSchema: {
       chain: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'chain alias'),
       method: z.string().min(1),
@@ -123,6 +124,54 @@ export function registerRpcTools(server: McpServer, deps: RpcToolDeps): void {
           `rpc_call failed for chain "${chain}": ${(e as Error).message}`,
         );
       }
+    },
+  });
+
+  registerIndexerTool(server, {
+    name: 'list_rpc_chains',
+    permissionClass: 'read',
+    description:
+      'List the chain aliases configured for `rpc_call`, the endpoint kinds ' +
+      'available for each (local = the indexer node; remote = third-party), ' +
+      'which source `auto` would pick, and the read-only methods permitted. ' +
+      'Endpoint URLs are never returned. Use this to discover valid `chain` ' +
+      'values before calling `rpc_call`.',
+    handler: (_args, extra) => {
+      extra.signal.throwIfAborted();
+
+      const allowRemote = deps.config.rpcAllowRemote;
+      const chains = Object.entries(deps.config.rpcEndpoints)
+        .map(([chain, entry]) => {
+          const hasLocal = Boolean(entry.local);
+          const hasRemote = Boolean(entry.remote);
+          // What `source: 'auto'` resolves to: local first, then remote only if
+          // third-party egress is enabled. null => no usable endpoint via auto.
+          const autoSource = hasLocal
+            ? 'local'
+            : hasRemote && allowRemote
+              ? 'remote'
+              : null;
+          return {
+            chain,
+            has_local: hasLocal,
+            // A remote endpoint that exists but is disabled by RPC_ALLOW_REMOTE
+            // is reported as configured-but-unavailable so the agent isn't
+            // misled into selecting source: 'remote'.
+            has_remote: hasRemote,
+            remote_enabled: hasRemote && allowRemote,
+            auto_source: autoSource,
+            usable: autoSource !== null,
+          };
+        })
+        // Stable, deterministic ordering for predictable output.
+        .sort((a, b) => a.chain.localeCompare(b.chain));
+
+      return asText({
+        allow_remote: allowRemote,
+        count: chains.length,
+        chains,
+        allowed_methods: [...READ_ALLOWLIST].sort(),
+      });
     },
   });
 }

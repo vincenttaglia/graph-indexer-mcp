@@ -217,3 +217,94 @@ describe('rpc_call tool', () => {
     assert.doesNotMatch(text(res), /SECRET/);
   });
 });
+
+describe('list_rpc_chains tool', () => {
+  beforeEach(() => {
+    resetForTests();
+    initAccessControl({ level: 'read_only', allow: new Set(), deny: new Set() });
+  });
+
+  function listConfig(
+    endpoints: Config['rpcEndpoints'],
+    allowRemote: boolean,
+  ): Config {
+    return { rpcEndpoints: endpoints, rpcAllowRemote: allowRemote } as Config;
+  }
+
+  /** Register the tools and return the zero-arg `list_rpc_chains` callback. */
+  function setupList(endpoints: Config['rpcEndpoints'], allowRemote: boolean) {
+    const noopClient: RpcClient = { call: () => Promise.reject(new Error('unused')) };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const server = makeFakeServer() as any;
+    registerRpcTools(server, { client: noopClient, config: listConfig(endpoints, allowRemote) });
+    // Zero-arg tool: the captured callback takes (extra) as its first argument.
+    const cb = server.toolCbs.get('list_rpc_chains') as (extra: unknown) => Promise<ToolResult>;
+    assert.ok(cb, 'list_rpc_chains was registered');
+    return cb;
+  }
+
+  it('lists configured chains (sorted) with endpoint kinds and auto resolution', async () => {
+    const cb = setupList(
+      {
+        'arbitrum-one': { local: 'http://l/SECRET', remote: 'http://r/SECRET' },
+        mainnet: { remote: 'http://m/SECRET' },
+        base: { local: 'http://b/SECRET' },
+      },
+      true,
+    );
+    const res = await cb(fakeExtra);
+    assert.equal(res.isError, undefined);
+    const payload = JSON.parse(text(res));
+
+    assert.equal(payload.allow_remote, true);
+    assert.equal(payload.count, 3);
+    assert.deepEqual(
+      payload.chains.map((c: { chain: string }) => c.chain),
+      ['arbitrum-one', 'base', 'mainnet'],
+      'chains are sorted',
+    );
+    assert.deepEqual(payload.chains[0], {
+      chain: 'arbitrum-one',
+      has_local: true,
+      has_remote: true,
+      remote_enabled: true,
+      auto_source: 'local',
+      usable: true,
+    });
+    assert.deepEqual(payload.chains[2], {
+      chain: 'mainnet',
+      has_local: false,
+      has_remote: true,
+      remote_enabled: true,
+      auto_source: 'remote',
+      usable: true,
+    });
+    // The read-only allowlist is surfaced for discovery; no write methods.
+    assert.ok(payload.allowed_methods.includes('eth_call'));
+    assert.ok(!payload.allowed_methods.includes('eth_sendRawTransaction'));
+    // Never leak endpoint URLs/secrets.
+    assert.doesNotMatch(JSON.stringify(payload), /SECRET/);
+  });
+
+  it('marks a remote-only chain unusable when RPC_ALLOW_REMOTE is false', async () => {
+    const cb = setupList(
+      {
+        'arbitrum-one': { local: 'http://l', remote: 'http://r' },
+        mainnet: { remote: 'http://m' },
+      },
+      false,
+    );
+    const payload = JSON.parse(text(await cb(fakeExtra)));
+    assert.equal(payload.allow_remote, false);
+    const byChain = Object.fromEntries(
+      payload.chains.map((c: { chain: string }) => [c.chain, c]),
+    );
+    // local still works under auto
+    assert.deepEqual(byChain['arbitrum-one'].auto_source, 'local');
+    assert.equal(byChain['arbitrum-one'].usable, true);
+    // remote-only chain: remote disabled → no usable endpoint via auto
+    assert.equal(byChain['mainnet'].remote_enabled, false);
+    assert.equal(byChain['mainnet'].auto_source, null);
+    assert.equal(byChain['mainnet'].usable, false);
+  });
+});

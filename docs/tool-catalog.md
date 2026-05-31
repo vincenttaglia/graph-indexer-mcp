@@ -385,9 +385,9 @@ Source: `src/tools/manifest-tools.ts`. Fetches the subgraph manifest from IPFS (
 
 ---
 
-## RPC passthrough (1 tool)
+## RPC passthrough (2 tools)
 
-Source: `src/tools/rpc-tools.ts`. A **read-only** JSON-RPC passthrough to operator-configured endpoints. Registered only when `RPC_ENDPOINTS` is non-empty; otherwise the tool is absent.
+Source: `src/tools/rpc-tools.ts`. A **read-only** JSON-RPC passthrough to operator-configured endpoints. Registered only when `RPC_ENDPOINTS` is non-empty; otherwise both tools are absent.
 
 ### `rpc_call`
 
@@ -400,6 +400,13 @@ Source: `src/tools/rpc-tools.ts`. A **read-only** JSON-RPC passthrough to operat
   - `source` (`'local' | 'remote' | 'auto'`, optional, default `auto`) — `local` = the indexer's own node (trusted/private); `remote` = third-party/public (requires `RPC_ALLOW_REMOTE`); `auto` = prefer local, else remote.
 - **Returns:** JSON `{ chain, endpoint_kind, result }` or `{ chain, endpoint_kind, error }` (the JSON-RPC error relayed verbatim). The endpoint **URL is never returned** (it may embed API keys).
 - **Config:** `RPC_ENDPOINTS` (alias→{local,remote} map), `RPC_ALLOW_REMOTE`, `RPC_TIMEOUT_MS`, `RPC_MAX_BYTES`. See [config-reference.md](config-reference.md).
+
+### `list_rpc_chains`
+
+- **Permission:** `read`
+- **Description:** Discover the chain aliases configured for `rpc_call`, the endpoint kinds available for each, which source `auto` resolves to, and the permitted read-only methods. Endpoint URLs are never returned. Call this before `rpc_call` to learn valid `chain` values.
+- **Args:** none.
+- **Returns:** JSON `{ allow_remote, count, chains[], allowed_methods[] }` where each `chains[]` entry is `{ chain, has_local, has_remote, remote_enabled, auto_source, usable }`. `remote_enabled` is `false` for a remote endpoint disabled by `RPC_ALLOW_REMOTE`; `auto_source` is what `source: 'auto'` would pick (`null` if no usable endpoint); `usable` is whether `auto` resolves to an endpoint.
 
 ---
 

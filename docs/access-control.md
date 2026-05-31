@@ -21,7 +21,7 @@ A tool's class is declared at registration via `registerIndexerTool({ ..., permi
 
 | Class | Gates |
 | --- | --- |
-| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `get_subgraph_manifest`, `rpc_call`. (`graphman_check_blocks` also maps here but is currently unavailable — see below.) |
+| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `get_subgraph_manifest`, `rpc_call`, `list_rpc_chains`. (`graphman_check_blocks` also maps here but is currently unavailable — see below.) |
 | `agent_queue` | Adds entries to the indexer-agent action queue: `queue_allocate`, `queue_unallocate`, `queue_reallocate`, `set_indexing_rule`, `set_cost_model`. Queued actions still require approval before execution. |
 | `agent_approve` | Approves or cancels queued agent actions: `approve_actions`, `cancel_actions`. Granted only at `full` because approval triggers on-chain transactions. |
 | `graphman_safe` | Non-destructive graphman writes: `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`. (`graphman_reassign_deployment` also maps here but is currently unavailable — see below.) |
