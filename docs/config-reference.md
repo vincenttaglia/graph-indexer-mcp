@@ -72,25 +72,13 @@ Comma-separated lists trim whitespace and drop empty entries (`csv()` helper in 
 - **Validates:** non-empty
 - **Purpose:** Bearer token for the graphman GraphQL API. Never logged; excluded from `indexer://config`.
 
-### `GRAPHMAN_KUBECTL_NAMESPACE`
-
-- **Type:** `string`
-- **Default:** `default`
-- **Example:** `graph-protocol`
-- **Purpose:** Kubernetes namespace used by the graphman CLI fallback (`kubectl exec ...`).
-
-### `GRAPHMAN_POD_LABEL`
-
-- **Type:** `string`
-- **Default:** `app=graph-node`
-- **Example:** `app.kubernetes.io/name=graph-node`
-- **Purpose:** Label selector used by the CLI fallback to find the graph-node pod to exec into. Must be narrow enough that the selector matches exactly one pod (or one canonical pod) — see [troubleshooting.md](troubleshooting.md).
-
-### `GRAPHMAN_CONFIG_PATH`
-
-- **Type:** `string`
-- **Default:** `/etc/graph-node/config.toml`
-- **Purpose:** Path to the graph-node config file inside the graph-node container; passed to graphman CLI invocations.
+> **Removed:** `GRAPHMAN_KUBECTL_NAMESPACE`, `GRAPHMAN_POD_LABEL`, and
+> `GRAPHMAN_CONFIG_PATH` configured the graphman CLI fallback over
+> `kubectl exec`. That path has been removed (the MCP runs remote from
+> graph-node), so these vars are no longer read. They will return if/when the
+> 9 CLI-only graphman operations are reimplemented against the graphman GraphQL
+> API; see the "Disabled — pending graphman GraphQL API" note in
+> [tool-catalog.md](tool-catalog.md).
 
 ---
 

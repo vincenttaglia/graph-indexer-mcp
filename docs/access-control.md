@@ -21,11 +21,13 @@ A tool's class is declared at registration via `registerIndexerTool({ ..., permi
 
 | Class | Gates |
 | --- | --- |
-| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `graphman_check_blocks`, `get_subgraph_manifest`, `rpc_call`. |
+| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `get_subgraph_manifest`, `rpc_call`. (`graphman_check_blocks` also maps here but is currently unavailable — see below.) |
 | `agent_queue` | Adds entries to the indexer-agent action queue: `queue_allocate`, `queue_unallocate`, `queue_reallocate`, `set_indexing_rule`, `set_cost_model`. Queued actions still require approval before execution. |
 | `agent_approve` | Approves or cancels queued agent actions: `approve_actions`, `cancel_actions`. Granted only at `full` because approval triggers on-chain transactions. |
-| `graphman_safe` | Non-destructive graphman writes: `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`, `graphman_reassign_deployment`. |
-| `graphman_destructive` | Destructive graphman ops: `graphman_rewind_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache`. Most also require an explicit `confirm: true` arg. |
+| `graphman_safe` | Non-destructive graphman writes: `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`. (`graphman_reassign_deployment` also maps here but is currently unavailable — see below.) |
+| `graphman_destructive` | Destructive graphman ops. **All tools in this class are currently unavailable** — the kubectl-exec CLI path was removed and they await a graphman GraphQL reimplementation: `graphman_rewind_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache`. The class stays defined so its grants apply automatically once those tools are reimplemented; most will also require an explicit `confirm: true` arg. |
+
+> **Currently unavailable graphman tools.** The 9 graphman CLI-only operations — `graphman_rewind_deployment`, `graphman_reassign_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_check_blocks`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache` — do not register in the current build (kubectl-exec path removed). Their permission-class mappings above are retained for when they return; ACCESS_OVERRIDES that reference them are harmless no-ops in the meantime.
 
 The exact class for any tool is in [tool-catalog.md](tool-catalog.md) under the **Permission** field. Tool descriptions are auto-annotated with `[Requires permission: <class>]` so clients can surface it.
 

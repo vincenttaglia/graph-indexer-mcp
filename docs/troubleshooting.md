@@ -47,13 +47,9 @@ Likely causes:
 
 Each tool returns a JSON error wrapper preserving the underlying message — read it for the specific endpoint.
 
-### "graphman tools fail with `pod not found`" / "no matching pod"
+### "graphman CLI tool isn't listed / `Unknown tool`"
 
-The CLI fallback uses `kubectl exec` against a pod selected by `GRAPHMAN_POD_LABEL` in `GRAPHMAN_KUBECTL_NAMESPACE`. Checks:
-
-1. `kubectl --context $CTX -n $GRAPHMAN_KUBECTL_NAMESPACE get pods -l $GRAPHMAN_POD_LABEL` — does this return exactly one running pod?
-2. If running in-cluster, does the ServiceAccount have `pods`/`pods/exec` in that namespace?
-3. If running locally, is the active kubectl context the one pointing at the right cluster?
+The 9 graphman CLI-only operations (`graphman_rewind_deployment`, `graphman_reassign_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_check_blocks`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache`) no longer register. They were backed only by `graphman` over `kubectl exec`, which has been removed because the MCP runs remote from graph-node. Run the equivalent `graphman` subcommand directly on the graph-node host until they are reimplemented against the graphman GraphQL API. The 5 GraphQL-backed tools (`graphman_deployment_info`, `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`, `graphman_get_execution_status`) are unaffected.
 
 ### "Postgres tools return 'Postgres not configured — set GRAPH_NODE_POSTGRES_URL'"
 
@@ -147,26 +143,9 @@ Note: `pg` does not natively observe `AbortSignal` for in-flight queries (see TO
 
 ## graphman edge cases
 
-### "`graphman_clear_call_cache` rejected my call"
+### "A graphman CLI tool (`clear_call_cache`, `check_blocks`, `rewind`, `drop`, …) is missing"
 
-`graphman_clear_call_cache` requires `confirm: true` AND exactly one of:
-
-- `remove_all: true` (alone, no `from`/`to`).
-- A complete `from`/`to` range with `to >= from`.
-
-A bare invocation (no `remove_all`, no range) is intentionally rejected to prevent accidental full-cache wipes. See [tool-catalog.md](tool-catalog.md).
-
-### "`graphman_check_blocks` rejected my call"
-
-Same XOR shape: provide EITHER `block_number` (single block) OR both `from` and `to` (range, `to >= from`). Not both, not neither.
-
-### "CLI tool output was truncated"
-
-stdout/stderr from CLI graphman invocations are capped at 32 KiB per stream. When over the cap, the TAIL is preserved (the most useful diagnostics — graphman errors and exit summaries — print at the end of output) and `stdout_truncated`/`stderr_truncated` is set to `true`. Re-run the underlying graphman command directly via `kubectl exec` if you need the full output.
-
-### "CLI fallback picked the wrong pod"
-
-`GRAPHMAN_POD_LABEL` matched multiple pods. Tighten the selector to a label set that uniquely identifies the graph-node hosting graphman — e.g. add `component=index-node` or a `statefulset.kubernetes.io/pod-name=...` selector.
+These 9 graphman operations were CLI-only and ran over `kubectl exec`, which has been removed (the MCP runs remote from graph-node). They no longer register; run the equivalent `graphman` subcommand directly on the graph-node host until they are reimplemented against the graphman GraphQL API. See the "Disabled — pending graphman GraphQL API" note in [tool-catalog.md](tool-catalog.md). The 5 GraphQL-backed graphman tools are unaffected.
 
 ---
 

@@ -55,9 +55,6 @@ export function buildSanitizedConfig(config: Config): Record<string, unknown> {
     },
 
     graphman: {
-      kubectlNamespace: config.graphmanKubectlNamespace,
-      podLabel: config.graphmanPodLabel,
-      configPath: config.graphmanConfigPath,
       // Never expose the actual token. `"REDACTED"` lets callers know one is
       // configured without leaking it; `null` would imply unconfigured.
       authToken: config.graphmanAuthToken ? 'REDACTED' : null,

@@ -3,11 +3,7 @@
 # graph-indexer-mcp — multi-stage container image
 #
 # Stage 1 (builder):  install all deps, compile TypeScript, prune devDeps.
-# Stage 2 (kubectl):  pull pinned kubectl binary from the official upstream
-#                     image (no curl/network call from our build).
-# Stage 3 (runtime):  minimal node:22-alpine, non-root, with kubectl baked in
-#                     for the graphman CLI fallback (kubectl exec into
-#                     graph-node pods).
+# Stage 2 (runtime):  minimal node:22-alpine, non-root.
 #
 # `pg` (the postgres client) is pure JS — no native bindings — so alpine is
 # safe. If a future dep adds native build steps, switch the runtime base to
@@ -36,22 +32,7 @@ RUN npm prune --omit=dev
 
 
 # -----------------------------------------------------------------------------
-# Stage 2: kubectl (pinned)
-# -----------------------------------------------------------------------------
-# Bitnami publishes a minimal, signed image with the kubectl binary at a known
-# path. Pinning to a specific minor version keeps the image reproducible.
-#
-# Kubernetes version-skew policy: kubectl is supported within ±1 minor of the
-# kube-apiserver it talks to. Pinning to 1.34 covers apiserver 1.33-1.35.
-# If your cluster runs an apiserver outside that range, bump this tag —
-# kubectl tags follow upstream k8s releases; see
-# https://kubernetes.io/releases/version-skew-policy/ for the current
-# supported set.
-FROM bitnami/kubectl:1.34.0 AS kubectl
-
-
-# -----------------------------------------------------------------------------
-# Stage 3: runtime
+# Stage 2: runtime
 # -----------------------------------------------------------------------------
 FROM node:22-alpine AS runtime
 
@@ -68,12 +49,6 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 # Tini gives us a real PID 1 (proper signal handling + zombie reaping). The
 # MCP stdio loop is long-lived; a stuck child without reaping causes leaks.
 RUN apk add --no-cache tini ca-certificates
-
-# kubectl from the pinned bitnami stage.
-COPY --from=kubectl /opt/bitnami/kubectl/bin/kubectl /usr/local/bin/kubectl
-RUN chmod 0755 /usr/local/bin/kubectl \
- && /usr/local/bin/kubectl version --client=true >/dev/null 2>&1 \
-    || (echo "WARNING: kubectl client smoke-check failed; binary may not be runnable on alpine (musl)." >&2 && exit 1)
 
 # Non-root user. UID 10001 sidesteps collisions with common host UIDs.
 RUN addgroup -g 10001 -S mcp \

@@ -1,14 +1,9 @@
 import type { TypedGraphqlClient } from '../utils/graphql-client.js';
 import { TtlCache } from '../utils/cache.js';
-import {
-  execGraphman,
-  type KubectlContext,
-  type KubectlExecOptions,
-} from '../utils/kubectl.js';
 import type {
   DeploymentInfo,
   ExecutionStatus,
-  GraphmanCliResult,
+  // GraphmanCliResult,  // ← only used by the disabled CLI ops below.
 } from '../types/graphman.js';
 
 // =============================================================================
@@ -132,12 +127,13 @@ interface RestartResponse {
 export interface GraphmanClientOptions {
   /** GraphQL client pointed at the graphman API (port 8050). */
   gql: TypedGraphqlClient;
-  /** kubectl context used for CLI fallback (namespace + pod label). */
-  kubectl: KubectlContext;
-  /** Path to graph-node config.toml, passed to graphman as `--config`. */
-  configPath: string;
-  /** Default per-call timeout for CLI fallback. */
-  cliTimeoutMs?: number;
+  // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+  // TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
+  // /** Path to graph-node config.toml, passed to graphman as `--config`. */
+  // configPath: string;
+  // /** Default per-call timeout for CLI fallback. */
+  // cliTimeoutMs?: number;
+  // ===== end disabled CLI options =====
 }
 
 export interface GraphmanMutationAck {
@@ -149,29 +145,32 @@ export interface GraphmanRestartResult {
   executionId: string;
 }
 
-export interface CheckBlocksArgs {
-  chain: string;
-  blockNumber?: number;
-  from?: number;
-  to?: number;
-}
-
-export interface ClearCallCacheArgs {
-  chain: string;
-  from?: number;
-  to?: number;
-  removeAll?: boolean;
-}
-
-export interface UnusedRemoveOpts {
-  olderThanMinutes?: number;
-  count?: number;
-}
+// ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+// TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
+// export interface CheckBlocksArgs {
+//   chain: string;
+//   blockNumber?: number;
+//   from?: number;
+//   to?: number;
+// }
+//
+// export interface ClearCallCacheArgs {
+//   chain: string;
+//   from?: number;
+//   to?: number;
+//   removeAll?: boolean;
+// }
+//
+// export interface UnusedRemoveOpts {
+//   olderThanMinutes?: number;
+//   count?: number;
+// }
+// ===== end disabled CLI arg types =====
 
 /**
  * Optional per-call options for graphman methods. `signal` is forwarded to the
- * underlying GraphQL request or kubectl exec so caller-initiated cancellation
- * aborts the in-flight HTTP request or subprocess.
+ * underlying GraphQL request so caller-initiated cancellation aborts the
+ * in-flight HTTP request.
  */
 export interface GraphmanCallOpts {
   signal?: AbortSignal;
@@ -185,25 +184,27 @@ export interface GraphmanClient {
   restartDeployment(deploymentId: string, opts?: GraphmanCallOpts): Promise<GraphmanRestartResult>;
   getExecutionStatus(executionId: string, opts?: GraphmanCallOpts): Promise<ExecutionStatus>;
 
-  // ---- CLI fallback ----
-  rewindDeployment(
-    deploymentId: string,
-    blockNumber: number,
-    blockHash: string,
-    opts?: GraphmanCallOpts,
-  ): Promise<GraphmanCliResult>;
-  reassignDeployment(
-    deploymentId: string,
-    targetNode: string,
-    opts?: GraphmanCallOpts,
-  ): Promise<GraphmanCliResult>;
-  unassignDeployment(deploymentId: string, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
-  dropDeployment(deploymentId: string, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
-  unusedRecord(opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
-  unusedRemove(args?: UnusedRemoveOpts, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
-  checkBlocks(args: CheckBlocksArgs, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
-  truncateChainCache(chain: string, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
-  clearCallCache(args: ClearCallCacheArgs, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+  // TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
+  // rewindDeployment(
+  //   deploymentId: string,
+  //   blockNumber: number,
+  //   blockHash: string,
+  //   opts?: GraphmanCallOpts,
+  // ): Promise<GraphmanCliResult>;
+  // reassignDeployment(
+  //   deploymentId: string,
+  //   targetNode: string,
+  //   opts?: GraphmanCallOpts,
+  // ): Promise<GraphmanCliResult>;
+  // unassignDeployment(deploymentId: string, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // dropDeployment(deploymentId: string, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // unusedRecord(opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // unusedRemove(args?: UnusedRemoveOpts, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // checkBlocks(args: CheckBlocksArgs, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // truncateChainCache(chain: string, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // clearCallCache(args: ClearCallCacheArgs, opts?: GraphmanCallOpts): Promise<GraphmanCliResult>;
+  // ===== end disabled CLI signatures =====
 }
 
 // =============================================================================
@@ -226,9 +227,13 @@ function normalizeExecutionState(raw: string | undefined): ExecutionStatus['stat
 }
 
 export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClient {
-  const { gql, kubectl, configPath } = opts;
-  const baseCliOpts: KubectlExecOptions = {};
-  if (opts.cliTimeoutMs !== undefined) baseCliOpts.timeoutMs = opts.cliTimeoutMs;
+  const { gql } = opts;
+  // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+  // TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
+  // const { configPath } = opts;
+  // const baseCliOpts: KubectlExecOptions = {};
+  // if (opts.cliTimeoutMs !== undefined) baseCliOpts.timeoutMs = opts.cliTimeoutMs;
+  // ===== end disabled CLI setup =====
 
   // Per design §4.1.2: deployment info cached for 5 minutes. Mutations
   // (pause/resume/restart/rewind/drop/reassign/unassign) MUST invalidate
@@ -245,34 +250,37 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
     process.stderr.write(`[cache graphman ${key}] invalidate (after ${reason})\n`);
   }
 
-  /**
-   * Compose the kubectl options for a CLI invocation, layering the caller-
-   * supplied AbortSignal on top of the constructor-time defaults so the
-   * external signal reaches `execa({ cancelSignal })`.
-   */
-  function cliOptsFor(callOpts?: GraphmanCallOpts): KubectlExecOptions {
-    const out: KubectlExecOptions = { ...baseCliOpts };
-    if (callOpts?.signal) out.signal = callOpts.signal;
-    return out;
-  }
-
-  async function runCli(
-    graphmanArgs: string[],
-    callOpts?: GraphmanCallOpts,
-  ): Promise<GraphmanCliResult> {
-    const result = await execGraphman(
-      kubectl,
-      configPath,
-      graphmanArgs,
-      cliOptsFor(callOpts),
-    );
-    return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode,
-      command: ['graphman', '--config', configPath, ...graphmanArgs],
-    };
-  }
+  // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+  // TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
+  // /**
+  //  * Compose the kubectl options for a CLI invocation, layering the caller-
+  //  * supplied AbortSignal on top of the constructor-time defaults so the
+  //  * external signal reaches `execa({ cancelSignal })`.
+  //  */
+  // function cliOptsFor(callOpts?: GraphmanCallOpts): KubectlExecOptions {
+  //   const out: KubectlExecOptions = { ...baseCliOpts };
+  //   if (callOpts?.signal) out.signal = callOpts.signal;
+  //   return out;
+  // }
+  //
+  // async function runCli(
+  //   graphmanArgs: string[],
+  //   callOpts?: GraphmanCallOpts,
+  // ): Promise<GraphmanCliResult> {
+  //   const result = await execGraphman(
+  //     kubectl,
+  //     configPath,
+  //     graphmanArgs,
+  //     cliOptsFor(callOpts),
+  //   );
+  //   return {
+  //     stdout: result.stdout,
+  //     stderr: result.stderr,
+  //     exitCode: result.exitCode,
+  //     command: ['graphman', '--config', configPath, ...graphmanArgs],
+  //   };
+  // }
+  // ===== end disabled CLI helpers =====
 
   return {
     // -------------------------------------------------------------------------
@@ -376,104 +384,104 @@ export function createGraphmanClient(opts: GraphmanClientOptions): GraphmanClien
       return result;
     },
 
-    // -------------------------------------------------------------------------
-    // CLI fallback operations
-    // -------------------------------------------------------------------------
+    // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+    // TODO: reimplement against the graphman GraphQL API once it exposes rewind/reassign/unassign/drop/unused/check-blocks/chain-cache. Boilerplate (CLI arg ordering) preserved below for that work. =====
     //
     // Arg ordering follows the CLI usage table in design §2.6. Where the CLI
     // syntax is uncertain (e.g. `unused remove` flag names, `chain call-cache`
     // subcommand layout) we follow the most commonly documented form and
     // leave a TODO so operators can confirm against their graph-node version.
-
-    async rewindDeployment(deploymentId, blockNumber, blockHash, callOpts) {
-      // CLI: graphman rewind <block_hash> <block_number> <deployment>
-      const result = await runCli(
-        ['rewind', blockHash, String(blockNumber), deploymentId],
-        callOpts,
-      );
-      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'rewindDeployment');
-      return result;
-    },
-
-    async reassignDeployment(deploymentId, targetNode, callOpts) {
-      // CLI: graphman reassign <deployment> <node>
-      const result = await runCli(['reassign', deploymentId, targetNode], callOpts);
-      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'reassignDeployment');
-      return result;
-    },
-
-    async unassignDeployment(deploymentId, callOpts) {
-      // CLI: graphman unassign <deployment>
-      const result = await runCli(['unassign', deploymentId], callOpts);
-      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'unassignDeployment');
-      return result;
-    },
-
-    async dropDeployment(deploymentId, callOpts) {
-      // CLI: graphman drop <deployment>
-      // IRREVERSIBLE — confirmation gated at the tool layer, not the client.
-      const result = await runCli(['drop', deploymentId], callOpts);
-      if (result.exitCode === 0) invalidateDeployment(deploymentId, 'dropDeployment');
-      return result;
-    },
-
-    async unusedRecord(callOpts) {
-      // CLI: graphman unused record
-      return runCli(['unused', 'record'], callOpts);
-    },
-
-    async unusedRemove(args = {}, callOpts) {
-      // CLI: graphman unused remove [--older <minutes>] [--count <n>]
-      // TODO: verify against live graphman — some versions use `-c`/`--count`,
-      // others accept only `--older`.
-      const cli = ['unused', 'remove'];
-      if (args.olderThanMinutes !== undefined) {
-        cli.push('--older', String(args.olderThanMinutes));
-      }
-      if (args.count !== undefined) {
-        cli.push('--count', String(args.count));
-      }
-      return runCli(cli, callOpts);
-    },
-
-    async checkBlocks(args, callOpts) {
-      // CLI:
-      //   graphman chain check-blocks <chain> by-number <n>
-      //   graphman chain check-blocks <chain> by-range --from <n> --to <n>
-      const cli = ['chain', 'check-blocks', args.chain];
-      if (args.blockNumber !== undefined) {
-        cli.push('by-number', String(args.blockNumber));
-      } else if (args.from !== undefined || args.to !== undefined) {
-        cli.push('by-range');
-        if (args.from !== undefined) cli.push('--from', String(args.from));
-        if (args.to !== undefined) cli.push('--to', String(args.to));
-      } else {
-        throw new Error(
-          'checkBlocks requires either `blockNumber` or at least one of `from`/`to`',
-        );
-      }
-      return runCli(cli, callOpts);
-    },
-
-    async truncateChainCache(chain, callOpts) {
-      // CLI: graphman chain truncate <chain>
-      // IRREVERSIBLE — confirmation gated at the tool layer.
-      return runCli(['chain', 'truncate', chain], callOpts);
-    },
-
-    async clearCallCache(args, callOpts) {
-      // CLI: graphman chain call-cache <chain> remove [--from <n>] [--to <n>] [--remove-entire-cache]
-      // TODO: verify against live graphman — the subcommand name (`call-cache`
-      // vs `callcache`) and the entire-cache flag (`--remove-entire-cache`
-      // vs `--remove-all`) have varied across versions.
-      const cli = ['chain', 'call-cache', args.chain, 'remove'];
-      if (args.removeAll) {
-        cli.push('--remove-entire-cache');
-      } else {
-        if (args.from !== undefined) cli.push('--from', String(args.from));
-        if (args.to !== undefined) cli.push('--to', String(args.to));
-      }
-      return runCli(cli, callOpts);
-    },
+    //
+    // async rewindDeployment(deploymentId, blockNumber, blockHash, callOpts) {
+    //   // CLI: graphman rewind <block_hash> <block_number> <deployment>
+    //   const result = await runCli(
+    //     ['rewind', blockHash, String(blockNumber), deploymentId],
+    //     callOpts,
+    //   );
+    //   if (result.exitCode === 0) invalidateDeployment(deploymentId, 'rewindDeployment');
+    //   return result;
+    // },
+    //
+    // async reassignDeployment(deploymentId, targetNode, callOpts) {
+    //   // CLI: graphman reassign <deployment> <node>
+    //   const result = await runCli(['reassign', deploymentId, targetNode], callOpts);
+    //   if (result.exitCode === 0) invalidateDeployment(deploymentId, 'reassignDeployment');
+    //   return result;
+    // },
+    //
+    // async unassignDeployment(deploymentId, callOpts) {
+    //   // CLI: graphman unassign <deployment>
+    //   const result = await runCli(['unassign', deploymentId], callOpts);
+    //   if (result.exitCode === 0) invalidateDeployment(deploymentId, 'unassignDeployment');
+    //   return result;
+    // },
+    //
+    // async dropDeployment(deploymentId, callOpts) {
+    //   // CLI: graphman drop <deployment>
+    //   // IRREVERSIBLE — confirmation gated at the tool layer, not the client.
+    //   const result = await runCli(['drop', deploymentId], callOpts);
+    //   if (result.exitCode === 0) invalidateDeployment(deploymentId, 'dropDeployment');
+    //   return result;
+    // },
+    //
+    // async unusedRecord(callOpts) {
+    //   // CLI: graphman unused record
+    //   return runCli(['unused', 'record'], callOpts);
+    // },
+    //
+    // async unusedRemove(args = {}, callOpts) {
+    //   // CLI: graphman unused remove [--older <minutes>] [--count <n>]
+    //   // TODO: verify against live graphman — some versions use `-c`/`--count`,
+    //   // others accept only `--older`.
+    //   const cli = ['unused', 'remove'];
+    //   if (args.olderThanMinutes !== undefined) {
+    //     cli.push('--older', String(args.olderThanMinutes));
+    //   }
+    //   if (args.count !== undefined) {
+    //     cli.push('--count', String(args.count));
+    //   }
+    //   return runCli(cli, callOpts);
+    // },
+    //
+    // async checkBlocks(args, callOpts) {
+    //   // CLI:
+    //   //   graphman chain check-blocks <chain> by-number <n>
+    //   //   graphman chain check-blocks <chain> by-range --from <n> --to <n>
+    //   const cli = ['chain', 'check-blocks', args.chain];
+    //   if (args.blockNumber !== undefined) {
+    //     cli.push('by-number', String(args.blockNumber));
+    //   } else if (args.from !== undefined || args.to !== undefined) {
+    //     cli.push('by-range');
+    //     if (args.from !== undefined) cli.push('--from', String(args.from));
+    //     if (args.to !== undefined) cli.push('--to', String(args.to));
+    //   } else {
+    //     throw new Error(
+    //       'checkBlocks requires either `blockNumber` or at least one of `from`/`to`',
+    //     );
+    //   }
+    //   return runCli(cli, callOpts);
+    // },
+    //
+    // async truncateChainCache(chain, callOpts) {
+    //   // CLI: graphman chain truncate <chain>
+    //   // IRREVERSIBLE — confirmation gated at the tool layer.
+    //   return runCli(['chain', 'truncate', chain], callOpts);
+    // },
+    //
+    // async clearCallCache(args, callOpts) {
+    //   // CLI: graphman chain call-cache <chain> remove [--from <n>] [--to <n>] [--remove-entire-cache]
+    //   // TODO: verify against live graphman — the subcommand name (`call-cache`
+    //   // vs `callcache`) and the entire-cache flag (`--remove-entire-cache`
+    //   // vs `--remove-all`) have varied across versions.
+    //   const cli = ['chain', 'call-cache', args.chain, 'remove'];
+    //   if (args.removeAll) {
+    //     cli.push('--remove-entire-cache');
+    //   } else {
+    //     if (args.from !== undefined) cli.push('--from', String(args.from));
+    //     if (args.to !== undefined) cli.push('--to', String(args.to));
+    //   }
+    //   return runCli(cli, callOpts);
+    // },
+    // ===== end disabled CLI implementations =====
   };
 }

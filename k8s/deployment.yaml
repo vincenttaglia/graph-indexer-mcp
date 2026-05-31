@@ -11,9 +11,8 @@
 #
 # That spawns a SECOND short-lived MCP process inside the running pod for the
 # duration of the client's session. The "main" PID-1 process exists mostly to
-# keep the pod alive, hold the SA token mount, and surface a single point of
-# config. Hence replicas: 1 — horizontal scaling does not buy us anything for
-# stdio MCP.
+# keep the pod alive and surface a single point of config. Hence replicas: 1 —
+# horizontal scaling does not buy us anything for stdio MCP.
 #
 # Alternative: switch replicas to 0 and use `kubectl run --rm -it` against the
 # image directly. The Deployment form is friendlier for operators who prefer
@@ -43,8 +42,10 @@ spec:
         app.kubernetes.io/component: mcp-server
     spec:
       serviceAccountName: graph-indexer-mcp
-      # Pod opts into SA token mount so kubectl can authenticate from inside.
-      automountServiceAccountToken: true
+      # The stdio profile uses static authorization (ACCESS_LEVEL) and no longer
+      # shells out to kubectl, so it needs no SA token. (The HTTP/k8s-rbac
+      # profile in deployment-http.yaml mounts the token for TokenReview/SAR.)
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -81,7 +82,7 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            # Writable scratch for node / kubectl temp files.
+            # Writable scratch for node temp files.
             - name: tmp
               mountPath: /tmp
             - name: home

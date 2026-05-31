@@ -260,9 +260,12 @@ live under a \`sgd<N>\` schema. The MCP queries it read-only (via
 **graphman**
 The graph-node operator CLI / GraphQL API used for maintenance: pause/resume,
 restart, rewind, reassign, drop, chain cache management, and "unused
-deployment" reaping. The MCP uses graphman's GraphQL API on port 8050 where
-available and falls back to invoking the CLI via \`kubectl exec\` for
-operations not yet exposed as GraphQL.
+deployment" reaping. The MCP uses graphman's GraphQL API on port 8050. Only the
+GraphQL-backed operations (deployment info, pause, resume, restart, execution
+status) are currently exposed; the CLI-only operations (rewind, reassign,
+unassign, drop, unused record/remove, check-blocks, chain cache) are disabled
+pending a graphman GraphQL reimplementation — the prior \`kubectl exec\`
+fallback was removed because the MCP runs remote from graph-node.
 
 **Network Subgraph**
 The protocol's on-chain accounting subgraph. Source of truth for indexer

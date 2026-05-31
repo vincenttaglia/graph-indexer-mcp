@@ -26,16 +26,14 @@ data:
   INDEXER_AGENT_URL: "http://indexer-agent.indexer-agent.svc.cluster.local:18000/graphql"
   GRAPHMAN_API_URL: "http://graph-node-query.graph-node.svc.cluster.local:8050"
 
-  # --- Graphman CLI fallback (kubectl exec) ---
-  # Namespace where graph-node pods live (NOT necessarily the MCP namespace).
-  GRAPHMAN_KUBECTL_NAMESPACE: "graph-node"
-  GRAPHMAN_POD_LABEL: "app=graph-node"
-  GRAPHMAN_CONFIG_PATH: "/etc/graph-node/config.toml"
-
   # --- Access control ---
   # read_only | read_write | read_write_destructive | full
   ACCESS_LEVEL: "read_write"
   ACCESS_OVERRIDES_ALLOW: ""
+  # NOTE: graphman_drop_deployment / graphman_rewind_deployment are currently
+  # DISABLED (the kubectl-exec CLI path was removed; pending graphman GraphQL
+  # reimplementation). These deny entries are harmless no-ops today and remain
+  # as a safe default for when those destructive tools return.
   ACCESS_OVERRIDES_DENY: "graphman_drop_deployment,graphman_rewind_deployment"
 
   # --- Transport + authorization (optional; stdio defaults shown commented) ---

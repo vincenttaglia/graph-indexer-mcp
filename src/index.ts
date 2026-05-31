@@ -6,7 +6,6 @@ import { initAccessControlWith, validateOverrides } from './access-control.js';
 import { StaticAuthorizer, type Authorizer } from './auth/authorizer.js';
 import { loadConfig } from './config.js';
 import { createGraphqlClient } from './utils/graphql-client.js';
-import type { KubectlContext } from './utils/kubectl.js';
 
 import { createNetworkSubgraphClient } from './clients/network-subgraph.js';
 import { createEboSubgraphClient } from './clients/ebo-subgraph.js';
@@ -84,20 +83,16 @@ async function main(): Promise<void> {
     endpoint: config.indexerAgentUrl,
   });
 
-  // Graphman is dual-mode: GraphQL on :8050 + CLI fallback via kubectl exec.
+  // Graphman GraphQL API on :8050. (The legacy kubectl-exec CLI fallback has
+  // been removed — the MCP runs remote from graph-node — so CLI-only ops are
+  // disabled pending a graphman GraphQL reimplementation.)
   const graphmanGql = createGraphqlClient({
     endpoint: config.graphmanApiUrl,
     authToken: config.graphmanAuthToken,
     label: 'graphman',
   });
-  const graphmanKubectl: KubectlContext = {
-    namespace: config.graphmanKubectlNamespace,
-    podLabel: config.graphmanPodLabel,
-  };
   const graphmanClient = createGraphmanClient({
     gql: graphmanGql,
-    kubectl: graphmanKubectl,
-    configPath: config.graphmanConfigPath,
   });
 
   // ---------------------------------------------------------------------------

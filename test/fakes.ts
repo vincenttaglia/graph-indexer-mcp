@@ -17,7 +17,7 @@ import type {
   SubgraphDeployment,
 } from '../src/types/network.js';
 import type { SubgraphIndexingStatus } from '../src/types/graphnode.js';
-import type { DeploymentInfo, GraphmanCliResult } from '../src/types/graphman.js';
+import type { DeploymentInfo } from '../src/types/graphman.js';
 import type { CostModel, IndexingRule } from '../src/types/agent.js';
 import type {
   DeploymentVolumeRow,
@@ -288,16 +288,6 @@ export interface FakeGraphmanClientOpts {
 }
 
 export function fakeGraphmanClient(opts: FakeGraphmanClientOpts = {}): GraphmanClient {
-  // Default CLI result returned by every no-op CLI stub. Keeping a single
-  // shape here lets a single regression in `GraphmanCliResult` flag every
-  // call site at typecheck time, instead of being masked by a `Partial`
-  // cast (the Stage 4 audit, Finding 4).
-  const cliOk = (command: string[]): GraphmanCliResult => ({
-    stdout: '',
-    stderr: '',
-    exitCode: 0,
-    command,
-  });
   const ack: GraphmanMutationAck = { success: true };
   return {
     // ---- GraphQL ----
@@ -318,34 +308,9 @@ export function fakeGraphmanClient(opts: FakeGraphmanClientOpts = {}): GraphmanC
     async getExecutionStatus(id) {
       return { id, state: 'SUCCEEDED' };
     },
-    // ---- CLI fallback ----
-    async rewindDeployment(id, blockNumber, blockHash) {
-      return cliOk(['graphman', 'rewind', id, String(blockNumber), blockHash]);
-    },
-    async reassignDeployment(id, targetNode) {
-      return cliOk(['graphman', 'reassign', id, targetNode]);
-    },
-    async unassignDeployment(id) {
-      return cliOk(['graphman', 'unassign', id]);
-    },
-    async dropDeployment(id) {
-      return cliOk(['graphman', 'drop', id]);
-    },
-    async unusedRecord() {
-      return cliOk(['graphman', 'unused', 'record']);
-    },
-    async unusedRemove() {
-      return cliOk(['graphman', 'unused', 'remove']);
-    },
-    async checkBlocks(args) {
-      return cliOk(['graphman', 'check-blocks', args.chain]);
-    },
-    async truncateChainCache(chain) {
-      return cliOk(['graphman', 'chain', 'truncate', chain]);
-    },
-    async clearCallCache(args) {
-      return cliOk(['graphman', 'chain', 'clear-call-cache', args.chain]);
-    },
+    // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs
+    // remote from graph-node). The 9 CLI methods are no longer on GraphmanClient;
+    // restore their stubs here when reimplemented against the graphman GraphQL API. =====
   };
 }
 

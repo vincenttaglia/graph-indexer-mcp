@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | Local stdio | stdio | Operator's laptop | Single-operator dev / hand-driven sessions via Claude Desktop. |
 | Remote HTTP | Streamable HTTP | Service alongside indexer | Shared team access, durable connections. |
-| In-cluster | Streamable HTTP (or stdio in a kubectl-exec session) | Pod next to graph-node | Production. Best fit for graphman CLI fallback. |
+| In-cluster | Streamable HTTP (or stdio in a kubectl-exec session) | Pod next to graph-node | Production. Per-caller Kubernetes RBAC authorization. |
 
 In every mode, the configuration model is the same: env vars (validated by Zod at startup) drive everything. See [config-reference.md](config-reference.md).
 
@@ -21,7 +21,6 @@ Operator runs `node dist/index.js` as a subprocess of Claude Desktop.
 - Node `>=22` on the host.
 - Built artifact at `dist/index.js` (run `npm run build`).
 - Network reachability to the configured endpoints (network subgraph gateway, indexer-agent, graphman API, graph-node).
-- If using graphman CLI fallback: `kubectl` on `$PATH` with a kubeconfig context whose default namespace + RBAC allows `pods/exec` on the graph-node pod.
 
 **Optional:**
 
@@ -44,8 +43,6 @@ Operator runs `node dist/index.js` as a subprocess of Claude Desktop.
         "INDEXER_AGENT_URL": "http://localhost:18000/graphql",
         "GRAPHMAN_API_URL": "http://localhost:8050",
         "GRAPHMAN_AUTH_TOKEN": "replace-me",
-        "GRAPHMAN_KUBECTL_NAMESPACE": "graph-protocol",
-        "GRAPHMAN_POD_LABEL": "app=graph-node",
         "GRAPH_NODE_POSTGRES_URL": "postgresql://readonly:pw@localhost:5432/graph-node",
         "ACCESS_LEVEL": "read_write"
       }
@@ -80,41 +77,25 @@ Connect a remote MCP-aware client by pointing it at the HTTP endpoint. Keep the 
 
 ## 3. In-cluster (Kubernetes)
 
-The recommended production pattern. Run the MCP as a pod in the same namespace as graph-node. Manifests live under `k8s/`: ConfigMap, Secret, ServiceAccount, Role, RoleBinding, and a choice of Deployment — `deployment.yaml` (stdio profile) or `deployment-http.yaml` + `service.yaml` (HTTP profile). For per-caller Kubernetes RBAC authorization see [HTTP profile / in-cluster RBAC](#http-profile--in-cluster-rbac).
+The recommended production pattern. Run the MCP as a pod in the same namespace as graph-node. Manifests live under `k8s/`: ConfigMap, Secret, ServiceAccount, and a choice of Deployment — `deployment.yaml` (stdio profile) or `deployment-http.yaml` + `service.yaml` (HTTP profile). For per-caller Kubernetes RBAC authorization see [HTTP profile / in-cluster RBAC](#http-profile--in-cluster-rbac).
+
+> **Note:** the MCP no longer needs to `exec` into graph-node. The graphman
+> CLI-fallback path (which used `kubectl exec`) has been removed — the MCP runs
+> remote from graph-node and speaks only the graphman GraphQL API on `:8050`.
+> The old pods/exec Role + RoleBinding manifests are gone; the ServiceAccount
+> remains, used by the HTTP / k8s-rbac authorizer for TokenReview/SAR.
 
 **Required:**
 
 - Image pushed to a registry the cluster can pull from.
 - ConfigMap for non-secret env (`INDEXER_ADDRESS`, all `*_URL` values, `ACCESS_LEVEL`, lists, tuning params).
 - Secret for `GRAPHMAN_AUTH_TOKEN`, `GRAPH_NODE_POSTGRES_URL` (if used).
-- **ServiceAccount + Role with `pods/exec`** on the graph-node pod for the graphman CLI fallback. Minimum verbs on the `pods` resource: `get`, `list`. On `pods/exec`: `create`. Scope to the graph-node namespace.
 - A NetworkPolicy or equivalent allowing egress to the indexer-agent, graphman API, graph-node Status API, Postgres, and the external subgraph gateway.
 
 **Optional:**
 
 - HorizontalPodAutoscaler — not generally useful (per-operator session load is small).
 - A separate ingress for the remote-HTTP transport if external access is desired.
-
-The in-cluster pattern avoids shipping kubeconfig: `kubectl` inside the pod automatically uses the mounted ServiceAccount token. Match `GRAPHMAN_KUBECTL_NAMESPACE` to the graph-node namespace and `GRAPHMAN_POD_LABEL` to a selector that uniquely matches the pod (or pods) hosting `graphman`.
-
-### Minimum RBAC sketch
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  namespace: graph-protocol
-  name: graph-indexer-mcp-graphman
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["create"]
-```
-
-Bound to the MCP server's ServiceAccount via a RoleBinding in the same namespace.
 
 ---
 
@@ -150,7 +131,7 @@ startup. The default `stdio` + `static` is byte-for-byte the legacy behavior.
 ### Manifests
 
 The HTTP / k8s-rbac profile adds these manifests on top of the base set
-(ConfigMap, Secret, ServiceAccount, Role, RoleBinding):
+(ConfigMap, Secret, ServiceAccount):
 
 | File | Purpose |
 | --- | --- |
@@ -164,7 +145,7 @@ Apply:
 ```bash
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml -f k8s/secret.yaml
-kubectl apply -f k8s/serviceaccount.yaml -f k8s/role.yaml -f k8s/rolebinding.yaml
+kubectl apply -f k8s/serviceaccount.yaml
 # HTTP / k8s-rbac additions:
 kubectl apply -f k8s/clusterrolebinding-auth-delegator.yaml
 kubectl apply -f k8s/clusterrole-mcp-roles.yaml
@@ -225,6 +206,6 @@ After starting the server in any mode:
 2. Connect a client and request the resource `indexer://config` — confirms the configuration was loaded and credentials were stripped from the snapshot.
 3. Call `get_network_parameters` — confirms the network subgraph endpoint is reachable.
 4. Call `get_infrastructure_overview` — exercises every data source and reports per-source failures under `partialErrors`.
-5. If graphman CLI fallback is wired: call `graphman_check_blocks` (read-only diagnostic) for any chain.
+5. Call `graphman_deployment_info` for a known deployment — confirms the graphman GraphQL API on `:8050` is reachable and authenticated.
 
 If any of those fail, see [troubleshooting.md](troubleshooting.md).

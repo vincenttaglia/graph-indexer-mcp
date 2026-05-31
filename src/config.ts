@@ -59,9 +59,13 @@ export const configSchema = z.object({
   graphmanApiUrl: z.url(),
   graphmanAuthToken: z.string().min(1),
 
-  graphmanKubectlNamespace: z.string().default('default'),
-  graphmanPodLabel: z.string().default('app=graph-node'),
-  graphmanConfigPath: z.string().default('/etc/graph-node/config.toml'),
+  // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+  // These three env vars served the removed kubectl/CLI-exec path and will
+  // return if/when the graphman CLI ops are reimplemented against the GraphQL API. =====
+  // graphmanKubectlNamespace: z.string().default('default'),
+  // graphmanPodLabel: z.string().default('app=graph-node'),
+  // graphmanConfigPath: z.string().default('/etc/graph-node/config.toml'),
+  // ===== end disabled kubectl/CLI config =====
 
   graphNodePostgresUrl: z.url().optional(),
 
@@ -210,9 +214,13 @@ function envToConfigInput(env: NodeJS.ProcessEnv): Record<string, unknown> {
     indexerAgentUrl: env.INDEXER_AGENT_URL,
     graphmanApiUrl: env.GRAPHMAN_API_URL,
     graphmanAuthToken: env.GRAPHMAN_AUTH_TOKEN,
-    graphmanKubectlNamespace: env.GRAPHMAN_KUBECTL_NAMESPACE,
-    graphmanPodLabel: env.GRAPHMAN_POD_LABEL,
-    graphmanConfigPath: env.GRAPHMAN_CONFIG_PATH,
+    // ===== graphman CLI operations — DISABLED: kubectl path removed (MCP runs remote from graph-node).
+    // These served the removed kubectl/CLI-exec path; restore alongside the
+    // schema fields above when graphman CLI ops are reimplemented via GraphQL. =====
+    // graphmanKubectlNamespace: env.GRAPHMAN_KUBECTL_NAMESPACE,
+    // graphmanPodLabel: env.GRAPHMAN_POD_LABEL,
+    // graphmanConfigPath: env.GRAPHMAN_CONFIG_PATH,
+    // ===== end disabled kubectl/CLI env =====
     graphNodePostgresUrl: env.GRAPH_NODE_POSTGRES_URL || undefined,
     ipfsGatewayUrl: env.IPFS_GATEWAY_URL,
     ipfsMaxBytes: env.IPFS_MAX_BYTES,

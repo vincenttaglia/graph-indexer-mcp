@@ -111,7 +111,7 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            # Writable scratch for node / kubectl temp files.
+            # Writable scratch for node temp files.
             - name: tmp
               mountPath: /tmp
             - name: home
