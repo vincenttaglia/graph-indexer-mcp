@@ -57,19 +57,20 @@ Call in parallel:
 - \`graphman_deployment_info\` with deployment ${deploymentId} — node assignment, paused state, namespace, schema.
 - \`get_entity_count\` with deployment ${deploymentId} — entity count progression (large drop = data loss).
 - \`get_subgraph_size\` with deployment ${deploymentId} — current disk footprint.
+- \`get_subgraph_manifest\` with deployment ${deploymentId} — fetches the deployment's manifest from IPFS: the subgraph's network(s), each \`dataSources[].network\` / \`address\` (the contracts indexed), and \`startBlock\`. This tells you WHICH chain to RPC-check in Steps 2–3 and which contracts are involved — keep the network name and startBlock handy.
 
 ## Step 2 — Classify the failure mode
 
 Use \`get_deployment_health\` output to bucket the issue:
 
-- **Health = \`healthy\` but lagging** — RPC issue or congestion. Investigate node logs; consider \`graphman_check_blocks\` to verify whether the block cache disagrees with the RPC.
+- **Health = \`healthy\` but lagging** — RPC issue or congestion. Investigate node logs, then confirm the chain head directly: call \`list_rpc_chains\` (zero-arg) to find the alias + permitted methods for the deployment's network (from the \`get_subgraph_manifest\` output), then \`rpc_call\` that chain — \`eth_blockNumber\` for the true chain head, or \`eth_getBlockByNumber\` at the deployment's \`latestBlock\` — and compare the TRUE chain head against graph-node's \`chainHead\` / \`latestBlock\` from \`get_deployment_health\`. A large gap means graph-node is genuinely behind the chain or its block cache is stale (the role the old \`check_blocks\` step played).
 - **Health = \`unhealthy\`, no fatalError** — non-fatal error in the latest block; check whether it's transient. May self-heal.
 - **Health = \`failed\`, deterministic fatalError** — schema/handler bug. Recovery typically requires rewind to before the bad block and a deploy of a fixed version. Cross-verify failure block with peers from \`get_deployment_allocations\`.
 - **Health = \`failed\`, non-deterministic fatalError** — RPC reorg / chain cache corruption / OOM. Often recoverable in place via restart + cache clear + rewind.
 
 ## Step 3 — Cross-reference
 
-For \`failed\` cases, call \`graphman_check_blocks\` on the suspected failure block to determine whether the local cache diverges from the canonical chain. If divergent, that block must be truncated (via \`graphman_truncate_chain_cache\`) before rewind can succeed.
+For \`failed\` cases, use \`rpc_call\` (\`eth_getBlockByNumber\` at the suspected failure block, on the deployment's chain — discover the chain alias via \`list_rpc_chains\`) and compare the canonical block hash returned to graph-node's view and to peer indexers' POIs from \`get_deployment_allocations\`. A mismatch indicates the local block cache diverges from the canonical chain. Note: the actual fix — truncating the chain cache at that block before a rewind can succeed — is an **operator-manual** \`graphman chain truncate\` step on the graph-node host (no MCP tool).
 
 If the deployment was recently upgraded (compare current deployment_id to historic versions from \`get_all_signalled_deployments\`), suspect a schema-incompatible upgrade.
 
@@ -88,11 +89,11 @@ Produce a markdown report with sections:
    - "wait" (transient, will self-heal),
    - "operator review" (ambiguous, needs human),
    - "invoke \`recover_failed_deployment\` with deployment_id=${deploymentId}" (clear graphman recovery path),
-   - "rebuild from scratch" (data loss / drop+resync via \`graphman_drop_deployment\`),
+   - "drop and resync" (data loss — operator-manual \`graphman drop\` on the graph-node host; no MCP tool; irreversible),
    - "close allocation before epoch flip" (when applicable).
 4. **Risk and reversibility notes** — explicit callout when destructive tools are involved.
 
-**This prompt is read-only.** Do NOT call any mutation tool (\`graphman_pause_deployment\`, \`graphman_restart_deployment\`, \`graphman_rewind_deployment\`, \`graphman_drop_deployment\`, \`graphman_truncate_chain_cache\`, \`graphman_clear_call_cache\`, \`queue_unallocate\`, etc.) from this prompt. Present the diagnosis + plan, then let the operator (or the follow-up prompt) execute.
+**This prompt is read-only.** Do NOT call any mutation tool — the live ones today are \`graphman_pause_deployment\`, \`graphman_resume_deployment\`, \`graphman_restart_deployment\`, \`queue_unallocate\`, and \`set_indexing_rule\` — from this prompt. (The diagnostic tools used above, including \`rpc_call\`, \`list_rpc_chains\`, and \`get_subgraph_manifest\`, are read-only and fine to call.) Operator-manual \`graphman\` subcommands such as rewind, drop, chain truncate, and clear call-cache have no MCP tool and are never invoked from here regardless. Present the diagnosis + plan, then let the operator (or the follow-up prompt) execute.
 `;
       return {
         description: `Investigate unhealthy deployment ${deploymentId}.`,

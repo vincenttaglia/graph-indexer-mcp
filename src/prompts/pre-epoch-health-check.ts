@@ -42,10 +42,10 @@ Call \`run_health_check\` (optional args: \`indexer_address\`, \`urgency_thresho
 - \`risk\` — per-allocation RiskAssessment with level ('low' | 'medium' | 'high' | 'critical') and reasons.
 - \`closePlan\` — closable AND worth-closing-now entries (allocationId, deploymentId, path, poiBlock?, reason). This is the operator-facing table.
 - \`blockedFromClose\` — unhealthy/failed allocations that can't be safely closed this epoch (surface as operator-review table).
-- \`recoveryPlan\` — graphman recovery recommendations for failed deployments (type: 'restart' | 'rewind' | 'check_blocks' | 'clear_call_cache' | 'manual_review', with deploymentId, rationale, args).
+- \`recoveryPlan\` — graphman recovery recommendations for failed deployments (type: 'restart' | 'rewind' | 'check_blocks' | 'clear_call_cache' | 'manual_review', with deploymentId, rationale, args). Of these, only \`restart\` has a live MCP tool (\`graphman_restart_deployment\`); \`rewind\`, \`check_blocks\`, and \`clear_call_cache\` recoveries are **currently operator-manual** \`graphman\` subcommands on the graph-node host (the kubectl-exec path was removed). Surface them in the plan as manual steps, not as tool calls.
 - \`warnings\` and \`errors\` — surface prominently.
 
-Present \`closePlan\` and \`blockedFromClose\` as markdown tables and summarize timing + counts. **STOP HERE. Wait for explicit operator approval before executing any \`queue_unallocate\` for closePlan entries, OR any graphman_* recovery command from recoveryPlan.** \`approve_actions\` is always operator-gated.
+Present \`closePlan\` and \`blockedFromClose\` as markdown tables and summarize timing + counts. **STOP HERE. Wait for explicit operator approval before executing any \`queue_unallocate\` for closePlan entries, OR any recovery from recoveryPlan** — noting that only \`restart\` recoveries map to a live tool (\`graphman_restart_deployment\`); \`rewind\` / \`check_blocks\` / \`clear_call_cache\` recoveries are operator-manual \`graphman\` subcommands on the host, not tool calls. \`approve_actions\` is always operator-gated.
 
 The composite is plan-only; this prompt still walks the operator through execution after approval. If the composite returns blocking errors, or you need to debug an individual classification, fall back to the ALTERNATIVE PATH below.
 
@@ -89,7 +89,7 @@ For every active allocation, call \`get_deployment_health\` (graph-node) and \`g
 | failed   | below                        | deterministic     | Path B YES           | Verify failure block with other indexers   |
 | failed   | below                        | non-deterministic | NO                   | Operator review — cannot safely close      |
 
-For Path B candidates with a deterministic fatalError, call \`graphman_check_blocks\` to corroborate the failure block before queueing the close.
+For Path B candidates with a deterministic fatalError, use \`rpc_call\` (\`eth_getBlockByNumber\` at the suspected failure block on the deployment's chain — discover chain aliases via \`list_rpc_chains\`) to compare the canonical block against graph-node's state, and corroborate with peer POIs from \`get_deployment_allocations\`, before queueing the close.
 
 ## Step 4 — Assess urgency
 
@@ -105,9 +105,9 @@ Process Path A closes first (they expire at the flip). Path B closes can wait if
 
 For each closable allocation, draft a row in the close plan with deployment id, allocated GRT, path (A/B), and a one-line reason citing the decision-matrix row that classified it. For each unhealthy-but-degrading allocation that is NOT closable, draft a row for operator review with a clear explanation of why (which row of the decision matrix it matches).
 
-For Path A closables flagged as "healthy but stale RPC", call \`graphman_check_blocks\` to diagnose before deciding whether to include them in the close plan.
+For Path A closables flagged as "healthy but stale RPC", use \`rpc_call\` (\`eth_blockNumber\` on the deployment's chain — discover aliases via \`list_rpc_chains\`) to get the true chain head and compare it against graph-node's reported head, before deciding whether to include them in the close plan.
 
-For post-close failed deployments, recommend (but do NOT auto-invoke) the \`recover_failed_deployment\` prompt for follow-up via graphman_restart_deployment / graphman_rewind_deployment / graphman_clear_call_cache.
+For post-close failed deployments, recommend (but do NOT auto-invoke) the \`recover_failed_deployment\` prompt for follow-up. Of the graphman recovery steps, only \`graphman_restart_deployment\` is a live MCP tool; \`graphman rewind\` and \`graphman clear call-cache\` are operator-manual subcommands on the graph-node host.
 
 ## Step 6 — Output the plan and STOP
 

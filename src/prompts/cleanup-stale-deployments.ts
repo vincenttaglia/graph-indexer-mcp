@@ -38,6 +38,8 @@ Goal: identify deployments the indexer is syncing that are no longer worth the d
 
 Mode: ${dryRun ? '**dry_run = true** — produce a plan only; do NOT invoke any graphman destructive tool.' : '**dry_run = false** — operator has opted into per-step confirmation; each destructive op requires explicit go-ahead.'}
 
+> **Tooling note:** only \`graphman_pause_deployment\` (plus \`queue_unallocate\`, \`set_indexing_rule\`, and the read-only \`graphman_deployment_info\`) are live MCP tools for this workflow. The removal operations — \`graphman_unassign_deployment\`, \`graphman_unused_record\`, \`graphman_unused_remove\`, and \`graphman_drop_deployment\` — are **currently unavailable as tools** (the kubectl-exec path was removed; a graphman GraphQL reimplementation is pending). Where the plan needs one of those, present it as an **operator-manual step**: the operator runs the corresponding \`graphman <subcommand>\` directly on the graph-node host. Steps marked **(manual)** below are these operator-run subcommands, not tool calls.
+
 ## PRIMARY PATH — composite tool
 
 Call \`run_discovery\` with the required arg:
@@ -53,15 +55,17 @@ The cleanup-relevant fields in \`DiscoveryResult\` are:
 
 Map cleanup steps to tools:
 
-| Composite step | Tool |
-|---|---|
-| \`close_allocation\` | \`queue_unallocate\` (wait for close before next step) |
-| \`pause\` | \`graphman_pause_deployment\` |
-| \`unassign\` | \`graphman_unassign_deployment\` |
-| \`unused_record\` | \`graphman_unused_record\` |
-| \`unused_remove\` | \`graphman_unused_remove\` |
+\`run_discovery\` still EMITS all of these step types; the table below maps each to how it is executed today. Steps marked **(manual)** are operator-run \`graphman\` subcommands on the graph-node host, not MCP tool calls.
 
-Note: \`run_discovery\` deliberately does NOT recommend \`graphman_drop_deployment\` in its cleanup steps. Drop is irreversible and operator-initiated only — never invoke from a composite-derived plan without an explicit, separate operator request that names the deployment.
+| Composite step | Tool / execution |
+|---|---|
+| \`close_allocation\` | \`queue_unallocate\` (live; wait for close before next step) |
+| \`pause\` | \`graphman_pause_deployment\` (live) |
+| \`unassign\` | **(manual)** \`graphman unassign\` on the host |
+| \`unused_record\` | **(manual)** \`graphman unused record\` on the host |
+| \`unused_remove\` | **(manual)** \`graphman unused remove\` on the host |
+
+Note: \`run_discovery\` deliberately does NOT recommend \`graphman_drop_deployment\` in its cleanup steps. Drop is irreversible, operator-initiated only, and **(manual)** anyway (\`graphman drop\` on the host) — never include it in a composite-derived plan without an explicit, separate operator request that names the deployment.
 
 Present \`stale\` + \`cleanup\` as a markdown table (deployment_id, reason, paused, hasAllocation, isFrozen, sizeBytes, planned_steps, rationale) with the totals from Step 4 below. **STOP. Wait for explicit operator approval before executing any step via the mapped tools above.** Per-deployment confirmation is required when \`dry_run = false\`.
 
@@ -108,12 +112,14 @@ A deployment is a cleanup candidate when:
 
 For each candidate, build the per-deployment plan based on its current state:
 
+Steps marked **(manual)** are operator-run \`graphman\` subcommands on the graph-node host, not MCP tool calls.
+
 | State                                  | Sequence                                                                                                    |
 |----------------------------------------|-------------------------------------------------------------------------------------------------------------|
 | Allocated + syncing                    | \`queue_unallocate\` -> wait for close -> proceed                                                             |
-| Synced, unallocated, low signal        | \`graphman_pause_deployment\` -> \`graphman_unassign_deployment\` -> \`graphman_unused_record\` -> \`graphman_unused_remove\` |
-| Already paused + unassigned            | \`graphman_unused_record\` -> \`graphman_unused_remove\`                                                       |
-| Hard removal (superseded + zero usage) | All of the above, then \`graphman_drop_deployment\` (IRREVERSIBLE — operator explicit confirmation per drop) |
+| Synced, unallocated, low signal        | \`graphman_pause_deployment\` -> **(manual)** \`graphman unassign\` -> **(manual)** \`graphman unused record\` -> **(manual)** \`graphman unused remove\` |
+| Already paused + unassigned            | **(manual)** \`graphman unused record\` -> **(manual)** \`graphman unused remove\`                            |
+| Hard removal (superseded + zero usage) | All of the above, then **(manual)** \`graphman drop\` (IRREVERSIBLE — operator explicit confirmation per drop) |
 | Frozenlist                             | SKIP — never touch.                                                                                         |
 
 For an indexing-rule deactivation (rather than node removal), use \`set_indexing_rule\` with \`decisionBasis = 'never'\` so the agent stops considering it for future allocation.
@@ -134,8 +140,8 @@ Below the table:
 - Anything skipped because it's on \`frozenlist\`.
 
 ${dryRun
-  ? '**Stop here.** Do NOT call \`graphman_pause_deployment\`, \`graphman_unassign_deployment\`, \`graphman_unused_record\`, \`graphman_unused_remove\`, \`graphman_drop_deployment\`, \`queue_unallocate\`, or \`set_indexing_rule\`. Present the plan to the operator and wait for explicit approval. If approved, the operator will re-invoke with `dry_run=false`.'
-  : 'Process candidates one at a time. For each candidate, present its sequence and ask for operator confirmation BEFORE executing the first destructive step. After each tool call, verify via \`graphman_deployment_info\` and \`get_indexing_statuses\` before proceeding. STOP and escalate on any unexpected result. Never batch-execute \`graphman_drop_deployment\` — each drop requires a fresh confirmation.'}
+  ? '**Stop here.** Do NOT call the live tools \`graphman_pause_deployment\`, \`queue_unallocate\`, or \`set_indexing_rule\`, and do NOT instruct the operator to run any **(manual)** \`graphman\` removal subcommand (\`graphman unassign\` / \`unused record\` / \`unused remove\` / \`drop\`). Present the plan to the operator and wait for explicit approval. If approved, the operator will re-invoke with `dry_run=false`.'
+  : 'Process candidates one at a time. For each candidate, present its sequence and ask for operator confirmation BEFORE executing the first destructive step. Execute the LIVE steps via tools (\`queue_unallocate\`, \`graphman_pause_deployment\`); the **(manual)** removal steps (\`graphman unassign\` / \`unused record\` / \`unused remove\` / \`drop\`) are presented in the plan but RUN BY THE OPERATOR on the graph-node host — surface the exact subcommand and wait for the operator to confirm they have run it before continuing. After each step, verify via \`graphman_deployment_info\` and \`get_indexing_statuses\` before proceeding. STOP and escalate on any unexpected result. Never batch-execute the **(manual)** \`graphman drop\` — each drop requires a fresh confirmation.'}
 `;
       return {
         description: `Cleanup stale deployments (dry_run=${dryRun}).`,
