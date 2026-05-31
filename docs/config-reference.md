@@ -64,7 +64,7 @@ Comma-separated lists trim whitespace and drop empty entries (`csv()` helper in 
 
 - **Type:** URL
 - **Example:** `http://localhost:8050`
-- **Purpose:** graphman GraphQL endpoint. Used for pause/resume/restart/info/exec-status — the "safe" half of the graphman tool surface.
+- **Purpose:** graphman GraphQL endpoint. Backs all 12 graphman tools over pure GraphQL (no kubectl) — info/pause/resume/restart/exec-status plus rewind, reassign, unassign, drop, check-blocks, truncate-chain-cache, and clear-call-cache.
 
 ### `GRAPHMAN_AUTH_TOKEN` (required)
 
@@ -73,12 +73,13 @@ Comma-separated lists trim whitespace and drop empty entries (`csv()` helper in 
 - **Purpose:** Bearer token for the graphman GraphQL API. Never logged; excluded from `indexer://config`.
 
 > **Removed:** `GRAPHMAN_KUBECTL_NAMESPACE`, `GRAPHMAN_POD_LABEL`, and
-> `GRAPHMAN_CONFIG_PATH` configured the graphman CLI fallback over
-> `kubectl exec`. That path has been removed (the MCP runs remote from
-> graph-node), so these vars are no longer read. They will return if/when the
-> 9 CLI-only graphman operations are reimplemented against the graphman GraphQL
-> API; see the "Disabled — pending graphman GraphQL API" note in
-> [tool-catalog.md](tool-catalog.md).
+> `GRAPHMAN_CONFIG_PATH` configured the old graphman CLI fallback over
+> `kubectl exec`. That path stays removed and these vars are no longer read —
+> the formerly CLI-only operations (rewind, reassign, unassign, drop,
+> check-blocks, truncate-chain-cache, clear-call-cache) are now backed by the
+> graphman **GraphQL** API on `GRAPHMAN_API_URL`, with no kubectl involved. See
+> the Graphman section in [tool-catalog.md](tool-catalog.md) for the live tool
+> surface.
 
 ---
 
@@ -164,7 +165,7 @@ See [access-control.md](access-control.md) for semantics.
 
 - **Type:** comma-separated tool names
 - **Default:** empty
-- **Example:** `graphman_drop_deployment,graphman_unused_remove`
+- **Example:** `graphman_drop_deployment,graphman_rewind_deployment`
 - **Purpose:** Tools that are granted even when the active `ACCESS_LEVEL` would not grant their permission class. Unknown names produce a stderr warning at startup but do not fail boot.
 
 ### `ACCESS_OVERRIDES_DENY`

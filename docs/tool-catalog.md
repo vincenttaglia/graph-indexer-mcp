@@ -266,9 +266,9 @@ Source: `src/tools/agent-tools.ts`. Backed by the indexer-agent Management API. 
 
 ---
 
-## Graphman (5 active, 9 pending)
+## Graphman (12 active)
 
-Source: `src/tools/graphman-tools.ts`. Backed by the graphman GraphQL API on `:8050`. The legacy `kubectl exec` CLI-fallback path has been **removed** (the MCP runs remote from graph-node), so the 9 CLI-only operations are currently **disabled** and do not register — see "Disabled — pending graphman GraphQL API" below. Their handler/schema boilerplate is preserved (commented) in the source for the eventual GraphQL reimplementation.
+Source: `src/tools/graphman-tools.ts`. Backed by the graphman GraphQL API on `:8050`. The legacy `kubectl exec` CLI-fallback path has been **removed** (the MCP runs remote from graph-node); every graphman tool now runs over **pure GraphQL** against `GRAPHMAN_API_URL` — no kubectl, no host-side `graphman` binary. The 7 formerly CLI-only operations (rewind, reassign, unassign, drop, check-blocks, truncate-chain-cache, clear-call-cache) are live again, reimplemented as GraphQL mutations. They require a graph-node build whose graphman GraphQL server exposes these mutations; older builds surface a GraphQL error as `isError`. The graphman `unused` record/remove reaping ops are **intentionally not exposed** — see the note at the end of this section.
 
 ### `graphman_deployment_info`
 
@@ -306,21 +306,87 @@ Source: `src/tools/graphman-tools.ts`. Backed by the graphman GraphQL API on `:8
 - **Args:** `execution_id` (string, required, non-empty, must not start with `-`).
 - **Returns:** JSON status.
 
-### Disabled — pending graphman GraphQL API (kubectl exec path removed)
+### `graphman_rewind_deployment`
 
-The following 9 tools are **not registered** in the current build. They were backed only by the `graphman` CLI invoked over `kubectl exec`, which has been removed because the MCP runs remote from graph-node. Each awaits a graphman GraphQL reimplementation; until then, operators run the corresponding `graphman` subcommand directly on the graph-node host. The intended permission class for each is shown so it can be re-applied on reimplementation.
+- **Permission:** `graphman_destructive`
+- **Description:** Rewind a deployment to a specific block (`block_hash` + `block_number`) OR truncate it to its own start block (`start_block=true`), via the graphman GraphQL API. Destructive: discards indexed entity state after the target. **Async** — pauses, waits `delay_seconds`, rewinds, resumes in the background; returns an `execution_id` to poll with `graphman_get_execution_status`.
+- **Args:**
+  - `deployment_id` (string, required) — IPFS CID v0 (`Qm...`, 46 chars).
+  - `start_block` (boolean, optional) — rewind to the deployment's own start block. Mutually exclusive with `block_hash`/`block_number`.
+  - `block_hash` (string, optional) — 32-byte hex (`0x` + 64). Required together with `block_number` when not using `start_block`.
+  - `block_number` (number, optional, non-negative integer) — required together with `block_hash`.
+  - `force` (boolean, optional).
+  - `delay_seconds` (number, optional, non-negative integer) — pause-before-rewind window (default 20 server-side).
+  - `confirm` (literal `true`, required).
+  - **Refine:** exactly one of `start_block=true` OR (`block_hash` AND `block_number`).
+- **Returns:** JSON `{ execution_id, hint }`.
 
-| Tool | Intended permission | Operation |
-| --- | --- | --- |
-| `graphman_rewind_deployment` | `graphman_destructive` | Rewind a deployment to a specific block (clears indexed data after the target). |
-| `graphman_reassign_deployment` | `graphman_safe` | Move a deployment to a different graph-node instance (no data loss). |
-| `graphman_unassign_deployment` | `graphman_destructive` | Stop indexing permanently; data preserved, deployment detached. |
-| `graphman_drop_deployment` | `graphman_destructive` | IRREVERSIBLE — unassign + name unbind + delete indexed data. |
-| `graphman_unused_record` | `graphman_destructive` | Scan shards and mark unused deployments (first reclamation step). |
-| `graphman_unused_remove` | `graphman_destructive` | IRREVERSIBLE — delete data for deployments marked unused. |
-| `graphman_check_blocks` | `read` | Compare cached blocks against the RPC provider (read-only diagnostic). |
-| `graphman_truncate_chain_cache` | `graphman_destructive` | IRREVERSIBLE — clear the entire block cache for a chain. |
-| `graphman_clear_call_cache` | `graphman_destructive` | IRREVERSIBLE — remove call cache entries for a chain. |
+### `graphman_drop_deployment`
+
+- **Permission:** `graphman_destructive`
+- **Description:** IRREVERSIBLE force-delete via the graphman GraphQL API (`deleteDeployment`) — auto-unassigns first, then deletes all indexed data and metadata. **This is the sole deletion path.** A `Qm` hash matching multiple deployments FAILS unless `all=true`; the deleted locators are returned so the operator can disambiguate.
+- **Args:**
+  - `deployment_id` (string, required).
+  - `all` (boolean, optional, default `false`) — delete every deployment matching the hash; without it a multi-match call errors.
+  - `confirm` (literal `true`, required).
+- **Returns:** JSON `{ deleted_locators }`.
+
+### `graphman_reassign_deployment`
+
+- **Permission:** `graphman_safe`
+- **Description:** Assign or reassign a deployment to a different graph-node instance via the graphman GraphQL API. Safe — no data is lost. May complete with warnings, which are surfaced.
+- **Args:**
+  - `deployment_id` (string, required).
+  - `node` (string, required) — graph-node id (alnum / `_` / `-`, must not start with `-`).
+- **Returns:** JSON `{ success, warnings? }`.
+
+### `graphman_unassign_deployment`
+
+- **Permission:** `graphman_destructive`
+- **Description:** Stop indexing a deployment via the graphman GraphQL API (`unassign`). Data is preserved; the deployment is detached from its graph-node instance. (Distinct from drop — this keeps the indexed data.)
+- **Args:**
+  - `deployment_id` (string, required).
+  - `confirm` (literal `true`, required).
+- **Returns:** JSON ack.
+
+### `graphman_check_blocks`
+
+- **Permission:** `graphman_safe` (was `read` — reclassified because it now mutates the cache)
+- **Description:** Compare cached blocks against the RPC provider via the graphman GraphQL API and **delete cache entries that diverge** (re-fetchable, hence `safe` not `destructive`). Provide EXACTLY ONE method. `by_hash`/`by_number` run synchronously and return per-block results; `by_range` runs **asynchronously** and returns an `execution_id`.
+- **Args:**
+  - `chain` (string, required) — alnum / `_` / `-`, must not start with `-`.
+  - `by_hash` (string, optional) — 32-byte hex block hash.
+  - `by_number` (object, optional) — `{ number (non-negative int, required), delete_duplicates? (boolean) }`.
+  - `by_range` (object, optional) — `{ from? (non-negative int), to? (non-negative int), delete_duplicates? (boolean) }`; refine requires `to >= from`.
+  - **Refine:** EXACTLY ONE of `by_hash`, `by_number`, `by_range`.
+- **Returns:** JSON divergence result `{ diverged, blocks[{ number, outcome, hashes, diff }] }` for sync methods, or `{ execution_id, hint }` for `by_range`. `outcome ∈ {Matched, Diverged, NotFound, DuplicatesDeleted, DuplicatesSkipped}`.
+
+### `graphman_truncate_chain_cache`
+
+- **Permission:** `graphman_destructive`
+- **Description:** IRREVERSIBLE — delete the entire block cache for a chain via the graphman GraphQL API. Use only after confirmed cache corruption.
+- **Args:**
+  - `chain` (string, required).
+  - `confirm` (literal `true`, required).
+- **Returns:** JSON ack.
+
+### `graphman_clear_call_cache`
+
+- **Permission:** `graphman_destructive`
+- **Description:** Remove entries from a chain's `eth_call` cache via the graphman GraphQL API. Requires `confirm=true` AND EXACTLY ONE of three modes. `remove_entire_cache` can significantly reduce indexing performance.
+- **Args:**
+  - `chain` (string, required).
+  - `from` / `to` (numbers, optional) — **range mode**: both required together, `to >= from`.
+  - `remove_entire_cache` (boolean, optional) — **remove-all mode**: `true` wipes the whole call cache.
+  - `ttl_days` (number, optional, positive int) — **stale-eviction mode**: evict entries older than N days.
+  - `max_contracts` (number, optional, positive int) — caps stale-eviction scope; requires `ttl_days`.
+  - `confirm` (literal `true`, required).
+  - **Refine:** EXACTLY ONE mode (range / `remove_entire_cache` / `ttl_days`).
+- **Returns:** JSON union — `{ success }` (Empty) or stale-eviction stats (Stale).
+
+### Intentionally not exposed — `graphman_unused_record` / `graphman_unused_remove`
+
+The graphman server still provides the `unused` record/remove deployment-reaping mutations, but the MCP **deliberately does not surface them as tools**. Deployment deletion goes solely through `graphman_drop_deployment` (`deleteDeployment`), which auto-unassigns and force-deletes the indexed data in one call — making the old "record-unused → remove-unused" garbage-collection sequence redundant. They are not registered, are not callable, and any `ACCESS_OVERRIDES` referencing them are harmless no-ops.
 
 ---
 

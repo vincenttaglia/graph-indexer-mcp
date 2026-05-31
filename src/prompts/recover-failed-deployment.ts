@@ -6,13 +6,14 @@
  * and only invokes destructive graphman tools with explicit operator
  * confirmation.
  *
- * NOTE: the graphman CLI-only tools (rewind, reassign, unassign, drop,
- * unused record/remove, check-blocks, truncate chain cache, clear call cache)
- * are CURRENTLY UNAVAILABLE — the kubectl-exec path was removed and these
- * await a graphman GraphQL reimplementation. Only the GraphQL-backed tools
- * (deployment_info, pause, resume, restart, execution status) work today.
- * The prompt steers recovery toward those and flags the unavailable steps as
- * operator-manual (run `graphman` directly on the graph-node host).
+ * NOTE: all graphman recovery tools (restart, rewind, reassign, unassign,
+ * drop, check-blocks, truncate chain cache, clear call cache) are LIVE MCP
+ * tools backed by the graphman GraphQL API — no kubectl, no host-manual steps.
+ * `graphman_rewind_deployment` and `graphman_check_blocks` (by_range) are async
+ * (poll `graphman_get_execution_status`). `graphman_drop_deployment`
+ * (`deleteDeployment`) auto-unassigns and force-deletes data in one call, so it
+ * is the sole deletion path; the graphman `unused` record/remove flow is
+ * intentionally not exposed.
  *
  * The auto-heal knowledge base is not yet implemented; the prompt notes this
  * future integration point per the design doc but does not reference any tool
@@ -47,7 +48,7 @@ Goal: walk through graphman-based recovery options for deployment \`${deployment
 
 This prompt mixes diagnostic reads with potentially destructive graphman writes. **Always produce a recovery plan first and obtain explicit operator confirmation before invoking any destructive tool.**
 
-> **Tooling note:** only the GraphQL-backed graphman tools are available right now: \`graphman_deployment_info\`, \`graphman_pause_deployment\`, \`graphman_resume_deployment\`, \`graphman_restart_deployment\`, and \`graphman_get_execution_status\`. The CLI-only operations — rewind, reassign, unassign, drop, unused record/remove, check-blocks, truncate chain cache, clear call cache — are **currently unavailable** (the kubectl-exec path was removed; a graphman GraphQL reimplementation is pending). Where a recovery step needs one of those, present it as an **operator-manual step** (the operator runs \`graphman <subcommand>\` directly on the graph-node host) rather than calling a tool.
+> **Tooling note:** all graphman recovery ops are **live MCP tools** backed by the graphman GraphQL API — no kubectl, no host-manual steps: \`graphman_deployment_info\`, \`graphman_pause_deployment\`, \`graphman_resume_deployment\`, \`graphman_restart_deployment\`, \`graphman_get_execution_status\`, \`graphman_rewind_deployment\`, \`graphman_reassign_deployment\`, \`graphman_unassign_deployment\`, \`graphman_drop_deployment\`, \`graphman_check_blocks\`, \`graphman_truncate_chain_cache\`, and \`graphman_clear_call_cache\`. Two are **async** — \`graphman_rewind_deployment\` and \`graphman_check_blocks\` with \`by_range\` return an \`execution_id\`; poll \`graphman_get_execution_status\` until \`SUCCEEDED\`/\`FAILED\`. The destructive ops (rewind, unassign, drop, truncate-chain-cache, clear-call-cache) each require \`confirm: true\` AND explicit operator approval. \`graphman_drop_deployment\` (\`deleteDeployment\`) **auto-unassigns and force-deletes the data in one call** — it is the sole deletion path; the graphman \`unused\` record/remove flow is intentionally not exposed.
 
 ## Optionally — try the composite first
 
@@ -72,33 +73,33 @@ If the deployment is healthy now, abort with a note and recommend \`investigate_
 
 ## Step 2 — Classify the failure for recovery selection
 
-Tools marked **(manual)** are not available as MCP tools right now — the operator runs the corresponding \`graphman\` subcommand directly on the graph-node host.
+All tools below are live MCP tools. Async ops (\`graphman_rewind_deployment\`, \`graphman_check_blocks\` by_range) return an \`execution_id\` to poll with \`graphman_get_execution_status\`. Destructive ops require \`confirm: true\`.
 
 | Symptom                                            | Likely fix                                                      | Tool(s)                                                                |
 |----------------------------------------------------|-----------------------------------------------------------------|------------------------------------------------------------------------|
 | Stuck/crashed worker but no fatalError             | Restart                                                         | \`graphman_restart_deployment\`                                          |
-| Non-deterministic fatalError (RPC reorg, OOM)      | Restart, then if persists: rewind a few blocks                  | \`graphman_restart_deployment\`, then \`graphman rewind\` **(manual)**     |
-| Block cache disagrees with chain head              | Truncate chain cache, then restart                              | \`graphman chain truncate\` **(manual)**, then \`graphman_restart_deployment\` |
-| Bad cached eth_call results                        | Clear call cache, then restart                                  | \`graphman chain call-cache … remove\` **(manual)**, then \`graphman_restart_deployment\` |
-| Deterministic fatalError at known block            | Rewind to block-1, requires fixed subgraph version pre-deployed | \`graphman rewind\` **(manual)**                                          |
-| Unrecoverable / data corruption                    | Drop and resync (data loss)                                     | \`graphman drop\` **(manual)** (last resort, irreversible)                |
+| Non-deterministic fatalError (RPC reorg, OOM)      | Restart, then if persists: rewind a few blocks                  | \`graphman_restart_deployment\`, then \`graphman_rewind_deployment\` (async, confirm) |
+| Block cache disagrees with chain head              | Truncate chain cache, then restart                              | \`graphman_truncate_chain_cache\` (confirm), then \`graphman_restart_deployment\` |
+| Bad cached eth_call results                        | Clear call cache, then restart                                  | \`graphman_clear_call_cache\` (confirm; pick a mode), then \`graphman_restart_deployment\` |
+| Deterministic fatalError at known block            | Rewind to block-1, requires fixed subgraph version pre-deployed | \`graphman_rewind_deployment\` (async, confirm)                          |
+| Unrecoverable / data corruption                    | Drop and resync (data loss)                                     | \`graphman_drop_deployment\` (last resort, irreversible, confirm)        |
 | Active allocation will block rewind                | Close allocation first                                          | \`queue_unallocate\` (then operator must approve agent action)           |
 
-For deterministic failures, run \`graphman chain check-blocks\` **(manual)** on the failure block to confirm whether the local cache disagrees with the canonical chain. If it does, prepend \`graphman chain truncate\` **(manual)** to the recovery plan.
+For deterministic failures, run \`graphman_check_blocks\` (\`by_number\` at the failure block, or \`by_range\` around it — note \`by_range\` is async) to confirm whether the local cache diverges from the canonical chain. It deletes any diverging cache entries it finds (re-fetchable); if it reports divergence, consider \`graphman_truncate_chain_cache\` (confirm) before the rewind.
 
 ## Step 3 — Plan the recovery sequence
 
 Pick the **least destructive** path that addresses the symptom. Order operations from safest to most invasive:
 
 1. \`graphman_pause_deployment\` (safe — stop indexing while we work).
-2. Cache hygiene: \`graphman chain call-cache … remove\` and/or \`graphman chain truncate\` **(manual)** (when block cache disagreement is suspected).
-3. \`graphman rewind\` **(manual)** to a block before the failure (destructive — discards entity-state past the rewind block).
+2. Cache hygiene: \`graphman_clear_call_cache\` and/or \`graphman_truncate_chain_cache\` (both confirm-gated; when block-cache disagreement is suspected — \`graphman_check_blocks\` first to confirm).
+3. \`graphman_rewind_deployment\` (async, confirm) to a block before the failure (destructive — discards entity-state past the rewind block; poll \`graphman_get_execution_status\`).
 4. \`graphman_restart_deployment\` (idempotent).
 5. \`graphman_resume_deployment\` to re-enable indexing.
 
-For non-deterministic failures, often just steps 1 -> 4 -> 5 is enough — and those three are all available as MCP tools.
+For non-deterministic failures, often just steps 1 -> 4 -> 5 is enough.
 
-For drop-and-resync, also queue (all **manual**): \`graphman unassign\`, then \`graphman unused record\`, then \`graphman unused remove\`, and finally \`graphman drop\`. **All four are irreversible — require operator confirmation for each.**
+For drop-and-resync, a single \`graphman_drop_deployment\` call (\`deleteDeployment\`, confirm) **auto-unassigns and force-deletes all indexed data** — you do NOT need to pre-sequence unassign or any "unused" reaping (that flow is not exposed). It is **irreversible**; require explicit operator confirmation. If a \`Qm\` hash matches multiple deployments, the call returns the locators and errors unless you pass \`all=true\` — surface the locators and re-confirm before retrying with \`all=true\`. Resync then proceeds by re-deploying the (fixed) subgraph version.
 
 If the indexer has an active allocation to ${deploymentId} (per \`get_indexer_allocations\`), close it first via \`queue_unallocate\` to avoid POI complications during rewind.
 
@@ -106,7 +107,7 @@ If the indexer has an active allocation to ${deploymentId} (per \`get_indexer_al
 
 Produce a numbered recovery plan with: step #, tool name, exact args, expected effect, reversibility, risk note.
 
-**Stop and ask the operator to confirm.** Note any steps that are irreversible (rewind, drop, unused remove, truncate chain cache).
+**Stop and ask the operator to confirm.** Note any steps that are irreversible (rewind, drop, truncate chain cache) and that they require \`confirm: true\`.
 
 ## Step 5 — Execute (only after explicit confirmation)
 

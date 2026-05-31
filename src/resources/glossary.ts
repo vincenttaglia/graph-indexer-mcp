@@ -259,13 +259,15 @@ live under a \`sgd<N>\` schema. The MCP queries it read-only (via
 
 **graphman**
 The graph-node operator CLI / GraphQL API used for maintenance: pause/resume,
-restart, rewind, reassign, drop, chain cache management, and "unused
-deployment" reaping. The MCP uses graphman's GraphQL API on port 8050. Only the
-GraphQL-backed operations (deployment info, pause, resume, restart, execution
-status) are currently exposed; the CLI-only operations (rewind, reassign,
-unassign, drop, unused record/remove, check-blocks, chain cache) are disabled
-pending a graphman GraphQL reimplementation — the prior \`kubectl exec\`
-fallback was removed because the MCP runs remote from graph-node.
+restart, rewind, reassign, drop, and chain cache management. The MCP speaks
+graphman's GraphQL API on port 8050 over pure HTTP — no \`kubectl exec\`, so the
+server runs remote from graph-node. 12 graphman operations are exposed as tools:
+deployment info, pause, resume, restart, execution status, rewind, reassign,
+unassign, drop, check-blocks, truncate chain cache, and clear call cache.
+Deployment deletion goes solely through \`drop\` (GraphQL \`deleteDeployment\`),
+which auto-unassigns and force-deletes the indexed data in one call; graphman's
+"unused" record/remove reaping flow exists on the server but is intentionally
+NOT exposed because \`deleteDeployment\` makes it redundant.
 
 **Network Subgraph**
 The protocol's on-chain accounting subgraph. Source of truth for indexer

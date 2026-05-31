@@ -70,7 +70,7 @@ Use \`get_deployment_health\` output to bucket the issue:
 
 ## Step 3 — Cross-reference
 
-For \`failed\` cases, use \`rpc_call\` (\`eth_getBlockByNumber\` at the suspected failure block, on the deployment's chain — discover the chain alias via \`list_rpc_chains\`) and compare the canonical block hash returned to graph-node's view and to peer indexers' POIs from \`get_deployment_allocations\`. A mismatch indicates the local block cache diverges from the canonical chain. Note: the actual fix — truncating the chain cache at that block before a rewind can succeed — is an **operator-manual** \`graphman chain truncate\` step on the graph-node host (no MCP tool).
+For \`failed\` cases, use \`rpc_call\` (\`eth_getBlockByNumber\` at the suspected failure block, on the deployment's chain — discover the chain alias via \`list_rpc_chains\`) and compare the canonical block hash returned to graph-node's view and to peer indexers' POIs from \`get_deployment_allocations\`. A mismatch indicates the local block cache diverges from the canonical chain. Note: the actual fix — \`graphman_check_blocks\` to detect/delete diverging cache entries, then \`graphman_truncate_chain_cache\` before a rewind can succeed — is a write op; this read-only prompt does not call it. Recommend \`recover_failed_deployment\` (which owns those live tools) instead.
 
 If the deployment was recently upgraded (compare current deployment_id to historic versions from \`get_all_signalled_deployments\`), suspect a schema-incompatible upgrade.
 
@@ -89,11 +89,11 @@ Produce a markdown report with sections:
    - "wait" (transient, will self-heal),
    - "operator review" (ambiguous, needs human),
    - "invoke \`recover_failed_deployment\` with deployment_id=${deploymentId}" (clear graphman recovery path),
-   - "drop and resync" (data loss — operator-manual \`graphman drop\` on the graph-node host; no MCP tool; irreversible),
+   - "drop and resync" (data loss — \`graphman_drop_deployment\` / \`deleteDeployment\`, which auto-unassigns + force-deletes; irreversible; routed through \`recover_failed_deployment\`, not called from here),
    - "close allocation before epoch flip" (when applicable).
 4. **Risk and reversibility notes** — explicit callout when destructive tools are involved.
 
-**This prompt is read-only.** Do NOT call any mutation tool — the live ones today are \`graphman_pause_deployment\`, \`graphman_resume_deployment\`, \`graphman_restart_deployment\`, \`queue_unallocate\`, and \`set_indexing_rule\` — from this prompt. (The diagnostic tools used above, including \`rpc_call\`, \`list_rpc_chains\`, and \`get_subgraph_manifest\`, are read-only and fine to call.) Operator-manual \`graphman\` subcommands such as rewind, drop, chain truncate, and clear call-cache have no MCP tool and are never invoked from here regardless. Present the diagnosis + plan, then let the operator (or the follow-up prompt) execute.
+**This prompt is read-only.** Do NOT call any mutation tool from this prompt — including the live graphman writes (\`graphman_pause_deployment\`, \`graphman_resume_deployment\`, \`graphman_restart_deployment\`, \`graphman_rewind_deployment\`, \`graphman_reassign_deployment\`, \`graphman_unassign_deployment\`, \`graphman_drop_deployment\`, \`graphman_check_blocks\`, \`graphman_truncate_chain_cache\`, \`graphman_clear_call_cache\`) and the agent writes (\`queue_unallocate\`, \`set_indexing_rule\`). Those graphman recovery tools are all live, but they belong to \`recover_failed_deployment\`, not here. (The diagnostic tools used above, including \`rpc_call\`, \`list_rpc_chains\`, and \`get_subgraph_manifest\`, are read-only and fine to call.) Present the diagnosis + plan, then let the operator (or the follow-up prompt) execute.
 `;
       return {
         description: `Investigate unhealthy deployment ${deploymentId}.`,

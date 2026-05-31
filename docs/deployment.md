@@ -82,6 +82,8 @@ The recommended production pattern. Run the MCP as a pod in the same namespace a
 > **Note:** the MCP no longer needs to `exec` into graph-node. The graphman
 > CLI-fallback path (which used `kubectl exec`) has been removed — the MCP runs
 > remote from graph-node and speaks only the graphman GraphQL API on `:8050`.
+> All 12 graphman tools (including rewind, drop, check-blocks, and the chain
+> cache ops) run over this GraphQL endpoint; no kubectl exec access is required.
 > The old pods/exec Role + RoleBinding manifests are gone; the ServiceAccount
 > remains, used by the HTTP / k8s-rbac authorizer for TokenReview/SAR.
 

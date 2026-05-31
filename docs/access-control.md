@@ -21,13 +21,13 @@ A tool's class is declared at registration via `registerIndexerTool({ ..., permi
 
 | Class | Gates |
 | --- | --- |
-| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `get_subgraph_manifest`, `rpc_call`, `list_rpc_chains`. (`graphman_check_blocks` also maps here but is currently unavailable — see below.) |
+| `read` | All read-only tools — every `get_*` / `*_info` / `run_*` composite, `get_action_queue`, `get_indexing_rules`, `graphman_deployment_info`, `graphman_get_execution_status`, `get_subgraph_manifest`, `rpc_call`, `list_rpc_chains`. (`graphman_check_blocks` was previously `read` but is now `graphman_safe` — it deletes diverging cache entries.) |
 | `agent_queue` | Adds entries to the indexer-agent action queue: `queue_allocate`, `queue_unallocate`, `queue_reallocate`, `set_indexing_rule`, `set_cost_model`. Queued actions still require approval before execution. |
 | `agent_approve` | Approves or cancels queued agent actions: `approve_actions`, `cancel_actions`. Granted only at `full` because approval triggers on-chain transactions. |
-| `graphman_safe` | Non-destructive graphman writes: `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`. (`graphman_reassign_deployment` also maps here but is currently unavailable — see below.) |
-| `graphman_destructive` | Destructive graphman ops. **All tools in this class are currently unavailable** — the kubectl-exec CLI path was removed and they await a graphman GraphQL reimplementation: `graphman_rewind_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache`. The class stays defined so its grants apply automatically once those tools are reimplemented; most will also require an explicit `confirm: true` arg. |
+| `graphman_safe` | Non-destructive graphman writes: `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`, `graphman_reassign_deployment`, and `graphman_check_blocks` (reclassified from `read` — it deletes diverging cache entries, which are re-fetchable). |
+| `graphman_destructive` | Destructive graphman ops — all live as GraphQL tools, each gated by an explicit `confirm: true` arg in addition to the access level: `graphman_rewind_deployment` (async; discards entity state past the target), `graphman_unassign_deployment` (detach, data preserved), `graphman_drop_deployment` (IRREVERSIBLE `deleteDeployment` — the sole deletion path), `graphman_truncate_chain_cache` (wipe block cache), `graphman_clear_call_cache` (`remove_entire_cache` is heavy). Granted at `read_write_destructive` and `full`. |
 
-> **Currently unavailable graphman tools.** The 9 graphman CLI-only operations — `graphman_rewind_deployment`, `graphman_reassign_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_check_blocks`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache` — do not register in the current build (kubectl-exec path removed). Their permission-class mappings above are retained for when they return; ACCESS_OVERRIDES that reference them are harmless no-ops in the meantime.
+> **graphman destructive tools have live tools again.** The 7 formerly CLI-only operations — `graphman_rewind_deployment`, `graphman_reassign_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_check_blocks`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache` — are now registered as pure-GraphQL tools (no kubectl). `graphman_check_blocks` moved `read → graphman_safe`. `graphman_unused_record` / `graphman_unused_remove` are **intentionally not exposed** (deletion goes through `graphman_drop_deployment` / `deleteDeployment`); any `ACCESS_OVERRIDES` that name them are harmless no-ops.
 
 The exact class for any tool is in [tool-catalog.md](tool-catalog.md) under the **Permission** field. Tool descriptions are auto-annotated with `[Requires permission: <class>]` so clients can surface it.
 
@@ -74,7 +74,7 @@ ACCESS_OVERRIDES_ALLOW=
 Result:
 
 - `graphman_drop_deployment` → denied (rule 1; deny wins over the level grant).
-- `graphman_unused_remove`, `graphman_rewind_deployment`, etc. → allowed (level grants `graphman_destructive`).
+- `graphman_rewind_deployment`, `graphman_unassign_deployment`, `graphman_truncate_chain_cache`, etc. → allowed (level grants `graphman_destructive`).
 - `approve_actions`, `cancel_actions` → allowed (level grants `agent_approve`).
 - All reads → allowed.
 

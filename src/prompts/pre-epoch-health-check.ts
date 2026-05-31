@@ -42,10 +42,10 @@ Call \`run_health_check\` (optional args: \`indexer_address\`, \`urgency_thresho
 - \`risk\` — per-allocation RiskAssessment with level ('low' | 'medium' | 'high' | 'critical') and reasons.
 - \`closePlan\` — closable AND worth-closing-now entries (allocationId, deploymentId, path, poiBlock?, reason). This is the operator-facing table.
 - \`blockedFromClose\` — unhealthy/failed allocations that can't be safely closed this epoch (surface as operator-review table).
-- \`recoveryPlan\` — graphman recovery recommendations for failed deployments (type: 'restart' | 'rewind' | 'check_blocks' | 'clear_call_cache' | 'manual_review', with deploymentId, rationale, args). Of these, only \`restart\` has a live MCP tool (\`graphman_restart_deployment\`); \`rewind\`, \`check_blocks\`, and \`clear_call_cache\` recoveries are **currently operator-manual** \`graphman\` subcommands on the graph-node host (the kubectl-exec path was removed). Surface them in the plan as manual steps, not as tool calls.
+- \`recoveryPlan\` — graphman recovery recommendations for failed deployments (type: 'restart' | 'rewind' | 'check_blocks' | 'clear_call_cache' | 'manual_review', with deploymentId, rationale, args). Each non-\`manual_review\` type maps to a live MCP tool: \`restart\` -> \`graphman_restart_deployment\`, \`rewind\` -> \`graphman_rewind_deployment\` (async, confirm), \`check_blocks\` -> \`graphman_check_blocks\`, \`clear_call_cache\` -> \`graphman_clear_call_cache\` (confirm). These are recovery actions, not closability — surface them but do NOT execute them from this prompt; route them to \`recover_failed_deployment\` after the close work.
 - \`warnings\` and \`errors\` — surface prominently.
 
-Present \`closePlan\` and \`blockedFromClose\` as markdown tables and summarize timing + counts. **STOP HERE. Wait for explicit operator approval before executing any \`queue_unallocate\` for closePlan entries, OR any recovery from recoveryPlan** — noting that only \`restart\` recoveries map to a live tool (\`graphman_restart_deployment\`); \`rewind\` / \`check_blocks\` / \`clear_call_cache\` recoveries are operator-manual \`graphman\` subcommands on the host, not tool calls. \`approve_actions\` is always operator-gated.
+Present \`closePlan\` and \`blockedFromClose\` as markdown tables and summarize timing + counts. **STOP HERE. Wait for explicit operator approval before executing any \`queue_unallocate\` for closePlan entries, OR any recovery from recoveryPlan** — all \`recoveryPlan\` types map to live graphman tools (\`graphman_restart_deployment\`, \`graphman_rewind_deployment\`, \`graphman_check_blocks\`, \`graphman_clear_call_cache\`), but recovery belongs to \`recover_failed_deployment\`, not this close-focused prompt; surface it and hand off. \`approve_actions\` is always operator-gated.
 
 The composite is plan-only; this prompt still walks the operator through execution after approval. If the composite returns blocking errors, or you need to debug an individual classification, fall back to the ALTERNATIVE PATH below.
 
@@ -107,7 +107,7 @@ For each closable allocation, draft a row in the close plan with deployment id, 
 
 For Path A closables flagged as "healthy but stale RPC", use \`rpc_call\` (\`eth_blockNumber\` on the deployment's chain — discover aliases via \`list_rpc_chains\`) to get the true chain head and compare it against graph-node's reported head, before deciding whether to include them in the close plan.
 
-For post-close failed deployments, recommend (but do NOT auto-invoke) the \`recover_failed_deployment\` prompt for follow-up. Of the graphman recovery steps, only \`graphman_restart_deployment\` is a live MCP tool; \`graphman rewind\` and \`graphman clear call-cache\` are operator-manual subcommands on the graph-node host.
+For post-close failed deployments, recommend (but do NOT auto-invoke) the \`recover_failed_deployment\` prompt for follow-up. All graphman recovery steps it uses (\`graphman_restart_deployment\`, \`graphman_rewind_deployment\`, \`graphman_check_blocks\`, \`graphman_clear_call_cache\`) are live MCP tools over the graphman GraphQL API.
 
 ## Step 6 — Output the plan and STOP
 

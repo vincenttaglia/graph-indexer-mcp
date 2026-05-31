@@ -47,9 +47,9 @@ Likely causes:
 
 Each tool returns a JSON error wrapper preserving the underlying message — read it for the specific endpoint.
 
-### "graphman CLI tool isn't listed / `Unknown tool`"
+### "graphman tool isn't listed / `Unknown tool`"
 
-The 9 graphman CLI-only operations (`graphman_rewind_deployment`, `graphman_reassign_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_unused_record`, `graphman_unused_remove`, `graphman_check_blocks`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache`) no longer register. They were backed only by `graphman` over `kubectl exec`, which has been removed because the MCP runs remote from graph-node. Run the equivalent `graphman` subcommand directly on the graph-node host until they are reimplemented against the graphman GraphQL API. The 5 GraphQL-backed tools (`graphman_deployment_info`, `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`, `graphman_get_execution_status`) are unaffected.
+12 graphman tools register today, all over the graphman GraphQL API (`graphman_deployment_info`, `graphman_pause_deployment`, `graphman_resume_deployment`, `graphman_restart_deployment`, `graphman_get_execution_status`, `graphman_rewind_deployment`, `graphman_reassign_deployment`, `graphman_unassign_deployment`, `graphman_drop_deployment`, `graphman_check_blocks`, `graphman_truncate_chain_cache`, `graphman_clear_call_cache`). If a destructive one (rewind, drop, unassign, truncate-chain-cache, clear-call-cache) appears absent, it is gated by access control, not unregistered — see "Tool denied by access control" below and raise `ACCESS_LEVEL` (or add an `ACCESS_OVERRIDES_ALLOW` entry). `graphman_unused_record` / `graphman_unused_remove` are **intentionally not exposed**: deployment deletion goes solely through `graphman_drop_deployment` (GraphQL `deleteDeployment`), which auto-unassigns and force-deletes the data, making the unused record/remove flow redundant. The old `kubectl exec` CLI fallback stays removed; these tools need no kubectl access — only a graph-node build whose graphman GraphQL server exposes these mutations (see [tool-catalog.md](tool-catalog.md)). Older graph-node builds return a GraphQL error surfaced as `isError`.
 
 ### "Postgres tools return 'Postgres not configured — set GRAPH_NODE_POSTGRES_URL'"
 
@@ -143,9 +143,9 @@ Note: `pg` does not natively observe `AbortSignal` for in-flight queries (see TO
 
 ## graphman edge cases
 
-### "A graphman CLI tool (`clear_call_cache`, `check_blocks`, `rewind`, `drop`, …) is missing"
+### "A graphman tool (`clear_call_cache`, `check_blocks`, `rewind`, `drop`, …) is missing"
 
-These 9 graphman operations were CLI-only and ran over `kubectl exec`, which has been removed (the MCP runs remote from graph-node). They no longer register; run the equivalent `graphman` subcommand directly on the graph-node host until they are reimplemented against the graphman GraphQL API. See the "Disabled — pending graphman GraphQL API" note in [tool-catalog.md](tool-catalog.md). The 5 GraphQL-backed graphman tools are unaffected.
+These operations are now live as GraphQL-backed tools (`graphman_clear_call_cache`, `graphman_check_blocks`, `graphman_rewind_deployment`, `graphman_drop_deployment`, `graphman_reassign_deployment`, `graphman_unassign_deployment`, `graphman_truncate_chain_cache`) — no kubectl, no host-side `graphman` invocation. The `kubectl exec` CLI fallback stays removed; the MCP reaches them over the graphman GraphQL API on `GRAPHMAN_API_URL`. If one looks absent: (1) the destructive ones are access-gated — check `ACCESS_LEVEL` / `ACCESS_OVERRIDES_DENY` (see "Tool denied by access control"); (2) calls fail with an `isError` GraphQL error if graph-node is too old to expose these mutations. `graphman_unused_record` / `graphman_unused_remove` are deliberately not exposed — delete via `graphman_drop_deployment` (`deleteDeployment`) instead, which auto-unassigns and force-deletes. See the Graphman section in [tool-catalog.md](tool-catalog.md).
 
 ---
 
