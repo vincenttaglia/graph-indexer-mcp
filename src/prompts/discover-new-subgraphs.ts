@@ -42,7 +42,7 @@ Call \`run_discovery\` with the required arg:
 
 Optional args: \`indexer_address\`, \`max_candidates\` (default 10, max 500 — pass ${maxCandidates} for this run), \`min_signal_grt\`.
 
-**Read-path note:** discovery analysis runs entirely against \`network-subgraph\`, \`graph-node\` (which now exposes \`paused\` and \`node\` natively on \`indexingStatuses\`), and \`qos-subgraph\`. A configured graphman API is needed only when *executing* the resulting cleanup plan (pause / unassign / unused_remove / etc.), not for the analysis itself.
+**Read-path note:** discovery analysis runs entirely against \`network-subgraph\`, \`graph-node\` (which now exposes \`paused\` and \`node\` natively on \`indexingStatuses\`), and \`qos-subgraph\`. A configured graphman API is needed only when *executing* the resulting cleanup plan (pause / drop / etc.), not for the analysis itself.
 
 It returns a \`DiscoveryResult\` with:
 
