@@ -179,7 +179,7 @@ const clearCallCacheShape = {
   to: z.coerce.number().int().nonnegative().optional(),
   remove_entire_cache: z.boolean().optional(),
   ttl_days: z.coerce.number().int().positive().optional(),
-  max_contracts: z.coerce.number().int().positive().optional(),
+  max_contracts: z.coerce.number().int().nonnegative().optional(),
   confirm: z.literal(true),
 };
 const clearCallCacheRefined = z
