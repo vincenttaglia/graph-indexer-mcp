@@ -193,3 +193,93 @@ describe('get_indexing_statuses: no-filter shapes resolve to "all"', () => {
     assert.equal((payload.statuses as unknown[]).length, 2);
   });
 });
+
+describe('get_indexing_statuses: health_filter', () => {
+  beforeEach(() => resetAccessControl());
+  afterEach(() => resetAccessControl());
+
+  // A mixed-health fleet to filter against.
+  const mixedFleet = (): SubgraphIndexingStatus[] => [
+    { subgraph: 'QmHealthy', health: 'healthy' } as SubgraphIndexingStatus,
+    { subgraph: 'QmUnhealthy', health: 'unhealthy' } as SubgraphIndexingStatus,
+    { subgraph: 'QmFailed1', health: 'failed' } as SubgraphIndexingStatus,
+    { subgraph: 'QmFailed2', health: 'failed' } as SubgraphIndexingStatus,
+  ];
+
+  it('["failed"] returns only failed deployments and echoes the filter', async () => {
+    const { server } = setup(mixedFleet());
+    const result = await invokeTool(server, 'get_indexing_statuses', {
+      health_filter: ['failed'],
+    });
+    const { isError, payload } = parseResult(result);
+    assert.equal(isError, undefined);
+    assert.equal(payload.count, 2);
+    assert.deepEqual(payload.health_filter, ['failed']);
+    const subgraphs = (payload.statuses as Array<{ subgraph: string }>).map(
+      (s) => s.subgraph,
+    );
+    assert.deepEqual(subgraphs.sort(), ['QmFailed1', 'QmFailed2']);
+  });
+
+  it('combines multiple states (["failed","unhealthy"])', async () => {
+    const { server } = setup(mixedFleet());
+    const result = await invokeTool(server, 'get_indexing_statuses', {
+      health_filter: ['failed', 'unhealthy'],
+    });
+    const { payload } = parseResult(result);
+    assert.equal(payload.count, 3);
+  });
+
+  it('composes with deployment_ids (filter still applied to the fetched set)', async () => {
+    // The fake ignores the id filter and returns the full fleet; the health
+    // filter must still narrow that result. This checks the handler applies
+    // health filtering on whatever the client returns.
+    const { server, client } = setup(mixedFleet());
+    const result = await invokeTool(server, 'get_indexing_statuses', {
+      deployment_ids: [QM_ID],
+      health_filter: ['failed'],
+    });
+    assert.deepEqual(client.calls[0], [QM_ID]);
+    const { payload } = parseResult(result);
+    assert.equal(payload.count, 2);
+  });
+
+  // Empty / null / all-null health_filter shapes → no filtering (all states),
+  // mirroring the deployment_ids host-compat handling. No `health_filter` key
+  // should appear in the response when no filter is active.
+  const noHealthFilterCases: Array<{
+    label: string;
+    args: Record<string, unknown>;
+  }> = [
+    { label: 'omitted', args: {} },
+    { label: 'null', args: { health_filter: null } },
+    { label: 'empty array', args: { health_filter: [] } },
+    { label: '[null]', args: { health_filter: [null] } },
+  ];
+
+  for (const { label, args } of noHealthFilterCases) {
+    it(`${label} → returns every health state, no health_filter echo`, async () => {
+      const { server } = setup(mixedFleet());
+      const result = await invokeTool(server, 'get_indexing_statuses', args);
+      const { isError, payload } = parseResult(result);
+      assert.equal(isError, undefined, 'must not be a tool error');
+      assert.equal(payload.count, 4);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(payload, 'health_filter'),
+        false,
+        'no filter active → no health_filter key',
+      );
+    });
+  }
+
+  it('rejects an invalid health value', async () => {
+    const { server } = setup(mixedFleet());
+    // 'degraded' is not a valid graph-node health state — the Zod enum must
+    // reject it at validation time (mirrors how a host payload would fail).
+    assert.throws(() =>
+      z
+        .object(server.tools.get('get_indexing_statuses')!.inputSchema!)
+        .parse({ health_filter: ['degraded'] }),
+    );
+  });
+});

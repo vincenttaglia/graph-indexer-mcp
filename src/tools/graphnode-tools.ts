@@ -13,6 +13,10 @@ const deploymentIdSchema = z
   .min(1, 'deployment_id is required')
   .describe('Subgraph deployment IPFS hash (Qm...).');
 
+// graph-node's `health` enum. Mirrors SubgraphIndexingStatus['health'] in
+// src/types/graphnode.ts — keep in lockstep.
+const healthValueSchema = z.enum(['healthy', 'unhealthy', 'failed']);
+
 /**
  * Register Graph Node status MCP tools.
  *
@@ -39,11 +43,13 @@ export function registerGraphNodeTools(
     permissionClass: 'read',
     description:
       'Return indexing health and sync progress for subgraph deployments on graph-node. ' +
-      'By default returns EVERY deployment graph-node is indexing — leave `deployment_ids` ' +
-      'unset for that. To narrow to specific deployments, pass their IPFS hashes (Qm… or ' +
-      '0x… bytes32) in `deployment_ids`. ' +
+      'By default returns EVERY deployment graph-node is indexing — to get that, omit ' +
+      '`deployment_ids` or pass null / an empty array (`[]`). To narrow to specific ' +
+      'deployments, pass their IPFS hashes (Qm… or 0x… bytes32) in `deployment_ids`. ' +
       'Each entry includes health (healthy/unhealthy/failed), sync state, per-chain block ' +
-      'progress, fatal/non-fatal errors, and entity count.',
+      'progress, fatal/non-fatal errors, and entity count. ' +
+      'Pass `health_filter` to return only deployments in those health states — e.g. ' +
+      '`["failed"]` for every failed subgraph; omit it or pass null / `[]` for all states.',
     inputSchema: {
       // Accept the full range of "no filter" shapes some MCP hosts emit when
       // they force every parameter to be present: `null`, `[null]`, `[]`, or a
@@ -55,7 +61,19 @@ export function registerGraphNodeTools(
         .nullable()
         .optional()
         .describe(
-          'Deployment IPFS hashes (Qm… or 0x… bytes32) to narrow the results to. Leave unset to return every deployment graph-node is indexing; null or an empty array are also treated as "all".',
+          'Deployment IPFS hashes (Qm… or 0x… bytes32) to narrow the results to. To return every deployment graph-node is indexing, omit this field or pass null or an empty array ([]) — all three mean "all".',
+        ),
+      // Optional client-side filter by health state. graph-node's GraphQL has
+      // no server-side health filter, so the handler fetches all matching
+      // deployments and keeps only those whose health is in this set. Nullable
+      // element + nullable array for the same host-compat reasons as above;
+      // null/empty/all-null collapses to "no health filter".
+      health_filter: z
+        .array(healthValueSchema.nullable())
+        .nullable()
+        .optional()
+        .describe(
+          'Health states to keep, e.g. ["failed"] for all failed subgraphs, or ["failed","unhealthy"] for anything degraded. To return every health state, omit this field or pass null or an empty array ([]).',
         ),
     },
     handler: async (args, extra) => {
@@ -69,11 +87,33 @@ export function registerGraphNodeTools(
         ids.length > 0 ? ids : undefined,
         { signal: extra.signal },
       );
+
+      // Apply the optional health filter client-side (graph-node can't do it
+      // server-side). Strip null elements the same way as deployment_ids; an
+      // empty/all-null set means "no filter".
+      const healthStates = (args.health_filter ?? []).filter(
+        (h): h is z.infer<typeof healthValueSchema> => typeof h === 'string',
+      );
+      const filtered =
+        healthStates.length > 0
+          ? statuses.filter((s) => healthStates.includes(s.health))
+          : statuses;
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ count: statuses.length, statuses }, null, 2),
+            text: JSON.stringify(
+              {
+                count: filtered.length,
+                ...(healthStates.length > 0
+                  ? { health_filter: healthStates }
+                  : {}),
+                statuses: filtered,
+              },
+              null,
+              2,
+            ),
           },
         ],
       };
