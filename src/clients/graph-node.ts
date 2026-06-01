@@ -24,7 +24,8 @@ export interface GraphNodeCallOpts {
 export interface GraphNodeClient {
   /**
    * Fetch indexing status for the supplied deployments, or for every
-   * deployment the node is syncing when `deploymentIds` is omitted/empty.
+   * deployment the node is syncing when `deploymentIds` is omitted. An
+   * explicit empty array means "no deployments requested" and returns `[]`.
    */
   getIndexingStatuses(
     deploymentIds?: string[],

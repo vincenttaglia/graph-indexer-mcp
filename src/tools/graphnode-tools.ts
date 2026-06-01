@@ -39,7 +39,8 @@ export function registerGraphNodeTools(
     permissionClass: 'read',
     description:
       'Return indexing health and sync progress for deployments tracked by graph-node. ' +
-      'Omit `deployment_ids` to fetch every deployment the node is syncing. ' +
+      'Omit `deployment_ids` to fetch every deployment the node is syncing; an explicit ' +
+      'empty array returns no deployments. ' +
       'Each entry includes health (healthy/unhealthy/failed), sync state, per-chain block ' +
       'progress, fatal/non-fatal errors, and entity count.',
     inputSchema: {
@@ -47,7 +48,7 @@ export function registerGraphNodeTools(
         .array(deploymentIdSchema)
         .optional()
         .describe(
-          'Optional list of deployment IPFS hashes to filter by. Omit or pass an empty array to return every deployment.',
+          'Optional list of deployment IPFS hashes to filter by. Omit to return every deployment; an explicit empty array returns no deployments.',
         ),
     },
     handler: async (args, extra) => {
