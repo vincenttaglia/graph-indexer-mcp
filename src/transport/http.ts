@@ -65,9 +65,10 @@ function writeJson(
  *
  * Health endpoints:
  *   - `GET /healthz` — liveness: 200 as soon as the process is up.
- *   - `GET /readyz`  — readiness: 200 only once `server.connect()` has succeeded
- *     for at least one transport path, else 503. (In k8s-rbac mode the
- *     authorizer's SAR self-check has already run in index.ts before we bind.)
+ *   - `GET /readyz`  — readiness: 200 once the HTTP listener is bound (the
+ *     server can genuinely accept an `initialize`), else 503. We do NOT gate on
+ *     a session having already connected. (In k8s-rbac mode the authorizer's SAR
+ *     self-check has already run in index.ts before we bind.)
  */
 export async function startHttpTransport(
   server: McpServer,
@@ -76,9 +77,9 @@ export async function startHttpTransport(
   // Active sessions, keyed by the SDK-generated session id.
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
-  // Readiness flips true after the first successful server.connect(). Because the
-  // McpServer can only be connected to a single transport at a time in this SDK,
-  // we connect lazily per-session; the first successful connect marks us ready.
+  // Readiness flips true once the HTTP listener is bound (see below). At that
+  // point the server can accept an `initialize` POST, which is what readiness
+  // means — we deliberately do NOT wait for a session to connect first.
   let ready = false;
 
   const handleMcp = async (
@@ -128,7 +129,6 @@ export async function startHttpTransport(
       // Connect this transport to the shared McpServer. The SDK supports
       // multiple concurrent StreamableHTTP transports bound to one server.
       await server.connect(transport);
-      ready = true;
     }
 
     await transport.handleRequest(req, res);
@@ -178,6 +178,7 @@ export async function startHttpTransport(
     httpServer.once('error', onError);
     httpServer.listen(config.httpPort, config.httpHost, () => {
       httpServer.removeListener('error', onError);
+      ready = true;
       resolve();
     });
   });
