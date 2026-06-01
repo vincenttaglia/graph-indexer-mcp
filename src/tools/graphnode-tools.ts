@@ -38,24 +38,37 @@ export function registerGraphNodeTools(
     name: 'get_indexing_statuses',
     permissionClass: 'read',
     description:
-      'Return indexing health and sync progress for deployments tracked by graph-node. ' +
-      'Omit `deployment_ids` to fetch every deployment the node is syncing; an explicit ' +
-      'empty array returns no deployments. ' +
+      'Return indexing health and sync progress for subgraph deployments on graph-node. ' +
+      'By default returns EVERY deployment graph-node is indexing — leave `deployment_ids` ' +
+      'unset for that. To narrow to specific deployments, pass their IPFS hashes (Qm… or ' +
+      '0x… bytes32) in `deployment_ids`. ' +
       'Each entry includes health (healthy/unhealthy/failed), sync state, per-chain block ' +
       'progress, fatal/non-fatal errors, and entity count.',
     inputSchema: {
+      // Accept the full range of "no filter" shapes some MCP hosts emit when
+      // they force every parameter to be present: `null`, `[null]`, `[]`, or a
+      // mixed array. `.nullable()` admits a bare null; the element schema is
+      // nullable so `[null]` passes validation. The handler below strips nulls
+      // and collapses any empty/all-null result to "every deployment".
       deployment_ids: z
-        .array(deploymentIdSchema)
+        .array(deploymentIdSchema.nullable())
+        .nullable()
         .optional()
         .describe(
-          'Optional list of deployment IPFS hashes to filter by. Omit to return every deployment; an explicit empty array returns no deployments.',
+          'Deployment IPFS hashes (Qm… or 0x… bytes32) to narrow the results to. Leave unset to return every deployment graph-node is indexing; null or an empty array are also treated as "all".',
         ),
     },
     handler: async (args, extra) => {
       extra.signal.throwIfAborted();
-      const statuses = await client.getIndexingStatuses(args.deployment_ids, {
-        signal: extra.signal,
-      });
+      // Normalize the "no filter" shapes to undefined so the client takes its
+      // "all deployments" path. A non-empty list of real hashes filters.
+      const ids = (args.deployment_ids ?? []).filter(
+        (id): id is string => typeof id === 'string',
+      );
+      const statuses = await client.getIndexingStatuses(
+        ids.length > 0 ? ids : undefined,
+        { signal: extra.signal },
+      );
       return {
         content: [
           {

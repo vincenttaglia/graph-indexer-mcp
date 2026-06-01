@@ -24,8 +24,7 @@ export interface GraphNodeCallOpts {
 export interface GraphNodeClient {
   /**
    * Fetch indexing status for the supplied deployments, or for every
-   * deployment the node is syncing when `deploymentIds` is omitted. An
-   * explicit empty array means "no deployments requested" and returns `[]`.
+   * deployment the node is syncing when `deploymentIds` is omitted or empty.
    */
   getIndexingStatuses(
     deploymentIds?: string[],
@@ -265,15 +264,12 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
     deploymentIds?: string[],
     callOpts?: GraphNodeCallOpts,
   ): Promise<SubgraphIndexingStatus[]> {
-    // Short-circuit: an explicit empty filter means "no deployments asked
-    // for", so return [] without an upstream call. graph-node's GraphQL
-    // would treat `subgraphs: []` ambiguously (some versions return "all",
-    // mirroring `null`); short-circuiting also keeps the cache key for
-    // `[]` distinct from `undefined` ('all'), since previously both
-    // collided on key 'all' with identical payloads.
-    if (deploymentIds !== undefined && deploymentIds.length === 0) {
-      return [];
-    }
+    // An empty filter means "no specific deployments requested", which we
+    // treat as "all" — identical to omitting the argument. (Some MCP hosts
+    // force the parameter present and send `[]`/`[null]` to mean "no filter";
+    // collapsing empty → all keeps that intent working end to end.) graph-node
+    // also treats `subgraphs: []` ambiguously across versions, so we route the
+    // empty case through the no-argument "all" query rather than passing `[]`.
 
     // Normalize at the boundary: graph-node's GraphQL indexingStatuses query
     // only recognizes CIDv0 (`Qm...`) deployment IDs, but callers may pass
@@ -312,9 +308,9 @@ export function createGraphNodeClient(opts: GraphNodeClientOptions): GraphNodeCl
         // Route to one of two distinct GraphQL operations. graph-node panics
         // ("entered unreachable code") when `subgraphs: null` is passed
         // explicitly, so the "all deployments" path must omit the argument
-        // entirely via a separate query with no variables. The `[]` input is
-        // short-circuited above, so by here `normalizedIds` is either
-        // undefined (→ all) or non-empty (→ by-ids).
+        // entirely via a separate query with no variables. By here
+        // `normalizedIds` is either undefined/empty (→ all, no-arg query) or a
+        // non-empty list (→ by-ids query).
         const data =
           normalizedIds && normalizedIds.length > 0
             ? await gql.request<IndexingStatusesResponse>(
